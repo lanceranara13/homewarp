@@ -5,9 +5,11 @@
 Host game servers on your own PC at home. Friends join through a small VPS, so your
 home address stays hidden and your router needs no setup.
 
-> **Status: planning.** No product code yet. The tunnel design has been proven against a
-> real VPS — player addresses arrive intact, with no added latency. The plan is in
-> [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
+> **Status: early build, not usable yet.** The tunnel design is proven against a real VPS
+> and a real Docker daemon: player addresses arrive intact, with no added latency. An
+> unmodified Paper egg installs, starts and stops. The panel has accounts, sign-in and an
+> empty Servers page; it cannot create a server yet. The plan is in [PLAN.md](PLAN.md)
+> and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works
 

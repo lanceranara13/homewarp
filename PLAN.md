@@ -1,8 +1,9 @@
 # Homewarp — project plan
 
-> Name decided 2026-10-05 (see §2). Status: the owner's choices are recorded (§13) and the
-> tunnel has been proven against a real VPS (§10, *Tunnel spike on the real VPS*). No
-> product code yet.
+> Name decided 2026-10-05 (see §2). Status: Phase 0 and Phase 1 are done (§11). The tunnel
+> is proven on a real VPS and against a real Docker daemon, the Paper egg runs end to end,
+> and Core's skeleton — accounts, sessions, first-run setup, the panel's shell — is staged
+> on the homelab at port 3600. How the panel is reached is being reconsidered (§13).
 
 ## 1. What it is
 
@@ -501,8 +502,13 @@ tiers at about $2 a month (IONOS) or about $22 a year (RackNerd, 3 TB of traffic
 Confirmed by use in Phase 0 (2026-10-05, Rust 1.99): `bollard` 0.21 with only its
 local-socket transport, `cap-std` 4, and `serde-saphyr` 1 for YAML eggs (the long-standing
 `serde_yaml` is deprecated; eggs are untrusted input, so the parser should be a maintained
-one). Phase 1 confirms the rest of the Core stack. Still unused, so still to confirm: the
-WireGuard, nftables, ACME and SFTP crates.
+one). Phase 1 added `axum` 0.8, `sqlx` 0.9, `argon2` 0.6, `utoipa` 6 with `utoipa-axum`
+0.3, and `rust-embed` 8. Still unused, so still to confirm: the WireGuard, nftables, ACME
+and SFTP crates.
+
+The front end is React 19.3, Vite 8, Tailwind 4.3, TanStack Router and Query, Radix and
+ESLint 10. **TypeScript is held at 5.9.** TypeScript 7 is current, but `typescript-eslint`
+(`<6.1.0`) and `openapi-typescript` (`^5`) do not accept it yet; lift the pin when both do.
 
 ## 9. Repository layout
 
@@ -612,9 +618,11 @@ What this does and does not show:
 |---|---|
 | `check` | `cargo check` + `clippy` + `cargo fmt --check` in the builder container (named volumes for registry and `target`) |
 | `test` | unit tests (`cargo nextest`) + `tsc --noEmit` + ESLint in a Node container |
+| `gen` | rewrite `web/openapi.json` from the handlers; a test fails while that copy is stale |
+| `npm …` | npm in `web/`, in a Node container; `package.json` and its lock come back |
 | `lab` | full end-to-end suite in the simulated network below |
 | `paper` | the Phase 0 runtime spike: the Paper egg end to end on the homelab's Docker |
-| `deploy` | build the image, `docker compose up -d`, check `:3600` answers |
+| `deploy` | build the web interface, then Core with it inside, then the image; `docker compose up -d`; check `:3600` answers |
 
 The tree goes to `/home/lance/homewarp/src`, replaced whole on every sync; `data/` beside
 it belongs to the server. The builder runs as the homelab user, capped at 1.5 CPUs, and
@@ -628,11 +636,19 @@ Measured on 2026-10-05 (Rust 1.99.0, 2 vCPU):
 | `cargo check`, cold, Core with axum alone | 19 s |
 | `cargo check`, cold, adding the template and runtime crates (bollard, cap-std, serde-saphyr) | 32 s |
 | Unit tests, first build | 38 s |
-| Disk: builder image | 1.34 GB |
-| Disk: crate registry + `target` at the first measurement | 58 MB + 133 MB |
+| `cargo check`, cold, Core's whole Phase 1 stack (sqlx with bundled SQLite, argon2, utoipa) | 42 s |
+| Release build of Core, cold / after a one-file change | 2 min 33 s / 18 s |
+| Web build (2141 modules) | under 1 s |
+| `deploy`, cold, start to answering on `:3600` | 2 min 46 s |
+| Core as deployed | 6.7 MB binary, 1.4 MB resident when idle |
 
-Cold builds are far below the "several minutes" feared for 2 vCPUs. Release builds are
-still to be measured.
+Cold builds are well below the "several minutes" feared for 2 vCPUs.
+
+Disk after Phase 1, against the ~8 GB budget: caches 3.9 GB (`target` 2.7 GB, crate
+registry 0.5 GB, `node_modules` and npm's cache 0.7 GB) and images 3.5 GB (builder 1.34 GB,
+`yolks:java_25` 0.78 GB, the two lab images 0.5 GB each, Node 0.24 GB, Core 0.12 GB). That
+is 7.4 GB: the budget is spent, and the homelab is at 91 % with 22 GB free. `dev.sh prune`
+drops `target`; the open question about disk at home (§13) is now pressing.
 
 ### The lab: a VPS without a VPS
 
@@ -739,11 +755,28 @@ Each phase ends with something that works on the homelab.
 - *Left for Phase 3, with the owner's go-ahead:* Core setting up the tunnel from inside a
   container in the homelab's own network namespace, where the other services live.
 
-**Phase 1 — Core skeleton**
+**Phase 1 — Core skeleton** — *done 2026-10-06*
 - Workspace, config, SQLite + migrations, first-run setup code, login, sessions.
 - OpenAPI + generated client; embedded UI shell (login, empty Servers page), with the
   donation heart in its corner from the first build.
 - *Exit:* `http://192.168.1.250:3600` shows the panel; admin account can be created.
+  *Met.* Driven in a browser against the deployment: a wrong setup code is refused, the
+  right one creates the account, sign-out and sign-in work, a signed-in visit to `/setup`
+  goes to the panel, and the shell was looked at 1250, 900 and 390 px wide in the dark
+  theme and at 1250 px in the light one. A page load makes one API request. The test
+  account was then deleted: the first account is the owner's to create, with the code in
+  `docker logs homewarp`.
+- What it is: one 6.7 MB binary and one SQLite file. Argon2id passwords; the browser
+  holds a random token in an `HttpOnly`, `SameSite=Strict` cookie and the database holds
+  only its hash; the first account must quote a code that Core writes to its log. The
+  page allows scripts, styles and fonts from its own origin and nowhere else.
+- Found by that policy: the bundler had inlined one small font as a `data:` URL, which
+  the policy blocked. Inlining is now off.
+- **Not in it, by plan (Phase 5):** login rate limiting, TOTP, TLS and the `Secure`
+  cookie flag. Fine on the home network; all four are needed before the panel faces the
+  internet (§13).
+- The donation popover has no links yet, and says so. The four destinations besides
+  Servers are shown dimmed and lead nowhere.
 
 **Phase 2 — Servers**
 - Template import (all egg formats), validation rules, config-file parsers.
@@ -820,6 +853,27 @@ Still open:
    Neither blocks the lab or a first Gate.
 4. **Tailscale test** — put the homelab on the tailnet, or let the VPS accept the subnet
    router's routes, so the external-link mode can be tried on the real machines.
+5. **The panel online, at a domain, through the VPS** — raised by the owner on 2026-10-06,
+   in their words: "i think i want it to be hosted to the VPS so that it can be accessable
+   online using maybe reverse proxy and connect it to domain". Not decided. If confirmed
+   it replaces "home network only" above. What has to be settled:
+   - *Where the panel runs.* It can stay at home and be reached through the VPS, which
+     keeps §5.1 intact. Moving it onto the VPS would put the keys to the home machine's
+     Docker on the exposed box and bring back the panel-and-daemon split this design
+     removed.
+   - *Who ends TLS.* A reverse proxy on the VPS (its nginx already holds 80 and 443)
+     reads everything, passwords and session cookies included, so a taken-over VPS
+     becomes a taken-over panel: the first row of §6 stops being true. Passing TLS
+     through untouched keeps it true (§5.9), but on this VPS that means putting every
+     existing site behind an SNI router.
+   - *What must exist first.* A link from the VPS to home (the Gate of Phase 3, or
+     something hand-made until then), a rule at home letting that link reach the panel's
+     port and nothing else, and the Phase 5 items listed under Phase 1 in §11.
+   - *The VPS itself* still takes root logins by password (item 3). That matters more
+     once it stands in front of the panel.
+6. **Core's privileges on the homelab** — setting up the tunnel from a container in the
+   host's own network namespace, and mounting the Docker socket, both need the owner's
+   go-ahead before Phases 2 and 3 deploy there.
 
 ## 14. Earning from it (explored 2026-10-05)
 
