@@ -1,0 +1,56 @@
+# The lab's parties (see run.sh). Both networks are internal: nothing here can
+# reach the homelab's LAN or the real internet, and nothing outside can reach in.
+name: homewarp-lab
+
+x-node: &node
+  image: homewarp-lab-node
+  pull_policy: never
+  init: true
+  stop_grace_period: 1s
+
+services:
+  # The simulated VPS, held to the smallest tier PLAN.md §7.1 supports.
+  gate:
+    <<: *node
+    build: { context: ., dockerfile: node.Dockerfile }
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    cpus: 1
+    mem_limit: 128m
+    networks: { inet: { ipv4_address: 203.0.113.10 } }
+
+  # A player, and with listen.sh a stand-in for any other internet host.
+  client:
+    <<: *node
+    depends_on: [gate]
+    command: ["sh", "-c", "/lab/listen.sh & exec sleep infinity"]
+    networks: { inet: { ipv4_address: 203.0.113.50 } }
+
+  # Something on the home LAN that neither the gate nor a game server may touch.
+  nas:
+    <<: *node
+    depends_on: [gate]
+    command: ["/lab/listen.sh"]
+    networks: { homelan: { ipv4_address: 192.168.50.30 } }
+
+  # The home server: a real Docker daemon in its own network namespace.
+  home:
+    build: { context: ., dockerfile: home.Dockerfile }
+    privileged: true
+    stop_grace_period: 5s
+    command: ["dockerd", "--host=unix:///var/run/docker.sock", "--firewall-backend=${HOME_FW:-iptables}"]
+    volumes: [home-docker:/var/lib/docker]
+    networks:
+      inet: { ipv4_address: 203.0.113.20 }
+      homelan: { ipv4_address: 192.168.50.20 }
+
+networks:
+  inet:
+    internal: true
+    ipam: { config: [{ subnet: 203.0.113.0/24 }] }
+  homelan:
+    internal: true
+    ipam: { config: [{ subnet: 192.168.50.0/24 }] }
+
+volumes:
+  home-docker:

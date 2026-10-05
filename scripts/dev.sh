@@ -2,7 +2,7 @@
 # Dev loop (PLAN.md §10). The workstation only edits files: this syncs the working
 # tree to the homelab and runs every build and test there, inside containers.
 #
-# Usage: dev.sh sync | check | test | fmt | run <cmd...> | du | prune
+# Usage: dev.sh sync | check | test | fmt | run <cmd...> | lab [cmd] | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
@@ -69,6 +69,13 @@ cmd_run() {
   in_builder "$*"
 }
 
+# The simulated VPS, internet and home (lab/run.sh). HOME_FW=nftables switches
+# the home side to Docker's nftables firewall backend.
+cmd_lab() {
+  cmd_sync
+  home "cd $REMOTE/src/lab && HOME_FW=${HOME_FW:-iptables} bash run.sh ${*:-all}"
+}
+
 cmd_du() {
   home "docker run --rm -v homewarp-cargo:/cargo -v homewarp-target:/target alpine:3.20 du -sh /cargo /target
         docker image ls --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep -E '^(homewarp|rust)' || true
@@ -86,7 +93,8 @@ case "${1:-}" in
   test)  cmd_test ;;
   fmt)   cmd_fmt ;;
   run)   shift; cmd_run "$@" ;;
+  lab)   shift; cmd_lab "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | run <cmd...> | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | run <cmd...> | lab [cmd] | du | prune" >&2; exit 2 ;;
 esac
