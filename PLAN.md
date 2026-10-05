@@ -184,8 +184,13 @@ table inet homewarp {
   }
   chain forward {
     type filter hook forward priority filter;
-    oifname "homewarp0" ct state new ct status dnat add @newconn { ip saddr limit rate over 30/second burst 60 packets } drop   # per source
-    oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
+    oifname "homewarp0" ct status dnat goto to_home
+    oifname "homewarp0" drop                 # only forwarded ports enter the tunnel
+    iifname "homewarp0" ct state new drop    # home does not use the Gate as an exit
+  }
+  chain to_home {
+    ct state new add @newconn { ip saddr limit rate over 30/second burst 60 packets } drop   # per source
+    tcp flags syn tcp option maxseg size set rt mtu
   }
 }
 ```
@@ -201,24 +206,44 @@ table inet homewarp {
   }
   chain input {
     type filter hook input priority filter;
-    iifname "homewarp0" ct state established,related accept
+    iifname { "homewarp0", "homewarp-br" } ct state established,related accept
     iifname "homewarp0" drop                              # the Gate may not reach host services
+    iifname "homewarp-br" drop                            # nor may a game container
   }
   chain forward {
     type filter hook forward priority filter - 1;
-    iifname "homewarp0" oifname != "homewarp-br" drop         # tunnel traffic may only reach game containers
+    iifname "homewarp0" oifname "homewarp-br" ct status dnat accept   # from the tunnel: published game ports
+    iifname "homewarp0" drop                                          # and nothing else
     iifname "homewarp-br" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ct state new drop
+    oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
   }
 }
 # ip rule add fwmark 0x4857 lookup 4857
 # ip route add default dev homewarp0 table 4857
+# sysctl net.ipv4.conf.homewarp0.rp_filter=2
 ```
 
 These are sketches, not final rulesets. Both were loaded and exercised on the real VPS
-on 2026-10-05 (§10): the Gate side as written, on nft 1.0.2; the home side after one
+on 2026-10-05 (§10): the Gate side as first written, on nft 1.0.2; the home side after one
 correction. As first written, the second `mark_in` rule had no `iifname !=` and so marked
 the inbound packet as well; policy routing then sent it straight back into the tunnel
 and nothing arrived. The per-source limit loads, but its limiting was not exercised.
+
+The lab (§10) then ran them against a real Docker daemon, and the sketches above are as
+the lab runs them. What that added:
+
+- **A game container could reach the home host itself.** The first sketch only stopped
+  forwards to private ranges. A container talking to the host's own addresses (its
+  bridge gateway, its LAN address) is input, not forward, and was not covered: SSH and
+  the panel were reachable. The `homewarp-br` input rule closes that.
+- **From the tunnel, only what Docker published.** `ct status dnat` accepts a flow only
+  if a published-port rule translated it, instead of trusting Docker alone to drop the
+  rest. (Docker 28 and later does drop it too, in its raw table.)
+- **MSS is clamped on both sides**, each for what it sends into the tunnel.
+- **The Gate forwards nothing but its forwards**, and nothing that starts at home.
+- **Reverse-path filtering.** Players arrive on `homewarp0` from addresses that route
+  elsewhere, so a host that filters strictly drops them. Loosening that one interface is
+  enough, even with `all.rp_filter=1`.
 
 Both sides own exactly one nftables table (`inet homewarp`) and replace it atomically.
 They never edit Docker's rules.
@@ -473,7 +498,11 @@ tiers at about $2 a month (IONOS) or about $22 a year (RackNerd, 3 TB of traffic
 | Front end | React + Vite + TypeScript, Tailwind CSS, Radix primitives, TanStack Query/Router, xterm.js, CodeMirror 6, uPlot | Matches existing TypeScript experience; all static, embedded in the binary. Node is a build-stage dependency only. |
 | Packaging | Core: Docker image **and** static binary + systemd. Gate: static musl binary (x86_64 + aarch64) + systemd. | The VPS needs no Docker. |
 
-Crate choices are to be confirmed in Phase 0; versions were not pinned during planning.
+Confirmed by use in Phase 0 (2026-10-05, Rust 1.99): `bollard` 0.21 with only its
+local-socket transport, `cap-std` 4, and `serde-saphyr` 1 for YAML eggs (the long-standing
+`serde_yaml` is deprecated; eggs are untrusted input, so the parser should be a maintained
+one). Phase 1 confirms the rest of the Core stack. Still unused, so still to confirm: the
+WireGuard, nftables, ACME and SFTP crates.
 
 ## 9. Repository layout
 
@@ -581,10 +610,29 @@ What this does and does not show:
 
 | Command | Runs on the homelab |
 |---|---|
-| `check` | `cargo check` + `clippy` in the builder container (named volumes for registry and `target`) |
+| `check` | `cargo check` + `clippy` + `cargo fmt --check` in the builder container (named volumes for registry and `target`) |
 | `test` | unit tests (`cargo nextest`) + `tsc --noEmit` + ESLint in a Node container |
 | `lab` | full end-to-end suite in the simulated network below |
+| `paper` | the Phase 0 runtime spike: the Paper egg end to end on the homelab's Docker |
 | `deploy` | build the image, `docker compose up -d`, check `:3600` answers |
+
+The tree goes to `/home/lance/homewarp/src`, replaced whole on every sync; `data/` beside
+it belongs to the server. The builder runs as the homelab user, capped at 1.5 CPUs, and
+`Cargo.lock` is copied back so it is committed from the workstation.
+
+Measured on 2026-10-05 (Rust 1.99.0, 2 vCPU):
+
+| What | Result |
+|---|---|
+| Edit to verdict, warm: sync + `check` + `clippy` + `fmt --check` | 2.7 s |
+| `cargo check`, cold, Core with axum alone | 19 s |
+| `cargo check`, cold, adding the template and runtime crates (bollard, cap-std, serde-saphyr) | 32 s |
+| Unit tests, first build | 38 s |
+| Disk: builder image | 1.34 GB |
+| Disk: crate registry + `target` at the first measurement | 58 MB + 133 MB |
+
+Cold builds are far below the "several minutes" feared for 2 vCPUs. Release builds are
+still to be measured.
 
 ### The lab: a VPS without a VPS
 
@@ -606,6 +654,68 @@ Assertions:
 - Killing the tunnel, restarting the Gate, and changing the home's address all recover.
 - Nothing but the configured ports is reachable from `client` or from `gate`.
 
+#### Lab results (2026-10-05)
+
+`lab/run.sh`, started with `scripts/dev.sh lab`. As built it differs from the drawing in
+two ways: both networks are internal, so the lab can reach neither the homelab's LAN nor
+the internet, and home also sits on a simulated LAN (`192.168.50.0/24`) with a NAS that
+nothing from outside may touch. The Gate does not exist yet, so `wg` and `nft` are driven
+by the script. Home ran Docker 29.8.2; every check passed on **both** of Docker's firewall
+backends, iptables and nftables.
+
+| Check | Result |
+|---|---|
+| Client address through a real Docker published port | **Preserved, TCP and UDP.** The game container saw `203.0.113.50`. |
+| Control: the reply mark removed | No answer. The policy-routed return path is what carries it. |
+| NAT mode: one masquerade rule on the Gate | Works; the server sees the Gate's tunnel address. |
+| Strict reverse-path filtering at home (`all.rp_filter=1`) | Works with `homewarp0` alone set loose. |
+| A taken-over Gate, its allowed-ips widened and home's networks routed into the tunnel | Cannot reach a service on home's tunnel address or LAN address, the NAS, an unpublished port of the game container, or the published port by the container's own address. |
+| The game container, hardened as in §5.6 | Reaches the internet from home's own address, not through the Gate. Cannot reach the NAS, nor a service on the home host by its bridge or LAN address. |
+| Throughput to the game container | About 1.05–1.16 Gbit/s through the tunnel against 21–23 Gbit/s straight to the published port. One 2-vCPU machine plays every party, so this shows only that nothing in the path is slow in itself. |
+| UDP at 10 Mbit/s through the tunnel | None lost. |
+
+- The remaining network risk of §12, Docker's own rules fighting the return path, is
+  retired for Docker 29 on both backends.
+- The Gate container's limits (1 CPU, 128 MB) are in place but prove nothing yet: with no
+  Gate process there is nothing in it to measure (0.6 MB), and the kernel's forwarding
+  work is not charged to it.
+- **Not shown:** home behind NAT (the real VPS showed that), recovery after a restart or
+  an address change (that needs the Gate and Core), the rate limit under load, and Core
+  doing all this from inside a container on a real host rather than a script in a
+  privileged one.
+
+### Runtime spike: the Paper egg (2026-10-05)
+
+`scripts/dev.sh paper` runs `crates/homewarp-runtime/examples/paper.rs` on the homelab's
+own Docker (29.2.1): the current Paper egg from the Pelican repository (`PLCN_v3`, YAML),
+unmodified.
+
+| Step | Result |
+|---|---|
+| Import | 6 variables, 6 images; the first, `yolks:java_25`, is the default. |
+| Install container (`installers:alpine`, script at `/mnt/install`, files at `/mnt/server`) | 4.4 s; Paper 26.3 build 152. |
+| Hand the files to the server's user (`chown` in a container that sees only that directory) | 0.3 s; everything owned by `4857:4857`. |
+| Patch `server.properties` (`properties` parser) | `server-port`, `query.port`, `server-ip` set. |
+| Start in the hardened container: not root, no capabilities, no new privileges, read-only root, memory and process limits | 15.5 s to `Done`, 10.8 s by the server's own count. |
+| Status ping, as a Minecraft client sends it, on the published port | Answered: Paper 26.3, 0/20 players. |
+| Console | `list` answered; `stop` ended it with exit code 0 in 1.1 s. |
+| Images pulled | `yolks:java_25` 781 MB (15.5 s), `installers:alpine` 38 MB (5.6 s). |
+
+Found on the way:
+
+- The egg has a variable, `USER_AGENT`, that is required and has no default: Paper's
+  download service wants to know who is calling. The create-server wizard has to fill it.
+- An empty list arrives as `{}` (`rules: {  }`): the panel that exports eggs is PHP. The
+  importer accepts it, along with the Pterodactyl spellings (rules joined with `|`,
+  `config` values as strings of JSON).
+- Docker's `local` log driver refuses a single file with compression, which is its default.
+- The memory limit is what was asked for plus Wings' headroom (15 % up to 2 GB, 10 % up to
+  4 GB, 5 % above), because eggs size the JVM heap from `SERVER_MEMORY`.
+- The spike agreed to Mojang's EULA with a flag. In the product that is the user's click
+  (the `eula` feature, §5.6).
+- **Not shown:** crash detection and restart, statistics, the other config-file parsers,
+  variable validation, a SteamCMD game. Those are Phase 2.
+
 ### Real-world tests
 
 - Staging Core on the homelab itself (Compose project at `/home/lance/homewarp`, port 3600).
@@ -617,15 +727,17 @@ Assertions:
 
 Each phase ends with something that works on the homelab.
 
-**Phase 0 — Spikes (de-risk before committing to the design)**
+**Phase 0 — Spikes (de-risk before committing to the design)** — *done 2026-10-05; results in §10*
 - Dev loop: builder container, sync script, measured `cargo check` time, disk budget.
 - Tunnel: lab with kernel WireGuard, DNAT, transparent return path through a Docker
   published port; iperf3 numbers, with the simulated VPS limited to 1 CPU and 128 MB.
-  *Done on the real VPS on 2026-10-05 (§10), except the Docker published port, which
-  still needs the lab.*
+  *Done on the real VPS and in the lab.*
 - Runtime: run the Paper egg end-to-end (install container → yolk image → console) with `bollard`.
 - *Exit:* client IP preserved for TCP and UDP in the lab; Paper starts; numbers written down.
   If the transparent return path proves fragile, this is where the design changes.
+  *Met. The design stands; §5.3 lists the five things the lab added.*
+- *Left for Phase 3, with the owner's go-ahead:* Core setting up the tunnel from inside a
+  container in the homelab's own network namespace, where the other services live.
 
 **Phase 1 — Core skeleton**
 - Workspace, config, SQLite + migrations, first-run setup code, login, sessions.
@@ -670,7 +782,7 @@ Each phase ends with something that works on the homelab.
 
 | Risk | Plan |
 |---|---|
-| Transparent-mode return path fights Docker's firewall rules on some hosts | The routing itself is proven on the real VPS (§10); Docker's own rules are still to be proven in the lab. Self-probe + NAT fallback mean it degrades instead of breaking. |
+| Transparent-mode return path fights Docker's firewall rules on some hosts | Proven on the real VPS and, with a real Docker daemon, in the lab on both firewall backends (§10). Other Docker versions and hosts with their own firewall are still unknowns. Self-probe + NAT fallback mean it degrades instead of breaking. |
 | The VPS's own firewall blocks the tunnel or the forwards (ufw, firewalld) | Found on the real VPS. The installer detects it and opens what it needs through that tool, or stops with the exact command (§5.3). |
 | The VPS is not a blank box: ports already taken, other software's NAT rules | Found on the real VPS. Check each forward for a conflict before applying it and say which rule is in the way; never assume 80, 443 or 25565 are free. |
 | A cheap VPS has less CPU than its size says (steal) | Measured: about 40–60 Mbit/s through the tunnel on the owner's VPS. Show Gate CPU steal on the Network page and warn when it is high. |
