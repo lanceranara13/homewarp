@@ -2,7 +2,7 @@
 # Dev loop (PLAN.md §10). The workstation only edits files: this syncs the working
 # tree to the homelab and runs every build and test there, inside containers.
 #
-# Usage: dev.sh sync | check | test | fmt | run <cmd...> | lab [cmd] | du | prune
+# Usage: dev.sh sync | check | test | fmt | run <cmd...> | lab [cmd] | paper [clean] | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
@@ -76,6 +76,35 @@ cmd_lab() {
   home "cd $REMOTE/src/lab && HOME_FW=${HOME_FW:-iptables} bash run.sh ${*:-all}"
 }
 
+# Phase 0 runtime spike (crates/homewarp-runtime/examples/paper.rs): the real
+# Paper egg from start to finish, on the homelab's own Docker. The runner is
+# root with the Docker socket, as Core will be. HOMEWARP_ACCEPT_EULA=1 agrees to
+# Mojang's EULA (https://aka.ms/MinecraftEULA) for this one test server; without
+# it the server stops and asks. `paper clean` removes everything but the images.
+EGG_URL=https://raw.githubusercontent.com/pelican-eggs/minecraft/refs/heads/main/java/paper/egg-paper.yaml
+cmd_paper() {
+  local spike=$REMOTE/data/spike
+  if [ "${1:-}" = clean ]; then
+    home "docker rm -f homewarp-spike-paper homewarp-spike-paper-install homewarp-spike-paper-chown >/dev/null 2>&1
+          docker network rm homewarp-br >/dev/null 2>&1
+          docker run --rm -v $REMOTE/data:/data alpine:3.20 rm -rf /data/spike"
+    return
+  fi
+  cmd_sync && builder
+  in_builder 'cargo build -q -p homewarp-runtime --example paper'
+  home "set -e
+    mkdir -p $spike
+    curl -fsSL -o $spike/egg-paper.yaml $EGG_URL
+    docker run --rm --network host \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v homewarp-target:/target:ro -v $spike:$spike \
+      -e HOMEWARP_DATA=$spike -e HOMEWARP_EGG=$spike/egg-paper.yaml \
+      -e HOMEWARP_PORT=25600 -e HOMEWARP_MEMORY=2048 \
+      -e HOMEWARP_USER_AGENT='homewarp/0.0.0 (https://github.com/lanceranara13/homewarp)' \
+      -e HOMEWARP_ACCEPT_EULA=${HOMEWARP_ACCEPT_EULA:-0} \
+      $BUILDER /target/debug/examples/paper"
+}
+
 cmd_du() {
   home "docker run --rm -v homewarp-cargo:/cargo -v homewarp-target:/target alpine:3.20 du -sh /cargo /target
         docker image ls --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep -E '^(homewarp|rust)' || true
@@ -94,7 +123,8 @@ case "${1:-}" in
   fmt)   cmd_fmt ;;
   run)   shift; cmd_run "$@" ;;
   lab)   shift; cmd_lab "$@" ;;
+  paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | run <cmd...> | lab [cmd] | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
 esac
