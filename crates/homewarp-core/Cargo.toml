@@ -1,0 +1,20 @@
+[package]
+name = "homewarp-core"
+description = "Homewarp Core: the home-side panel, API and runtime."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "homewarp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
