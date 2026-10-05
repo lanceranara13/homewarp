@@ -1,0 +1,19 @@
+# Core, staged on the homelab (PLAN.md §10). `scripts/dev.sh deploy` builds the
+# image and starts this; the panel is then at http://<homelab>:3600.
+#
+# What Core does so far needs nothing from the host, so it runs as an ordinary
+# user with a read-only root and no capabilities. The Docker socket and the
+# tunnel arrive with the phases that use them.
+name: homewarp
+
+services:
+  homewarp:
+    image: homewarp:dev
+    container_name: homewarp
+    restart: unless-stopped
+    user: "${HOMEWARP_USER:-1000:1000}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports: ["3600:3600"]
+    volumes: ["../../data:/data"]

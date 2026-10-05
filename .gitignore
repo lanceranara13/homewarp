@@ -1,1 +1,7 @@
 /target/
+/data/
+/deploy/out/
+/web/node_modules/
+/web/dist/
+# Generated from web/openapi.json by `npm run gen`.
+/web/src/api/schema.d.ts

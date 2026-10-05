@@ -2,7 +2,8 @@
 # Dev loop (PLAN.md §10). The workstation only edits files: this syncs the working
 # tree to the homelab and runs every build and test there, inside containers.
 #
-# Usage: dev.sh sync | check | test | fmt | run <cmd...> | lab [cmd] | paper [clean] | du | prune
+# Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | deploy
+#               | run <cmd...> | lab [cmd] | paper [clean] | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
@@ -10,6 +11,7 @@ HOME_SSH=${HOME_SSH:-home}
 REMOTE=${REMOTE:-/home/lance/homewarp}
 CPUS=${CPUS:-1.5}          # the homelab has 2 vCPUs and other services to keep alive
 BUILDER=homewarp-builder
+NODE=node:24-alpine
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 home() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOME_SSH" "$@"; }
@@ -38,6 +40,18 @@ in_builder() {
     -v $REMOTE/src:/work $BUILDER bash -euc '$*'"
 }
 
+# Runs "$*" in web/ inside a Node container, as the homelab user. node_modules
+# and npm's cache live on named volumes, which start out owned by root.
+in_node() {
+  home "docker run --rm -v homewarp-node-modules:/work/web/node_modules -v homewarp-npm:/npm $NODE \
+      chown \$(id -u):\$(id -g) /work/web/node_modules /npm
+    docker run --rm -i --cpus $CPUS --user \$(id -u):\$(id -g) \
+      -e HOME=/tmp -e npm_config_cache=/npm -e npm_config_update_notifier=false \
+      -e npm_config_fund=false -e npm_config_audit=false \
+      -v $REMOTE/src:/work -v homewarp-node-modules:/work/web/node_modules -v homewarp-npm:/npm \
+      -w /work/web $NODE sh -euc '$*'"
+}
+
 # Cargo writes the lock file on the homelab; it is committed from here.
 pull_lock() {
   home "cat $REMOTE/src/Cargo.lock" > "$ROOT/Cargo.lock.new"
@@ -56,6 +70,32 @@ cmd_test() {
   cmd_sync && builder
   in_builder 'cargo nextest run --workspace --no-tests=warn'
   pull_lock
+  in_node 'npm install --no-save && npm run typecheck && npm run lint'
+}
+
+# Runs npm in web/ (`dev.sh npm install some-package`) and brings package.json
+# and its lock file back, as `check` does for Cargo.lock.
+cmd_npm() {
+  cmd_sync
+  in_node "npm $*"
+  home "cd $REMOTE/src/web && tar czf - package.json package-lock.json" | tar xzf - -C "$ROOT/web"
+}
+
+# Builds the web interface, then Core with it inside, and (re)starts the staging
+# deployment at /home/lance/homewarp (deploy/compose.yml), on port 3600.
+cmd_deploy() {
+  cmd_sync && builder
+  in_node 'npm install --no-save && npm run build'
+  in_builder 'cargo build --release -p homewarp-core
+              mkdir -p deploy/out && cp /target/release/homewarp deploy/out/'
+  home "set -e
+    cd $REMOTE/src/deploy
+    docker build -q -t homewarp:dev -f core.Dockerfile out >/dev/null
+    HOMEWARP_USER=\$(id -u):\$(id -g) docker compose up -d
+    for _ in \$(seq 30); do curl -fsS -o /dev/null http://127.0.0.1:3600/api/v1/health 2>/dev/null && break; sleep 1; done
+    curl -fsS http://127.0.0.1:3600/api/v1/health; echo
+    curl -fsS -o /dev/null -w 'page: %{http_code} %{content_type}, %{size_download} bytes\n' http://127.0.0.1:3600/
+    docker logs homewarp 2>&1 | grep 'setup code' | tail -1 || true"
 }
 
 cmd_fmt() {
@@ -132,9 +172,11 @@ case "${1:-}" in
   fmt)   cmd_fmt ;;
   run)   shift; cmd_run "$@" ;;
   gen)   cmd_gen ;;
+  npm)   shift; cmd_npm "$@" ;;
+  deploy) cmd_deploy ;;
   lab)   shift; cmd_lab "$@" ;;
   paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | deploy | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
 esac

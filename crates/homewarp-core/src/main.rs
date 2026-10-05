@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{env, io::IsTerminal, net::SocketAddr, path::PathBuf};
 
 use homewarp_core::AppState;
 use tokio::signal::unix::{SignalKind, signal};
@@ -10,7 +10,10 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", homewarp_core::openapi().to_pretty_json()?);
         return Ok(());
     }
-    tracing_subscriber::fmt::init();
+    // Colour is for a terminal; in `docker logs` it would be escape codes around the setup code.
+    tracing_subscriber::fmt()
+        .with_ansi(std::io::stdout().is_terminal())
+        .init();
 
     let data = PathBuf::from(env::var("HOMEWARP_DATA").unwrap_or_else(|_| "data".to_owned()));
     let listen: SocketAddr = env::var("HOMEWARP_LISTEN")
