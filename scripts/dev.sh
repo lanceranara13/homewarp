@@ -69,6 +69,15 @@ cmd_run() {
   in_builder "$*"
 }
 
+# Rewrites web/openapi.json from the handlers. The web client's types come from
+# that file, and a test fails for as long as it is stale.
+cmd_gen() {
+  cmd_sync && builder
+  mkdir -p "$ROOT/web"
+  in_builder 'cargo run -q -p homewarp-core -- openapi' > "$ROOT/web/openapi.json.new"
+  mv "$ROOT/web/openapi.json.new" "$ROOT/web/openapi.json"
+}
+
 # The simulated VPS, internet and home (lab/run.sh). HOME_FW=nftables switches
 # the home side to Docker's nftables firewall backend.
 cmd_lab() {
@@ -122,6 +131,7 @@ case "${1:-}" in
   test)  cmd_test ;;
   fmt)   cmd_fmt ;;
   run)   shift; cmd_run "$@" ;;
+  gen)   cmd_gen ;;
   lab)   shift; cmd_lab "$@" ;;
   paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;

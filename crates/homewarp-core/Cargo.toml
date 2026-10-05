@@ -13,8 +13,22 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+argon2.workspace = true
 axum.workspace = true
+getrandom.workspace = true
+rust-embed.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
