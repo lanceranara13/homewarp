@@ -307,6 +307,16 @@ impl Engine {
                 memory: Some(INSTALL_MEMORY),
                 memory_swap: Some(INSTALL_MEMORY),
                 pids_limit: Some(PIDS),
+                // An install script is root in its container, as eggs expect:
+                // it installs packages and owns what it makes. What it does
+                // not need is to write raw packets, with which it could pass
+                // itself off as a neighbour on the servers' network, or to
+                // make device files.
+                cap_drop: Some(
+                    ["NET_RAW", "MKNOD", "AUDIT_WRITE"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                ),
                 log_config: Some(small_log()),
                 ..Default::default()
             }),

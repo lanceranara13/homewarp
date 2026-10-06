@@ -7,9 +7,11 @@
 //! handshake nobody finishes holds nobody else up.
 
 use std::{
+    collections::HashMap,
     fmt, io,
+    net::IpAddr,
     path::Path,
-    sync::{Arc, PoisonError, RwLock},
+    sync::{Arc, Mutex, PoisonError, RwLock},
     time::Duration,
 };
 
@@ -44,6 +46,7 @@ use crate::{
     api::{self, AppState},
     clock,
     door::{self, Client},
+    tunnel,
 };
 
 /// A door sends its line at once. One that has not come by now is not coming.
@@ -54,6 +57,11 @@ const REQUEST: Duration = Duration::from_secs(30);
 /// How many may be shaking hands at once. One more is turned away unheard:
 /// this port is open to the internet, and a handshake is work.
 const SHAKING: usize = 256;
+/// How many connections may be open at once, in all and from one address. A
+/// connection that asks nothing costs little, and nothing else limits how
+/// many of them anyone on the internet may leave open.
+const OPEN: u32 = 1024;
+const OPEN_FROM_ONE: u32 = 64;
 
 /// Put on a request that came in over TLS, for whatever answers it.
 #[derive(Clone, Copy)]
@@ -100,6 +108,48 @@ impl ResolvesServerCert for Shown {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+}
+
+/// The connections that are open, counted by where each came from.
+#[derive(Default)]
+struct Open(Mutex<HashMap<IpAddr, u32>>);
+
+/// One open connection's place in that count, given back when it ends.
+struct Place<'a> {
+    open: &'a Open,
+    from: IpAddr,
+}
+
+impl Open {
+    /// Takes a place for a connection from `from`, if there is one to take.
+    fn enter(&self, from: IpAddr) -> Option<Place<'_>> {
+        let mut open = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let all: u32 = open.values().sum();
+        let from_there = open.get(&from).copied().unwrap_or(0);
+        // Where the Gate stands in for whoever comes through it, its one
+        // address is everybody on the internet.
+        let most = match from == IpAddr::V4(tunnel::GATE) {
+            true => OPEN,
+            false => OPEN_FROM_ONE,
+        };
+        if all >= OPEN || from_there >= most {
+            return None;
+        }
+        open.insert(from, from_there + 1);
+        Some(Place { open: self, from })
+    }
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        let mut open = self.open.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match open.get_mut(&self.from) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                open.remove(&self.from);
+            }
+        }
     }
 }
 
@@ -186,6 +236,7 @@ pub async fn serve(state: AppState, listen: String) -> anyhow::Result<()> {
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let app = api::app(state);
     let shaking = Arc::new(Semaphore::new(SHAKING));
+    let open = Arc::new(Open::default());
     match listen.strip_prefix("unix:") {
         Some(socket) => {
             let socket = Path::new(socket);
@@ -202,13 +253,13 @@ pub async fn serve(state: AppState, listen: String) -> anyhow::Result<()> {
             loop {
                 let (mut stream, _) = listener.accept().await?;
                 let (acceptor, app) = (acceptor.clone(), app.clone());
-                let shaking = Arc::clone(&shaking);
+                let (shaking, open) = (Arc::clone(&shaking), Arc::clone(&open));
                 tokio::spawn(async move {
                     // The door says first where the connection came from. One
                     // that says nothing is no door's, and is dropped.
                     let said = timeout(PATIENCE, door::announced(&mut stream)).await;
                     if let Ok(Ok(from)) = said {
-                        connection(acceptor, stream, app, Client(from), &shaking).await;
+                        connection(acceptor, stream, app, Client(from), &shaking, &open).await;
                     }
                 });
             }
@@ -220,9 +271,9 @@ pub async fn serve(state: AppState, listen: String) -> anyhow::Result<()> {
                 let (stream, from) = listener.accept().await?;
                 let from = Client(from.ip().to_canonical());
                 let (acceptor, app) = (acceptor.clone(), app.clone());
-                let shaking = Arc::clone(&shaking);
+                let (shaking, open) = (Arc::clone(&shaking), Arc::clone(&open));
                 tokio::spawn(async move {
-                    connection(acceptor, stream, app, from, &shaking).await;
+                    connection(acceptor, stream, app, from, &shaking, &open).await;
                 });
             }
         }
@@ -256,7 +307,13 @@ async fn connection(
     app: Router,
     from: Client,
     shaking: &Semaphore,
+    open: &Open,
 ) {
+    // Held until the connection ends. One more than there is room for is
+    // turned away before it has cost a handshake.
+    let Some(_place) = open.enter(from.0) else {
+        return;
+    };
     let stream = {
         let Ok(_shaking) = shaking.try_acquire() else {
             return;
@@ -290,7 +347,39 @@ mod tests {
 
     use axum::http::{Request, header::HOST};
 
-    use super::{Shown, element, named, time, validity};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::{OPEN, OPEN_FROM_ONE, Open, Shown, element, named, time, validity};
+    use crate::tunnel::GATE;
+
+    #[test]
+    fn no_more_connections_are_open_than_there_is_room_for() {
+        let open = Open::default();
+        let one = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 50));
+        let mut places: Vec<_> = (0..OPEN_FROM_ONE)
+            .map(|_| open.enter(one).unwrap())
+            .collect();
+        // One address has had its share, and another has not.
+        assert!(open.enter(one).is_none());
+        let other = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 51));
+        let elsewhere = open.enter(other).unwrap();
+        // A connection that ends gives its place back.
+        places.pop();
+        places.push(open.enter(one).unwrap());
+        assert!(open.enter(one).is_none());
+        drop(elsewhere);
+        drop(places);
+        assert!(open.0.lock().unwrap().is_empty());
+
+        // The Gate's own address, where it stands in for everybody, has the
+        // whole of the room and no more than that.
+        let gate = IpAddr::V4(GATE);
+        let all: Vec<_> = (0..OPEN).map(|_| open.enter(gate).unwrap()).collect();
+        assert!(open.enter(gate).is_none());
+        assert!(open.enter(one).is_none());
+        drop(all);
+        assert!(open.enter(one).is_some());
+    }
 
     #[test]
     fn a_request_that_names_its_site_only_in_its_address_is_given_the_header() {
