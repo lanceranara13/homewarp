@@ -1296,6 +1296,29 @@ Each phase ends with something that works on the homelab.
 - Fuzz the egg and config-file parsers; path-traversal test suite; threat-model review.
 - From Phase 3: the door hides from Core who is asking, which rate limits will need
   (PROXY protocol on the socket, or the door's own count).
+- *Begun 2026-10-06. Done so far, in the working tree and not yet on staging:*
+  - *Who is asking.* A door sends one line ahead of each connection, the first line of
+    the PROXY protocol, and Core reads it off its socket: the panel's and SFTP's. Tried
+    on a throwaway copy from another machine on the LAN: the Activity page had that
+    machine's address, not the door's.
+  - *Sign-in limits.* Five wrong tries from one address, or twenty at one account from
+    anywhere, and the next is refused unread for what is left of five minutes (429, with
+    `Retry-After`), the right password with it. The panel's sign-in, the setup code and
+    SFTP keep one count between them. Counted in memory: a restart forgets it. Tried on
+    the same copy: the sixth try was refused, and so was the right password after it.
+  - *Two-step sign-in.* A code from an authenticator app (RFC 6238, checked against the
+    RFC's own table), taken once and from a clock up to half a minute off; eight
+    recovery codes, kept as hashes, each good once. Turned on in Settings by typing a
+    code back, off with the password, or by the owner for another account. The sign-in
+    page asks for the code once the password is found right. Over SFTP the code is typed
+    straight after the password. *Not yet looked at in a browser*, and the secret is
+    shown as text and a link, with no picture of it to scan.
+- *Still to do:* the cookie's `Secure` flag, TLS and its certificates, and passkeys, all
+  three of which wait on §13 item 5; servers kept from the home network before a VPS is
+  connected, and not only after; the Gate's limit on new connections as a setting;
+  "harden this VPS" with commit-confirm, built and tried in the lab only; fuzzing the
+  parsers; the review of §6 against what was built. And a way back in for an owner who
+  has lost both app and recovery codes, from the machine itself.
 
 **Phase 6 — Packaging and onboarding**
 - One-line installers, signed releases, self-update, ARM64 builds of Core, docs.
