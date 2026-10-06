@@ -268,6 +268,32 @@ port, then connects to `VPS_IP:port` over its normal internet route and checks t
 the connection arrives through the tunnel with the home's own public IP as source.
 Pass → transparent mode. Fail → NAT mode with an explanation. No guessing.
 
+As built (2026-10-06), it has three answers and not two, because there are two ways
+to fail and NAT mode mends only one of them. The probe has to come the way a player's
+connection comes, or it says nothing about players: so the listener is Core's own
+program, run once in a container on the servers' bridge with a port published as a
+server's is (`homewarp probe-listen`, from the image Core itself runs from, which is the
+one image sure to be there). What arrives from the tunnel for that port is counted
+before anything on the machine can drop it. Then Core connects to the port the Gate
+opened:
+
+| What happened | What it means | What Core does |
+|---|---|---|
+| The connection arrived, from an address that is not the Gate's | Players' addresses reach servers, and replies get back | Transparent mode. *Preserved.* |
+| Its first packet was counted, and it never completed | Packets arrive and the replies do not get back: the way back cannot be made to work on this machine | NAT mode, probed again to see that it works. *Hidden.* |
+| Nothing was counted | The test never came through: a firewall in front of the VPS, most likely, shut for the port tried | Transparent mode, and it says that it could not check. *Not checked.* |
+
+The page has a button to check again. Known gap: a home machine that has its public
+address on itself, with no router between, cannot probe itself this way, since the
+connection would arrive from one of its own addresses.
+
+The first probe listened on the home machine itself, on the tunnel's address, and
+passed in the lab. On the homelab it found "not checked" while a player was getting
+through with their own address: the homelab runs ufw, which drops what arrives for the
+machine itself unless it was told otherwise, and an accept in Homewarp's table cannot
+undo that. A server's traffic is passed on, not received, and Docker's rules let it
+by. It is the *Host firewalls* lesson above, met a second time at the other end.
+
 **Addressing.** Tunnel `10.213.77.0/30`, game bridge `10.213.80.0/24`, both checked for
 collisions at setup (the homelab already runs several VPN containers in `10.x`) and
 configurable. WireGuard MTU 1380 with MSS clamping; IPv4 only in v1.
@@ -286,8 +312,19 @@ WireGuard has already authenticated the peer. A bearer token is required on top.
   survives a reboot before home reconnects.
 - `GET /v1/status` — handshake age, per-forward packet/byte counters, conntrack count, load.
 - `POST /v1/probe` — temporary port for the self-probe.
+- `POST /v1/rotate` and `POST /v1/rotate/commit` — the change of keys on first contact (§5.5).
 
 HTTP + JSON. No gRPC, no message broker.
+
+As built (2026-10-06), `status` says the Gate's version, which state it carries out,
+when it last heard from home and from what address, and the bytes through the tunnel.
+Counters for each forward, the connection count and the load are not in it yet: they
+belong with the traffic column of the Network page, which is not built either.
+
+Both ends put back what something else takes away. Core does its whole setup again
+every ten seconds, each step of which changes nothing when nothing is missing; the
+Gate looks every thirty. A firewall restarting on the VPS empties the whole ruleset,
+the Gate's table with it, and that is the case this is for.
 
 ### 5.5 Enrolling a VPS
 
@@ -301,6 +338,30 @@ HTTP + JSON. No gRPC, no message broker.
 5. Self-probe runs, mode is chosen, the wizard turns green.
 
 The user never edits a config file and never copies a key by hand.
+
+As built (2026-10-06):
+
+- **The command is `homewarp-gate join <token>`**, run as root on a VPS that has the
+  program already. There are no releases to download before Phase 6, so the one line
+  that fetches the program waits until then; `scripts/dev.sh vps` copies it over.
+  `join` writes the Gate's `config.json`, asks ufw for the three openings it needs
+  where ufw is active (the tunnel's UDP port; the Gate's API on the tunnel's interface;
+  routed traffic from the public interface into the tunnel), installs a systemd unit
+  that is held to the network and its own directory, and starts it. For firewalld it
+  prints the commands and runs none. `homewarp-gate leave` takes all of it away.
+- **The token** is JSON in URL-safe base64, about 400 characters: the Gate's first
+  private key, home's public key, a preshared key, the token for the Gate's API, the
+  two ports, the two tunnel addresses, and when it runs out. Core stops dialling with
+  what it carried the moment it runs out, which is what makes a leaked one worthless.
+- **The change of keys is in two steps**, so that a lost answer cannot leave the two
+  ends with different keys for good. `rotate`: the Gate makes a key that never leaves
+  the VPS and a new API token, and takes a new preshared key from Core; it answers with
+  the public half and the token, and goes on with the old ones. Core writes the new
+  ones down. `commit`: the Gate writes its new config, answers, and switches half a
+  second later. If that answer is lost, Core tries the new keys before giving up on the
+  old; if the Gate was restarted in between and has forgotten, it says so and Core
+  starts over. Afterwards nothing the token carried is in use but home's public key.
+- **One Gate.** Connecting another while one is connected is refused.
 
 ### 5.6 Server runtime (egg-compatible)
 
@@ -331,6 +392,18 @@ Lifecycle state machine: `installing → offline → starting → running → st
 Container hardening (applied to every server): non-root user, `cap_drop: ALL`,
 `no-new-privileges`, read-only root filesystem with tmpfs `/tmp`, PID limit, memory and
 CPU limits, dedicated bridge with inter-container traffic off, **no route to the home LAN**.
+
+**Names are looked up at `1.1.1.1` and `1.0.0.1`** (2026-10-06), as Wings has its servers
+do. Left to Docker a server asks the home's own resolver, which is as a rule the router,
+and "no route to the home LAN" means the router too: with the tunnel's rules in place a
+server could look nothing up. To become a setting. Found on the homelab, whose resolver
+is `192.168.1.1`, before it bit; the lab is offline and could not have shown it.
+
+**Ports (2026-10-06).** A server has its first port, which is what `SERVER_PORT` and
+`server.allocations.default.port` stand for, and up to sixteen further ones. Each is
+open for TCP, UDP or both, published by Docker at home under its own number and
+forwarded by the Gate for the same protocols. A port number belongs to one server. An
+egg does not say which protocol its port speaks, so a port starts as both.
 
 ### 5.7 Data model (SQLite)
 
@@ -555,6 +628,7 @@ over `ssh home`, inside containers.
 | Docker 29.2.1, Compose 5.1, iptables backend | Core runs as a Compose project like the other services. |
 | No Rust, Node or Go on `PATH` (an `nvm` install exists under the home directory) | Toolchains live in builder containers only. |
 | `lance` is in the `docker` group; **no passwordless sudo** | Core deploys as a container with `network_mode: host` + `NET_ADMIN`; no host packages, no systemd units, no sudo. |
+| **ufw is active: what arrives for the machine itself is dropped unless allowed** (found 2026-10-06; it was not looked for on the 5th) | A port that Docker publishes is passed on, not received, and so is not shut: that is how every service here is reached. A program in the host's own network is behind ufw. Moving Core there shut the panel's port to the home network, which a check made from the homelab itself did not show. So Core listens on a socket in its data directory, and a second container of the same image, with the port published, passes connections to it: the *door* of `deploy/compose.yml`. Nothing on the host is changed for it. |
 | **2 vCPU** | Cold release builds will take several minutes. Iterate with `cargo check` in a warm builder container; cap the builder below 2 CPUs so running services are not starved. |
 | **Disk 89 % full, 28 GB free** (was 91 % / 24 GB before the Docker cleanup on 2026-10-05) | Hard budget: ~8 GB for build caches, pruned by script. Worlds and backups compete for the rest — free space or add a volume before running real servers. |
 | Where the 205 GB goes: `media-server` 138 GB, Docker ≈ 28 GB, `file-browser` 17 GB, Suwayomi 5.5 GB, `.vscode-server` 4.3 GB | Docker has little left to give (≈ 1.9 GB of old Pelican images, 0.6 GB of unattached volumes). The media library is the lever. |
@@ -630,7 +704,9 @@ What this does and does not show:
 | `paper` | the Phase 0 runtime spike: the Paper egg end to end on the homelab's Docker |
 | `build` | build the web interface, then Core with it inside, then the image `homewarp:dev` |
 | `deploy` | `build`, then `docker compose up -d`; check `:3600` answers. Servers it runs stay running |
-| `scratch` | a throwaway copy of the last build on `:3601`, with data of its own and the same Docker daemon, for trying what needs an account without touching staging's. `scratch down` removes it, its servers' containers and its data |
+| `scratch` | a throwaway copy of the last build on `:3601`, with data of its own, the same Docker daemon and the same network as the deployment, for trying what needs an account without touching staging's. `scratch down` removes it, its servers' containers, its data and its end of a tunnel |
+| `gate` | the Gate as a VPS runs it, one static binary each for x86_64 and ARM64, and Core built the same way for the lab. The ARM64 one is run once under an emulator, to see that it runs at all |
+| `vps` | `gate`, then the x86_64 binary copied to the VPS (`ssh server1`) by way of the workstation. `vps leave` runs `homewarp-gate leave` there |
 
 The tree goes to `/home/lance/homewarp/src`, replaced whole on every sync; `data/` beside
 it belongs to the server. The builder runs as the homelab user, capped at 1.5 CPUs, and
@@ -707,6 +783,31 @@ backends, iptables and nftables.
   an address change (that needs the Gate and Core), the rate limit under load, and Core
   doing all this from inside a container on a real host rather than a script in a
   privileged one.
+
+#### The lab since Phase 3 (2026-10-06)
+
+Both programs in it are the real ones: Core in `home`, and the Gate on the simulated
+VPS, enrolled with a join token as a VPS is. Nothing is typed into either kernel by the
+script any more, except to break things.
+
+- **Home is behind a router now**, a container that hides the home LAN behind one
+  public address as a home's router does. Without it the self-probe cannot be tried: a
+  connection home makes to the VPS has to come back from an address that is not home's
+  own. It also gives the lab a home address to change.
+- **The home LAN is an internal macvlan network, not a bridge.** On an internal bridge
+  Docker drops every packet whose address is outside the bridge's subnet, on the
+  homelab's own firewall, and what home sends to the internet by way of the router is
+  just that. The first run with the router passed nothing, for that reason and no
+  other. The macvlan network is a wire between its containers, with no firewall of the
+  homelab's on it.
+- **What it checks**, on both of Docker's firewall backends: enrolment and the change
+  of keys; the self-probe and both of its verdicts that can be made to happen there;
+  each of a server's ports for the protocols it was given; the containment checks of
+  Phase 0, with the panel added to what a taken-over Gate must not reach; the §7.1
+  budget; and that the tunnel comes back by itself when the Gate's table is emptied,
+  when the VPS loses its end as in a reboot, when home loses its end while Core runs,
+  when Core is restarted with home's end gone, and when the home's address changes.
+  It ends by disconnecting the VPS and seeing that home's kernel is as it was.
 
 ### Runtime spike: the Paper egg (2026-10-05)
 
@@ -921,10 +1022,10 @@ Each phase ends with something that works on the homelab.
   the Servers page, which asks every four seconds; free memory and disk shown where a
   server is made.
 
-**Phase 3 — Gate and tunnel**
+**Phase 3 — Gate and tunnel** — *done 2026-10-06, but for a game's own log of a real player, which waits on the Minecraft EULA, and a reboot of either real machine, which is the owner's to do*
 - `homewarp-gate`, enrollment with key rotation, declarative forwards, self-probe,
-  transparent + NAT modes, allocations with a protocol for each port (§5.6; a server
-  has one port now, published for TCP and UDP both), Network page with live health.
+  transparent + NAT modes, allocations with a protocol for each port (§5.6), Network
+  page with live health.
 - x86_64 and ARM64 Gate binaries; the §7.1 resource budget asserted in the lab.
 - *Exit:* lab suite green; a player joins through a real VPS IP and the server logs
   their real address; VPS reboot, home reboot and home IP change all self-heal.
@@ -967,45 +1068,139 @@ Each phase ends with something that works on the homelab.
   backends with nothing typed into either kernel by the script: NAT mode is asked of
   Core and reaches the Gate within Core's ten seconds, and after the tunnel is wiped
   on the simulated VPS it is Core's asking that brings it back. The WireGuard library
-  adds no route for home's allowed addresses, which was the thing to watch. Step 1
-  below is therefore done; 2 and 3 are next. What follows is how it was written.
-- *Core's end, as written.* `homewarp-net` has home's
-  table and the way back for replies, as the lab's script has them. Core has a `gate`
-  table and a `tunnel` module: one task that sets the kernel up for the Gate in the
-  database, tells the Gate to forward each server's port, for TCP and UDP both, and
-  asks after it every ten seconds. `GET`, `PUT` and `DELETE /api/v1/gate` show it,
-  connect a Gate that is already running, and forget it. It compiles and its unit
-  tests pass; nothing has yet shown that it works. **Next, in this order:**
-  1. *Core in the lab.* Build Core for musl as the Gate is built (`dev.sh gate` shows
-     how) and run it in the lab's `home` in place of the script's `ip`, `wg` and `nft`.
-     The lab is offline, so its servers need an image already in `home`: one made from
-     `homewarp-lab-node` with an entrypoint that runs `$STARTUP`, and a lab egg whose
-     startup is `game.sh`. Then the lab's forwards come from Core's servers and not
-     from the script's `push`. Watch for the WireGuard library adding a default route
-     for home's allowed addresses, which are all of them: it must not.
-  2. Core's own deployment: the host's network namespace and `NET_ADMIN`, with `ip`
-     and `nft` in its image. Only its own interface, table, rule and route table.
-  3. Enrolment, the self-probe, the Network page and wizard, ARM64, the real VPS.
-- **Still to do in this phase:** proving Core's end of the tunnel as above (the
-  interface, the way back,
-  forwards from servers' ports, asking after the Gate); enrolment with a join token and
-  fresh keys; the self-probe and the choice of mode; the Network page and the wizard;
-  the ARM64 build; and then the real VPS, which is a working machine (§10) and will be
-  touched only after the lab is green from end to end.
+  adds no route for home's allowed addresses, which was the thing to watch. (The lab
+  has changed since, and so has the count: see below and §10.)
+- *How the rest of the phase is to be done* (decided 2026-10-06, the owner having said
+  "dont stop until finished with phase 3" and to commit as it goes):
+  - *Getting the Gate onto a VPS.* There are no releases to download until Phase 6, so
+    the one-line installer waits for them. Until then the binary is copied over
+    (`scripts/dev.sh` does it for the owner's VPS) and installs itself:
+    `homewarp-gate join <token>` writes its two files and a systemd unit, opens what a
+    host firewall such as ufw needs, and starts. The wizard shows that command.
+  - *Enrolment.* Core makes the token: a bootstrap key for the Gate, home's public
+    key, a preshared key, the Gate's API token and the ports. On first contact Core
+    asks the Gate to make a key of its own (`POST /v1/rotate`), and both switch to it.
+  - *Self-probe.* The Gate opens a port for a moment (`POST /v1/probe`); Core connects
+    to the VPS's public address from home and sees whether it comes back through the
+    tunnel with home's own address. If not, NAT mode, said plainly on the Network page.
+  - *Real machines.* `server1` and the homelab are working machines. Neither is
+    rebooted for a test: the reboot checks are the lab's, and on the real pair the
+    Gate's service and Core's container are restarted and the tunnel's interface
+    removed, which is what a reboot does to them.
+- *Done in the lab (2026-10-06): the rest of what the phase lists.*
+  - *Enrolment.* Core makes the command, the VPS runs it, and within a few seconds the
+    Gate has keys of its own (§5.5). The lab checks that the Gate's key is not the one
+    the command carried, that home knows the Gate by the new one, that the preshared key
+    and the Gate's token are new as well, that the token the command carried opens
+    nothing, and that the command is gone from Core once it has been used.
+  - *The self-probe* and the choice of mode (§5.3). The lab makes both verdicts happen:
+    with the way back open, *preserved*; with a rule put ahead of Homewarp's that sends
+    marked replies out by the home's own line, Core finds that nothing gets back, has
+    the Gate stand in for players, probes again, and says *hidden*. Taken away, it finds
+    *preserved* again.
+  - *Ports.* A server's first port and its further ones, each for TCP, UDP or both
+    (§5.6), from the form through Docker's published ports to the Gate's two maps.
+  - *Both ends heal themselves* (§5.4). In the lab: the Gate's table emptied by something
+    else; the VPS's end wiped as a reboot wipes it; home's end wiped while Core runs;
+    Core restarted with home's end gone; and the home's address changed, to which the
+    Gate's status then answers with the new one.
+  - *The Network page and the wizard* (DESIGN.md), and the Gate's mark in the sidebar.
+    Address chips say the VPS's address once one is connected. The mark and the chips
+    are wanted and not needed: nothing but the two Network pages waits for the Gate, and
+    every page shares the one request. Measured on a first load of the Servers page: its
+    two reads leave together at 21 ms, the page is painted at 40 ms, and the Gate was
+    asked for at 32 ms, once the sidebar was there to want it. On the Network page the
+    Gate and the session leave together.
+  - *ARM64.* `dev.sh gate` builds both, 3.4 MB for x86_64 and 3.1 MB for ARM64, and runs
+    the ARM64 one once under an emulator. That it forwards on an ARM machine is not
+    shown: there is none here.
+  - *The budget of §7.1*, asserted: 3 MB resident against 20; one file under 10 MB for
+    each architecture; never killed for memory in a container held to 1 CPU and 128 MB.
+    Recorded, not asserted: while iperf3 pushed about 950 Mbit/s and then 100 Mbit/s
+    through the tunnel, the Gate program used no processor time that its clock could
+    count. Packets do not pass through it.
+- Found: **a key kept as it was made never looks like the one the kernel has.** The
+  kernel sets three bits of a private key its own way. Each end compares the interface
+  with what it wants before touching it, found the key different every time, and set the
+  interface up again: at home every ten seconds, on the VPS every thirty. Each time the
+  session was lost, and on the VPS the knowledge of where home is. The first full run
+  showed it as six failures that came and went. Keys are now made the kernel's way, and
+  compared that way whoever made them. Keys from `wg genkey`, which the lab used until
+  enrolment existed, are made that way already, which is why nothing showed it before.
+- Found: setting WireGuard up again takes the interface's address away for a moment,
+  and the kernel drops every route through an interface that has no address. So home's
+  route for replies is put back every round, not only when the tunnel is first made.
+- Found: a server asked the home's router for names, and the tunnel's rules keep a
+  server from the home network, the router with it (§5.6).
+- Found: the lab's own network was in the way (§10), and a request whose sender hangs
+  up at once is dropped by the panel unanswered, which looked like a rule blocking it.
+- Found: the Gate program undoes what the lab does to it. The lab plays a taken-over
+  VPS by widening the Gate's WireGuard settings by hand; when the Gate's look at the
+  kernel fell inside those seconds it put the interface back as it should be, which is
+  right, and costs the session, which failed the four checks that came next. Whoever has
+  taken a VPS over is not running the Gate, so the lab stops it for that part.
+- *Done on the real machines (2026-10-06):* the homelab and the owner's VPS, a working
+  machine each, 45 ms apart.
+  - *Core's deployment* is in the homelab's own network namespace with `NET_ADMIN`, behind
+    its door (§10). The thirty other containers there were running before and after, and
+    with no VPS connected Core makes nothing in the machine's network at all.
+  - *The trial* was made from the scratch copy, so that staging's database stayed empty
+    for the owner. `dev.sh vps` put the Gate on the VPS; the panel made the command; run
+    there, it opened ufw, installed the service and started it, and the tunnel was up
+    within the seconds it takes to look. The self-probe found *preserved*.
+  - *A player joined through the VPS's public address*, from the workstation, and the
+    server wrote down the workstation's own public address, not the Gate's. The server
+    was a stand-in that says who joined: a Minecraft server needs its EULA agreed to,
+    which is the owner's to do, so a game's own log of a real player is still to come.
+  - With the tunnel's rules in place on the homelab, a server still looked names up, and
+    could not reach the home's router. From the VPS, neither the homelab's SSH nor the
+    panel could be reached through the tunnel. The Gate held 3 MB on the VPS.
+  - *It came back by itself*: the Gate's service restarted, and no connection was
+    refused; the tunnel wiped from the VPS's kernel as a reboot wipes it, back in 29 s;
+    home's end wiped under a running Core, back in 7 s; Core restarted with its end gone,
+    back at once. Neither machine was rebooted, and the home's address was not changed:
+    those two are the lab's.
+  - *Disconnected from the page*, home's kernel was as before, and the Gate had been told
+    to forward nothing. `homewarp-gate leave` then took the Gate off the VPS, which is as
+    it was found: on the last run its ufw went from ten rules to sixteen and back to ten.
+    The homelab has one container more than it had, the door.
+- Found on the real machines, each of them invisible in the lab:
+  - the homelab's ufw shut the panel's port once Core was in the host's network, and a
+    check made from the homelab itself said all was well (§10: the door);
+  - the same ufw dropped the self-probe's first design, which listened on the home
+    machine itself (§5.3);
+  - `leave` left the VPS two of its three openings in ufw: the one for routed traffic is
+    taken away with `ufw route delete`, not `ufw delete route`. They were removed by hand
+    and the program put right.
+- Left for the owner: an account on staging (its setup code is in `docker logs homewarp`),
+  then `bash scripts/dev.sh vps` and Network → Connect a VPS to connect the VPS for good.
+- Moved: traffic for each forwarded port, and with it the traffic column of the
+  Network page, to Phase 4. Rate limits as a setting to Phase 5, where the other limits
+  are. firewalld set up by `join` itself, and not only described, to Phase 6. Checking
+  the tunnel's addresses against the home machine's own networks before the first
+  connection, to Phase 6 as well.
 
 **Phase 4 — Day-two features**
 - File manager (browse, edit, upload, archive/extract), backups (tar.zst, restore,
   retention), schedules, audit log, sub-users and permissions, SFTP.
+- From Phase 3: traffic for each forwarded port, counted by the Gate and shown on the
+  Network page; which resolvers servers ask, as a setting.
 
 **Phase 5 — Hardening and public panel**
 - TLS/ACME (domain and IP certificates), TOTP, passkeys, rate limits.
 - LAN-egress block, Gate rate limits, "harden VPS" with commit-confirm.
 - Fuzz the egg and config-file parsers; path-traversal test suite; threat-model review.
+- From Phase 3: the door hides from Core who is asking, which rate limits will need
+  (PROXY protocol on the socket, or the door's own count).
 
 **Phase 6 — Packaging and onboarding**
 - One-line installers, signed releases, self-update, ARM64 builds of Core, docs.
 - Template catalogue browser, and importing an egg from a URL (from Phase 2: both have
   Core fetch from the internet); first-run wizard polish; five-minute target measured.
+- From Phase 3: the Gate's one line, which fetches the program before `join` runs;
+  firewalld set up by `join` and not only described; the tunnel's addresses checked
+  against the home machine's own networks; a home machine with a firewall of its own
+  and no Docker to publish the panel's port for it.
 
 **Phase 7 — Later**
 - Minecraft hostname routing (many servers on one `:25565`), sleep + wake-on-connect,
@@ -1080,9 +1275,14 @@ Still open:
 6. **Core's privileges on the homelab** — the Docker socket has the owner's go-ahead,
    given on 2026-10-06 in the words "sure ok if its non breaking". That condition is a
    rule for the runtime: Core touches only the containers, networks and volumes it made
-   and labelled as its own, never prunes, and never restarts the daemon. Still needing a
-   go-ahead before Phase 3 deploys: setting up the tunnel from a container in the host's
-   own network namespace.
+   and labelled as its own, never prunes, and never restarts the daemon. Setting up the
+   tunnel from a container in the host's own network namespace has it too: the owner
+   was told on 2026-10-06 what Core would make there (one interface, one nftables table,
+   one routing rule and its table, and none of them until a VPS is connected) and what
+   the Gate would put on the VPS (one binary, one small directory, one systemd unit and
+   the openings in ufw), and answered "Sure commit and dont stop until finished with
+   phase 3". The same rule holds for the network as for Docker: Core touches what it
+   made and nothing else, and `deploy/compose.yml` says what that is.
 
 ## 14. Earning from it (explored 2026-10-05)
 

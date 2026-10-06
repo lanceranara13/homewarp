@@ -10,9 +10,12 @@ home address stays hidden and your router needs no setup.
 > unmodified Paper egg installs, starts and stops. The panel imports eggs, makes servers
 > from them, installs, starts and stops them, starts them again after a crash, and has a
 > live console to read and type into. Paper, a SteamCMD game and a non-game app have each
-> been installed and run from their published eggs. There is no tunnel in it yet, so
-> servers are reached on the home network only. The plan is in
-> [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
+> been installed and run from their published eggs. The tunnel is in it: a VPS is connected
+> from the panel with one command, makes keys of its own on first contact, and forwards
+> each server's ports home, where the panel checks for itself whether servers see their
+> players' own addresses. Both ends put the tunnel back when a reboot or another program
+> takes it away. There are no releases yet, so nothing here installs with one line. The
+> plan is in [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works
 
