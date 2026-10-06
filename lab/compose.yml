@@ -44,6 +44,15 @@ services:
     stop_grace_period: 1s
     networks: { inet: { ipv4_address: 203.0.113.30 } }
 
+  # Where releases are fetched from: a web server on the internet, serving what
+  # scripts/release.sh made. run.sh puts a release there, signed with a key of
+  # the lab's own making.
+  releases:
+    <<: *node
+    depends_on: [gate]
+    command: ["sh", "-c", "mkdir -p /releases && exec httpd -f -p 80 -h /releases"]
+    networks: { inet: { ipv4_address: 203.0.113.40 } }
+
   # Something on the home LAN that neither the gate nor a game server may touch.
   nas:
     <<: *node

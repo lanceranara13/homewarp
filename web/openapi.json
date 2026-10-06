@@ -4731,7 +4731,7 @@
               "string",
               "null"
             ],
-            "description": "While a VPS is awaited: what to run on it, as root."
+            "description": "While a VPS is awaited: what to run on it, as root. Where this\nHomewarp knows where its releases are, the command fetches the Gate\nfirst; otherwise it takes the Gate to be on the VPS already."
           },
           "expires_at": {
             "type": [

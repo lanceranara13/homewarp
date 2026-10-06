@@ -396,8 +396,15 @@ function CommandStep({ gate }: { gate: Gate }) {
       </p>
       {gate.command && <CopyChip text={gate.command} />}
       <p className="text-small text-ink-subtle">
-        It needs the <code className="font-mono">homewarp-gate</code> program on the VPS. It sets up the tunnel, a service that
-        keeps it up, and the openings a firewall on the VPS needs. Nothing else there is touched.
+        {gate.command?.startsWith('curl') ? (
+          <>It fetches the Gate program and checks it against Homewarp’s signature before running it.</>
+        ) : (
+          <>
+            It needs the <code className="font-mono">homewarp-gate</code> program on the VPS.
+          </>
+        )}{' '}
+        It sets up the tunnel, a service that keeps it up, and the openings a firewall on the VPS needs. Nothing else
+        there is touched.
       </p>
       <p className="flex flex-wrap items-center gap-x-2 text-ink">
         <LoaderCircle aria-hidden className="size-4 animate-spin motion-reduce:animate-none" />

@@ -53,6 +53,9 @@ pub struct AppState {
     pub(crate) tunnel: Arc<Tunnel>,
     setup_code: Option<Arc<str>>,
     sftp_port: Option<u16>,
+    /// Where Homewarp's releases are fetched from, where that is known: what
+    /// a VPS is told to fetch its Gate from.
+    pub(crate) releases: Option<Arc<str>>,
     /// How often a sign-in has failed, from where and at which account.
     pub(crate) limits: Arc<Limiter>,
     /// The port the panel is served on over TLS, where it is.
@@ -89,6 +92,7 @@ impl AppState {
             runtime,
             setup_code,
             sftp_port: None,
+            releases: None,
             limits: Arc::default(),
             tls_port: None,
             shown: Arc::default(),
@@ -114,6 +118,17 @@ impl AppState {
     /// Nothing, where it is not served.
     pub fn sftp_at(mut self, port: Option<u16>) -> Self {
         self.sftp_port = port;
+        self
+    }
+
+    /// Says where releases are fetched from: an address that serves what
+    /// `scripts/release.sh` made. With it, the command a VPS is given fetches
+    /// the Gate itself; without, it takes the Gate to be there already.
+    pub fn releases_at(mut self, address: Option<String>) -> Self {
+        self.releases = address
+            .map(|address| address.trim().trim_end_matches('/').to_owned())
+            .filter(|address| !address.is_empty())
+            .map(Arc::from);
         self
     }
 

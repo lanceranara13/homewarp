@@ -959,7 +959,9 @@ struct GateView {
     state: GateState,
     /// The VPS's public address: what players type.
     address: Option<String>,
-    /// While a VPS is awaited: what to run on it, as root.
+    /// While a VPS is awaited: what to run on it, as root. Where this
+    /// Homewarp knows where its releases are, the command fetches the Gate
+    /// first; otherwise it takes the Gate to be on the VPS already.
     command: Option<String>,
     /// When that command stops counting, in Unix seconds.
     expires_at: Option<i64>,
@@ -1026,7 +1028,14 @@ async fn view(state: &AppState) -> Result<GateView, Problem> {
             .as_ref()
             .and_then(|gate| gate.join.as_ref())
             .filter(|(_, until)| *until > now)
-            .map(|(token, _)| format!("homewarp-gate join {token}")),
+            .map(|(token, _)| match &state.releases {
+                // One line that fetches the Gate, checks it and enrols the VPS.
+                Some(releases) => {
+                    format!("curl -fsSL {releases}/install-gate.sh | sh -s -- {token}")
+                }
+                // The Gate is taken to be on the VPS already.
+                None => format!("homewarp-gate join {token}"),
+            }),
         expires_at: gate
             .as_ref()
             .and_then(|gate| gate.join.as_ref())

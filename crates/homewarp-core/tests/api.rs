@@ -88,6 +88,23 @@ async fn panel() -> Panel {
     panel_at(None).await
 }
 
+/// A panel that knows where its releases are fetched from, as an installed one does.
+async fn installed_panel(releases: &str) -> Panel {
+    let files = tempfile::tempdir().unwrap();
+    let db = open(&files.path().join("homewarp.db")).await.unwrap();
+    let state = AppState::start(db.clone(), files.path(), None)
+        .await
+        .unwrap()
+        .releases_at(Some(releases.to_owned()));
+    let setup_code = state.setup_code().unwrap().to_owned();
+    Panel {
+        app: app(state),
+        setup_code,
+        db,
+        files,
+    }
+}
+
 /// A panel that is served over TLS on this port as well, as one behind a door
 /// for it is. Nothing here listens, and no certificate is asked for.
 async fn panel_at(tls: Option<u16>) -> Panel {
@@ -661,6 +678,28 @@ async fn a_vps_is_connected_with_one_command_that_counts_for_a_while() {
     let gone = panel.delete("/api/v1/gate", Some(&cookie)).await;
     assert_eq!(gone.status, StatusCode::NO_CONTENT);
     assert_eq!(gate().await.body["state"], "none");
+}
+
+#[tokio::test]
+async fn an_installed_homewarp_gives_a_vps_one_line_that_fetches_its_gate() {
+    let panel = installed_panel(" https://releases.example.com/homewarp/ ").await;
+    let cookie = panel.set_up().await;
+    let asked = json!({ "address": "203.0.113.10" });
+    let begun = panel.post("/api/v1/gate", asked, Some(&cookie)).await;
+    assert_eq!(begun.status, StatusCode::CREATED, "{}", begun.body);
+    let command = begun.body["command"].as_str().unwrap();
+    let (fetch, token) = command.rsplit_once(' ').unwrap();
+    assert_eq!(
+        fetch,
+        "curl -fsSL https://releases.example.com/homewarp/install-gate.sh | sh -s --"
+    );
+    // The token is one word that survives a shell, so nothing follows it by accident.
+    assert!(token.len() > 100);
+    assert!(
+        token
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    );
 }
 
 #[tokio::test]

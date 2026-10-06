@@ -101,7 +101,10 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::start(db, &data, runtime)
         .await?
         .sftp_at(sftp.as_ref().and(sftp_port))
-        .tls_at(tls.as_ref().and(tls_port), authority);
+        .tls_at(tls.as_ref().and(tls_port), authority)
+        // Where releases are fetched from, which an installed Homewarp is
+        // told and one run from its sources is not.
+        .releases_at(set("HOMEWARP_RELEASES"));
     state.keep_tunnel();
     state.keep_schedules();
     if let Some(listen) = tls {

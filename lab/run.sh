@@ -35,6 +35,7 @@ cd "$(dirname "$0")"
 export HOME_FW=${HOME_FW:-iptables}
 GATE_IP=203.0.113.10 HOME_IP=203.0.113.20 HOME_IP_NEXT=203.0.113.21 CLIENT_IP=203.0.113.50
 PEBBLE_IP=203.0.113.30
+RELEASES_IP=203.0.113.40  # where releases are fetched from, as a web server on the internet
 NAME=panel.lab  # the panel's name, which leads to the gate
 TLS=8443        # the panel over TLS: its door at home, and the port the gate forwards for it
 ROUTER_LAN_IP=192.168.50.2 HOME_LAN_IP=192.168.50.20 NAS_IP=192.168.50.30
@@ -99,12 +100,13 @@ start_core() {
   # Over TLS it is served to a door, as the deployment serves it, and its certificate is asked of pebble.
   dc exec -d home sh -c "HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=0.0.0.0:3600 HOMEWARP_IMAGE=homewarp-lab-core \
     HOMEWARP_TLS=unix:/run/hw/core/run/tls.sock HOMEWARP_TLS_PORT=$TLS \
-    HOMEWARP_ACME=https://pebble:14000/dir HOMEWARP_ACME_ROOT=/run/hw/pebble.pem homewarp >>/run/hw/core.log 2>&1"
+    HOMEWARP_ACME=https://pebble:14000/dir HOMEWARP_ACME_ROOT=/run/hw/pebble.pem \
+    HOMEWARP_RELEASES=http://$RELEASES_IP homewarp >>/run/hw/core.log 2>&1"
   for _ in $(seq 40); do core GET /health >/dev/null 2>&1 && break; sleep 0.5; done
 }
 
 cmd_up() {
-  local code command token root
+  local code command token root release version
 
   echo "== containers"
   dc build
@@ -172,15 +174,27 @@ EOF
   for _ in $(seq 30); do [ -n "$(dc exec -T home docker ps -q --filter publish=$IPERF)" ] && break; sleep 1; done
   dc exec -T home docker ps --format '   {{.Names}}  {{.Ports}}' | cut -c1-130
 
+  echo "== a release: the programs, a signed list of them, and the install scripts"
+  # Made as a real one is (scripts/release.sh), signed with a key that is made
+  # here and thrown away, and put where the lab's internet fetches releases from.
+  release=$(mktemp -d)
+  openssl genpkey -algorithm ed25519 -out "$release/key.pem"
+  version=$(../deploy/out/homewarp-gate version | cut -d' ' -f2)
+  sh ../scripts/release.sh ../deploy/out "$release/served" "$version" "http://$RELEASES_IP" "$release/key.pem" | sed 's/^/   /'
+  dc exec -T releases sh -c 'rm -rf /releases/* /tmp/released'
+  dc cp "$release/served/." releases:/releases >/dev/null
+  rm -rf "$release"
+
   echo "== a VPS is connected: Core makes the one command, and the VPS runs it"
   command=$(core POST /gate "{\"address\":\"$GATE_IP\"}" | field command)
   token=${command##* }
   echo "   ${command:0:60}… (${#token} characters)"
-  dc cp ../deploy/out/homewarp-gate gate:/usr/local/bin/homewarp-gate
-  dc exec -T gate sh -c 'pkill homewarp-gate; ip link del homewarp0; rm -rf /run/hw; true' 2>/dev/null
-  # No service in a container: the lab starts the Gate itself.
-  # Nor a default route, on a network with no way out: the interface is named.
-  dc exec -T gate homewarp-gate join "$token" --dir /run/hw --no-service --wan eth0 | sed 's/^/   /'
+  dc exec -T gate sh -c 'pkill homewarp-gate; ip link del homewarp0; rm -rf /run/hw /usr/local/bin/homewarp-gate; true' 2>/dev/null
+  # The line the panel gave, as it is: it fetches the Gate, checks it and enrols
+  # the VPS. What follows it is for the lab alone. No service in a container:
+  # the lab starts the Gate itself. Nor a default route, on a network with no
+  # way out: the interface is named.
+  dc exec -T gate sh -c "$command --dir /run/hw --no-service --wan eth0" | sed 's/^/   /'
   printf '%s' "$token" | dc exec -T gate sh -c 'cat > /run/hw/join-token'
   start_gate
   until_gate player_addresses preserved 40 || true
@@ -260,6 +274,30 @@ panel_is() { core GET /panel | field "$1"; }
 cmd_test() {
   local HOME_PUB joined carried rss size wan token answer
   echo "home: $(dc exec -T home sh -c 'docker version --format "Docker {{.Server.Version}}"; iptables --version' | tr '\n' ' ') firewall backend $HOME_FW"
+
+  echo "== a release is trusted for its signature, and not for where it came from"
+  # A machine that has nothing of Homewarp on it yet, given a token that is none:
+  # the Gate is fetched, checked and put in place, and only then is the token read.
+  install() { dc exec -T client sh -c "curl -fsSL http://$RELEASES_IP/install-gate.sh | sh -s -- not-a-token 2>&1 | tail -1" || true; }
+  installed() { dc exec -T client sh -c 'test -e /usr/local/bin/homewarp-gate && echo there || echo not there'; }
+  check "the panel's command fetched the Gate from the release" "$(core GET /activity | python3 -c 'import json, sys; print(any(e["action"] == "gate.connect" for e in json.load(sys.stdin)))') $(dc exec -T gate /usr/local/bin/homewarp-gate version)" "True $(../deploy/out/homewarp-gate version)"
+  dc exec -T client rm -f /usr/local/bin/homewarp-gate
+  check "control: the Gate as it was released is installed, and only then is the token found wanting" "$(install)" "Error: That is not a join token. Copy the whole command from the panel."
+  check "control: it is on the machine" "$(installed)" "there"
+  dc exec -T client rm -f /usr/local/bin/homewarp-gate
+  dc exec -T releases sh -c 'cp -r /releases /tmp/released && cd /releases/*/ && echo changed >> homewarp-gate-x86_64'
+  check "a program that was changed after it was released is not installed" "$(install)" "Homewarp: homewarp-gate-x86_64 is not the file that was released. Nothing was installed."
+  dc exec -T releases sh -c 'cd /releases/*/ && sha256sum homewarp-* > SHA256SUMS'
+  check "nor is one whose list of checksums was made to fit it: that list is not the one that was signed" "$(install)" "Homewarp: the list of checksums is not signed with Homewarp's key. Nothing was installed."
+  dc exec -T releases sh -c 'cd /releases/*/ && openssl genpkey -algorithm ed25519 -out /tmp/other.pem && openssl pkeyutl -sign -inkey /tmp/other.pem -rawin -in SHA256SUMS -out SHA256SUMS.sig'
+  check "nor one whose list is signed with somebody else's key" "$(install)" "Homewarp: the list of checksums is not signed with Homewarp's key. Nothing was installed."
+  dc exec -T releases sh -c 'cd /releases/*/ && rm SHA256SUMS.sig'
+  check "nor one with no signature at all" "$(install)" "Homewarp: SHA256SUMS.sig could not be fetched from http://$RELEASES_IP."
+  check "and nothing of any of them is on the machine" "$(installed)" "not there"
+  # Its contents, and not the folder: the web server stands in the folder it was started in.
+  dc exec -T releases sh -c 'rm -rf /releases/* && cp -r /tmp/released/. /releases/ && rm -rf /tmp/released'
+  check "the release put back as it was installs again" "$(install) $(installed)" "Error: That is not a join token. Copy the whole command from the panel. there"
+  dc exec -T client rm -f /usr/local/bin/homewarp-gate
 
   echo "== enrolment: the VPS ran one command, and what that command carried no longer counts"
   check "Core has a Gate" "$(gate_is state)" "connected"

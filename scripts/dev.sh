@@ -4,7 +4,7 @@
 #
 # Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | build | gate | deploy
 #               | scratch [down] | run <cmd...> | lab [cmd] | vps [leave] | paper [clean]
-#               | du | prune
+#               | release | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
@@ -188,6 +188,41 @@ cmd_gate() {
     'apk add -q --no-cache qemu-aarch64 >/dev/null 2>&1 && printf \"on ARM64: \" && qemu-aarch64 /out/homewarp-gate-arm64 version'"
 }
 
+# Builds what a release holds, for both kinds of processor, and puts it together
+# on the homelab in $REMOTE/release (scripts/release.sh): the programs, a signed
+# list of their checksums, and the two install scripts.
+#
+#   RELEASES=https://example.com/homewarp bash scripts/dev.sh release
+#
+# RELEASES is where that folder will be served from: it is written into the
+# install scripts and is what an installed Homewarp tells a VPS. RELEASE_KEY is
+# the Ed25519 key that signs, kept on the homelab and nowhere in this
+# repository ($REMOTE/release.key unless said otherwise). Whoever installs
+# trusts that key and nothing else, so it is its owner's to make and to keep:
+#   ssh home 'openssl genpkey -algorithm ed25519 -out /home/lance/homewarp/release.key'
+cmd_release() {
+  : "${RELEASES:?say where the release will be served from: RELEASES=https://...}"
+  local key=${RELEASE_KEY:-$REMOTE/release.key} version
+  cmd_sync && builder
+  # The web interface first: Core carries it inside, as it is when Core is compiled.
+  in_node 'npm install --no-save && npm run build'
+  in_builder 'for target in x86_64 aarch64; do
+                cargo build --release -p homewarp-gate -p homewarp-core --target $target-unknown-linux-musl
+              done
+              mkdir -p deploy/out && cd /target
+              cp x86_64-unknown-linux-musl/release/homewarp-gate /work/deploy/out/
+              cp x86_64-unknown-linux-musl/release/homewarp /work/deploy/out/homewarp-static
+              cp aarch64-unknown-linux-musl/release/homewarp-gate /work/deploy/out/homewarp-gate-arm64
+              cp aarch64-unknown-linux-musl/release/homewarp /work/deploy/out/homewarp-static-arm64'
+  # Nothing here is an ARM machine: an emulator says whether those two run, and
+  # whether Core gets as far as making its database there.
+  home "docker run --rm -v $REMOTE/src/deploy/out:/out:ro alpine:3.20 sh -c \
+    'apk add -q --no-cache qemu-aarch64 >/dev/null 2>&1 && printf \"on ARM64: \" && qemu-aarch64 /out/homewarp-gate-arm64 version &&
+     mkdir /tmp/data && printf \"on ARM64, Core: \" && HOMEWARP_DATA=/tmp/data qemu-aarch64 /out/homewarp-static-arm64 two-steps-off nobody'"
+  version=$(home "$REMOTE/src/deploy/out/homewarp-gate version | cut -d' ' -f2")
+  home "sh $REMOTE/src/scripts/release.sh $REMOTE/src/deploy/out $REMOTE/release $version '$RELEASES' $key"
+}
+
 # Puts the Gate just built on a VPS, by way of this machine: the homelab and the
 # VPS need not know each other. Enrolling it is then one command, which the
 # panel gives. `vps leave` takes the Gate off the VPS again, with all it made.
@@ -265,8 +300,9 @@ case "${1:-}" in
   scratch) shift; cmd_scratch "$@" ;;
   lab)   shift; cmd_lab "$@" ;;
   vps)   shift; cmd_vps "$@" ;;
+  release) cmd_release ;;
   paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | gate | deploy | scratch [down] | run <cmd...> | lab [cmd] | vps [leave] | paper [clean] | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | gate | deploy | scratch [down] | run <cmd...> | lab [cmd] | vps [leave] | paper [clean] | release | du | prune" >&2; exit 2 ;;
 esac
