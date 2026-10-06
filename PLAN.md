@@ -1,9 +1,10 @@
 # Homewarp — project plan
 
-> Name decided 2026-10-05 (see §2). Status: Phase 0 and Phase 1 are done (§11). The tunnel
-> is proven on a real VPS and against a real Docker daemon, the Paper egg runs end to end,
-> and Core's skeleton — accounts, sessions, first-run setup, the panel's shell — is staged
-> on the homelab at port 3600. How the panel is reached is being reconsidered (§13).
+> Name decided 2026-10-05 (see §2). Status: Phases 0 to 4 are done (§11), each but for
+> what is said beside it. The tunnel is proven on a real VPS and against a real Docker
+> daemon, eggs install and run from the panel, a VPS is connected with one command, and a
+> server's files, backups, schedules and further accounts are in the panel, which is
+> staged on the homelab at port 3600. How the panel is reached is being reconsidered (§13).
 
 ## 1. What it is
 
@@ -417,6 +418,12 @@ A template is one row: the whole document the importer made, as JSON, with the e
 came from beside it. Nothing is ever asked of a part of a template, and a better
 importer can read the egg again. So there is no `template_variables` table; a server's
 own values can be kept by variable name.
+
+As built in Phase 4: the accounts let into a server are in `server_users`, each with
+what it may do there; a schedule's steps are kept in the schedule's own row, for the
+reason a template's variables are, so there is no `schedule_tasks`; and `traffic`, which
+the list above lacks, holds what the Gate counted through each port, an hour to a row.
+There are no API keys yet.
 
 ### 5.8 API and UI
 
@@ -1180,11 +1187,108 @@ Each phase ends with something that works on the homelab.
   the tunnel's addresses against the home machine's own networks before the first
   connection, to Phase 6 as well.
 
-**Phase 4 — Day-two features**
+**Phase 4 — Day-two features** — *done 2026-10-06, but for traffic counted on the real VPS, which has no Gate on it now, and an SFTP program with windows, which is the owner's to try*
 - File manager (browse, edit, upload, archive/extract), backups (tar.zst, restore,
   retention), schedules, audit log, sub-users and permissions, SFTP.
 - From Phase 3: traffic for each forwarded port, counted by the Gate and shown on the
   Network page; which resolvers servers ask, as a setting.
+- *A server's page is now a frame with tabs* (DESIGN.md, Inside a server): Console,
+  Files, Backups, Schedules, Users, Settings. The frame holds the name, the state, the
+  address and the power controls, and the socket: a console left for another tab is as
+  it was on coming back. An account sees the tabs it may use and no others.
+- *Files.* Every path a request names is opened through `cap-std` (§6), in
+  `homewarp-runtime`: listing, reading text up to 4 MB, writing, making folders, moving,
+  deleting, packing into a `tar.gz` and unpacking a zip, a tar, a `tar.gz` or a
+  `tar.zst`. A path that says `..` is refused as written; a link that leads out is
+  refused by the kernel's own resolution, whatever it is named.
+  - A file that is written, by an upload or by the editor, is written beside its place
+    and moved into it once it is whole, and keeps the mode of the file it replaces: a
+    start script that is edited can still be run.
+  - A download is answered as `application/octet-stream`, as an attachment, with
+    `nosniff`: a page that a plugin wrote among a server's files never opens as a page
+    of the panel's.
+  - An archive is somebody else's word for where files go. An entry named `../x` or
+    `/x` is passed over; one that would be written through a link is passed over; a
+    file takes the place of what is there by its name and is not written into it. What
+    is uploaded, packed or unpacked stops short of the last gigabyte of the disk, which
+    is also what stops an archive that unpacks to more than it should.
+  - The page: a table of the folder with a menu on each row, upload by a button or by
+    dropping files on it, with how far each has got; an editor that is a plain text
+    box, saves on Ctrl-S, keeps Windows line ends where it found them, and asks before
+    unsaved text is left. What the files take of the disk, and what is left of it, is
+    asked for after the folder is painted.
+- *Accounts.* The account made at setup owns the Homewarp and makes the others
+  (Settings). Another account sees no server until the owner lets it into one, on that
+  server's Users tab; being let in is being let look, and what it may do besides is one
+  of six things: console, power, files, backups, schedules, settings. To an account
+  that has not been let into a server, the server is not there (404, not 403). Making
+  and removing servers, templates, the VPS and the accounts are the owner's. An account
+  changes its own password; the owner can give it another, which signs it out.
+- *Activity.* What is done through the panel is written down once it has been done:
+  who, when, to which server, and a line of detail such as a path or the command that
+  was typed. The owner reads it on the Activity page, by server and by account. A
+  sign-in with the wrong password is written down against the account it was for, and
+  what was typed where no account is, is not. Lines are kept half a year.
+- *Backups.* One `tar.zst` of everything in a server's files, kept in `backups/` beside
+  the servers' files and not among them, so that a server cannot reach its own. Made in
+  the background while the server runs; the newest three are kept unless the Backups
+  tab says another number. Putting one back needs the server stopped, shows it as
+  *Restoring* so that nothing starts it half way, reads the backup through to its end
+  before it touches a file, and says in the console how it went.
+- *Schedules.* Up to ten steps, each a command, a start, a stop, a restart, a kill or a
+  backup, with a wait before it, at times written as cron writes them. The times are
+  read on the clock of whoever set them, as so many minutes from UTC: a fixed distance,
+  so where clocks change in summer a schedule runs an hour off for half the year.
+  What came due while Homewarp was not running is passed over, not run late. Each run
+  says what it came to, and is written down under Homewarp's own name.
+- *SFTP.* The same files through the same `cap-std` directory, for a program made to
+  move many of them. A sign-in is an account and a server at once, `sam.3`, with the
+  account's own password and nothing else, and is let in if the account may use the
+  Files tab there. There is no shell and no command: either is refused at once. It is
+  reached through a door of its own on port 2022 (§10: the door), and its host key is
+  made on first start and kept beside the database.
+- *Traffic.* The Gate's table has the forwarded ports once more, as two sets whose
+  every element counts what matched it; Core adds what is new to the hour each time it
+  hears from the Gate, and the Network page shows the last day. A VPS whose `nft` is
+  too old for such sets refuses that table, and is given the one without them.
+- *Resolvers* are a setting now (Settings, the owner's): one to three addresses on the
+  internet. One at home is refused in words, for the reason §5.6 gives.
+- *Exit, driven against a throwaway copy on the homelab's own Docker.* A server made
+  from a one-line egg whose console is a shell:
+  - files uploaded, moved, packed, deleted, unpacked and edited through the page, in
+    both themes and at a phone's width; every file belonged to the server's user;
+  - a backup made while it ran, a restore refused until it was stopped, then done:
+    the changed file was as it had been and the added one was gone;
+  - a schedule set for every minute ran by itself within the minute and typed its line
+    into the console; one set off by hand made its backup, and another stopped the
+    server, waited, and started it;
+  - a second account saw nothing; let in with `files` alone it had two tabs, no power
+    controls and no line to type into;
+  - OpenSSH's `sftp` listed, uploaded, downloaded the same bytes back, renamed and
+    deleted, and `get ../../../homewarp.db` found no such file; the wrong password, the
+    account that had not been let in, a server that is not there and `ssh … id` were
+    all refused;
+  - the lab (§10), whole, with one section more: the Gate counted through the ports
+    just used, and home added it to the hour.
+- Found on the throwaway copy, and invisible to the tests, which run as an ordinary
+  user: Core is root with three of root's powers (deploy/compose.yml), and changing
+  the mode of a file is not one of them once the file has been given to the server's
+  user. Unpacking wrote every file and then reported each as passed over. A file's mode
+  is now set before it is given away, and a file that is unpacked over another takes
+  its place.
+- Not driven: dropping files onto the page, an upload large enough to watch, a backup
+  of a real world, the traffic column with a real VPS behind it, and an SFTP program
+  other than OpenSSH's.
+- Left for the owner, on staging, which has all of it and still no account: the tabs of
+  a server's page, Activity and Settings in the sidebar, and
+  `sftp -P 2022 <account>.<server's id>@192.168.1.250`, or the same in a program with
+  windows. Staging publishes one port more than it did: 2022.
+- Not in it, each said where it shows: the editor colours nothing; packing makes a
+  `tar.gz` and no zip; a folder is not uploaded as a folder; a file moved by SFTP is not
+  written down one by one, only the sign-in; `setstat` over SFTP is answered and not
+  carried out, for the reason above; a server has no limit on its disk; the web bundle
+  has passed 500 kB and is not yet split; and sign-ins are not rate-limited, here or in
+  the panel, until Phase 5.
 
 **Phase 5 — Hardening and public panel**
 - TLS/ACME (domain and IP certificates), TOTP, passkeys, rate limits.

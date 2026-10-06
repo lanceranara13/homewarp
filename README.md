@@ -14,7 +14,10 @@ home address stays hidden and your router needs no setup.
 > from the panel with one command, makes keys of its own on first contact, and forwards
 > each server's ports home, where the panel checks for itself whether servers see their
 > players' own addresses. Both ends put the tunnel back when a reboot or another program
-> takes it away. There are no releases yet, so nothing here installs with one line. The
+> takes it away. A server's files are managed from the panel and over SFTP, backed up and
+> put back, and worked on by the clock; further accounts can be let into single servers
+> for chosen things, and what is done is written down. There are no releases yet, so
+> nothing here installs with one line. The
 > plan is in [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works
