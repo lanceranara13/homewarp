@@ -27,7 +27,10 @@ use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
 use utoipa::ToSchema;
 
-use crate::servers::{self, ExtraPort, PortProtocol};
+use crate::{
+    servers::{self, ExtraPort, PortProtocol},
+    settings,
+};
 
 /// The bridge servers sit on. Its subnet is outside what Docker hands out by itself.
 const NETWORK: &str = "homewarp-br";
@@ -35,7 +38,7 @@ const SUBNET: &str = "10.213.80.0/24";
 /// The home machine's own address on that bridge.
 const GATEWAY: &str = "10.213.80.1";
 /// The user servers run as: deliberately not one that exists on the host.
-const USER: u32 = 4857;
+pub(crate) const USER: u32 = 4857;
 /// How much of a console is kept for a page that opens later.
 const KEPT_LINES: usize = 500;
 /// How far a page may fall behind before it is started again from where things stand.
@@ -60,6 +63,9 @@ pub(crate) enum State {
     Stopping,
     /// It ended without being asked to, and not cleanly.
     Crashed,
+    /// Its files are being put back from a backup. It has no process, and is
+    /// not started, changed or removed until that is done.
+    Restoring,
 }
 
 impl State {
@@ -78,6 +84,7 @@ impl State {
             Self::Running => "running",
             Self::Stopping => "stopping",
             Self::Crashed => "stopped after a crash",
+            Self::Restoring => "having a backup put back",
         }
     }
 }
@@ -182,6 +189,11 @@ impl Definition {
     }
 }
 
+/// Where a server's files are kept, under the directory Homewarp keeps everything in.
+pub(crate) fn files_at(data: &Path, uuid: &str) -> PathBuf {
+    data.join("servers").join(uuid)
+}
+
 /// The id of the container this process is in, read off the list of what is
 /// mounted in it: Docker mounts a container's `hostname` and `hosts` from a
 /// directory that is named after it.
@@ -280,6 +292,26 @@ impl Watch {
     }
 }
 
+/// A server held out of use while its files are replaced. It is as it was
+/// once this is dropped.
+pub(crate) struct Hold {
+    watch: Watch,
+    was: State,
+}
+
+impl Hold {
+    /// Says in the server's console how the work it is held for is going.
+    pub(crate) fn say(&self, line: impl Into<String>) {
+        self.watch.say(line);
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.watch.set(self.was);
+    }
+}
+
 /// What reaches a server's task.
 enum Asked {
     Power(Power),
@@ -310,6 +342,8 @@ pub struct Runtime {
     data: PathBuf,
     db: SqlitePool,
     servers: Mutex<HashMap<i64, Live>>,
+    /// Where servers look names up. Read each time a server is started.
+    resolvers: Mutex<Vec<String>>,
 }
 
 impl Runtime {
@@ -327,11 +361,13 @@ impl Runtime {
             })
             .await
             .context("reaching Docker")?;
+        let resolvers = settings::resolvers(&db).await?;
         let runtime = Arc::new(Self {
             engine,
             data: std::fs::canonicalize(data)?,
             db,
             servers: Mutex::default(),
+            resolvers: Mutex::new(resolvers),
         });
         for server in servers::definitions(&runtime.db).await? {
             runtime.watch_over(server, false);
@@ -406,13 +442,36 @@ impl Runtime {
         Ok(())
     }
 
+    /// Takes a server that has no process out of use: it shows as being
+    /// restored, and is not started, changed or removed, until what is
+    /// returned is dropped. The errors are those of [`Runtime::ask`].
+    pub(crate) fn hold(&self, id: i64) -> Result<Hold, Option<State>> {
+        let servers = self.servers();
+        let live = servers.get(&id).ok_or(None)?;
+        let was = live.watch.state();
+        if !was.is_idle() {
+            return Err(Some(was));
+        }
+        live.watch.set(State::Restoring);
+        Ok(Hold {
+            watch: live.watch.clone(),
+            was,
+        })
+    }
+
+    /// Changes where servers look names up. It counts from a server's next start.
+    pub(crate) fn set_resolvers(&self, resolvers: Vec<String>) {
+        *lock(&self.resolvers) = resolvers;
+    }
+
     /// Where a server stands, and everything that happens to it from here on.
     pub(crate) fn follow(&self, id: i64) -> Option<(Event, broadcast::Receiver<Event>)> {
         Some(self.servers().get(&id)?.watch.follow())
     }
 
     /// Forgets a server that is not running and deletes what it left: its
-    /// containers and its files. False if it is running, and so was left alone.
+    /// containers, its files and its backups. False if it is running, and so
+    /// was left alone.
     pub(crate) async fn remove(&self, id: i64, uuid: &str) -> anyhow::Result<bool> {
         {
             let mut servers = self.servers();
@@ -426,7 +485,7 @@ impl Runtime {
             servers.remove(&id);
         }
         self.engine.forget(uuid).await?;
-        for kept in ["servers", "install"] {
+        for kept in ["servers", "install", "backups"] {
             match tokio::fs::remove_dir_all(self.data.join(kept).join(uuid)).await {
                 Err(error) if error.kind() != ErrorKind::NotFound => {
                     return Err(anyhow::Error::new(error).context("deleting the server's files"));
@@ -815,7 +874,7 @@ impl Runtime {
         }
         Spec {
             id: server.uuid.clone(),
-            dir: self.data.join("servers").join(&server.uuid),
+            dir: files_at(&self.data, &server.uuid),
             image: server.image.clone(),
             startup: substitute(&server.template.startup, |name| server.lookup(name)),
             variables: server.variables.clone(),
@@ -826,6 +885,7 @@ impl Runtime {
             gid: USER,
             network: NETWORK.to_owned(),
             timezone: "UTC".to_owned(),
+            resolvers: lock(&self.resolvers).clone(),
         }
     }
 }

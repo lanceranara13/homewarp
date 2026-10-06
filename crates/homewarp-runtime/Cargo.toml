@@ -11,10 +11,15 @@ workspace = true
 [dependencies]
 bollard.workspace = true
 cap-std.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
+rustix.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zip.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

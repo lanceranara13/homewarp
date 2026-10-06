@@ -24,8 +24,9 @@ use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    api::{AppState, FromHere, Problem, ProblemBody, SignedIn},
-    auth,
+    accounts::{self, Permission},
+    api::{AppState, FromHere, Owner, Problem, ProblemBody, SignedIn},
+    audit, auth,
     runtime::{self, Definition, Event, Power, Runtime},
     templates,
 };
@@ -41,7 +42,7 @@ const MOST_CPU: u32 = 25_600;
 const MOST_PORTS: usize = 16;
 const LONGEST_COMMAND: usize = 1000;
 
-const MISSING: Problem = Problem::NotFound("There is no such server.");
+pub(crate) const MISSING: Problem = Problem::NotFound("There is no such server.");
 const NO_DOCKER: Problem = Problem::Unavailable(
     "This Homewarp cannot reach Docker, so it has nothing to run servers with.",
 );
@@ -188,6 +189,8 @@ struct Server {
     variables: BTreeMap<String, String>,
     /// Whether the game's EULA was agreed to for it.
     eula: bool,
+    /// What the account that asks may do with it, beyond looking at it.
+    permissions: Vec<Permission>,
 }
 
 /// What a server is made of that can still be changed once it is made.
@@ -469,13 +472,17 @@ fn state_of(state: &AppState, id: i64) -> runtime::State {
 )]
 async fn list_servers(
     State(state): State<AppState>,
-    _: SignedIn,
+    SignedIn(who): SignedIn,
 ) -> Result<Json<Vec<ServerSummary>>, Problem> {
+    // All of them for the owner, and for anyone else those they have been let into.
     let rows: Vec<(i64, String, String, i64, i64)> = sqlx::query_as(
         "SELECT servers.id, servers.name, templates.name, servers.port, servers.memory_mb
          FROM servers JOIN templates ON templates.id = servers.template_id
+         WHERE ?1 OR servers.id IN (SELECT server_id FROM server_users WHERE user_id = ?2)
          ORDER BY servers.name",
     )
+    .bind(who.owner)
+    .bind(who.id)
     .fetch_all(&state.db)
     .await?;
     let servers = rows
@@ -508,7 +515,7 @@ async fn list_servers(
 )]
 async fn create_server(
     State(state): State<AppState>,
-    _: SignedIn,
+    Owner(who): Owner,
     Json(new): Json<NewServer>,
 ) -> Result<(StatusCode, Json<Server>), Problem> {
     let found: Option<(String, String)> =
@@ -565,10 +572,12 @@ async fn create_server(
         console: Vec::new(),
         variables: checked.variables.iter().cloned().collect(),
         eula: checked.eula,
+        permissions: Permission::ALL.to_vec(),
     };
     runtime.add(checked.definition(id, uuid, template, false));
     // A connected Gate is told of the new ports now, and not in ten seconds.
     state.tunnel.wake();
+    audit::record(&state.db, &who, Some(id), "server.create", &server.template).await;
     Ok((StatusCode::CREATED, Json(server)))
 }
 
@@ -589,13 +598,14 @@ async fn create_server(
 )]
 async fn change_server(
     State(state): State<AppState>,
-    _: SignedIn,
+    SignedIn(who): SignedIn,
     Path(id): Path<i64>,
     Json(settings): Json<ServerSettings>,
 ) -> Result<Json<Server>, Problem> {
     const RUNNING: Problem = Problem::Conflict(std::borrow::Cow::Borrowed(
         "Stop this server before changing it.",
     ));
+    accounts::may(&state.db, &who, id, Some(Permission::Settings)).await?;
     let found: Option<(String, String, i64)> = sqlx::query_as(
         "SELECT servers.uuid, templates.definition, servers.installed
          FROM servers JOIN templates ON templates.id = servers.template_id
@@ -646,7 +656,8 @@ async fn change_server(
         return Err(RUNNING);
     }
     state.tunnel.wake();
-    get_server(State(state), SignedIn, Path(id)).await
+    audit::record(&state.db, &who, Some(id), "server.change", "").await;
+    get_server(State(state), SignedIn(who), Path(id)).await
 }
 
 /// One server, with its state and the end of its console. A page that stays
@@ -663,9 +674,12 @@ async fn change_server(
 )]
 async fn get_server(
     State(state): State<AppState>,
-    _: SignedIn,
+    SignedIn(who): SignedIn,
     Path(id): Path<i64>,
 ) -> Result<Json<Server>, Problem> {
+    let permissions = accounts::permissions_of(&state.db, &who, id)
+        .await?
+        .ok_or(MISSING)?;
     type Row = (
         String,
         i64,
@@ -731,6 +745,7 @@ async fn get_server(
         console,
         variables: variables.into_iter().collect(),
         eula: eula != 0,
+        permissions,
     }))
 }
 
@@ -751,13 +766,23 @@ async fn get_server(
 )]
 async fn power_server(
     State(state): State<AppState>,
-    _: SignedIn,
+    SignedIn(who): SignedIn,
     Path(id): Path<i64>,
     Json(asked): Json<PowerRequest>,
 ) -> Result<StatusCode, Problem> {
+    accounts::may(&state.db, &who, id, Some(Permission::Power)).await?;
     let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
     match runtime.ask(id, asked.action) {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Ok(()) => {
+            let action = match asked.action {
+                Power::Start => "server.start",
+                Power::Stop => "server.stop",
+                Power::Kill => "server.kill",
+                Power::Install => "server.install",
+            };
+            audit::record(&state.db, &who, Some(id), action, "").await;
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(None) => Err(MISSING),
         Err(Some(now)) => Err(Problem::Conflict(
             format!(
@@ -786,10 +811,11 @@ async fn power_server(
 )]
 async fn command_server(
     State(state): State<AppState>,
-    _: SignedIn,
+    SignedIn(who): SignedIn,
     Path(id): Path<i64>,
     Json(asked): Json<CommandRequest>,
 ) -> Result<StatusCode, Problem> {
+    accounts::may(&state.db, &who, id, Some(Permission::Console)).await?;
     let line = asked.command.trim_end_matches(['\r', '\n']);
     // A line break inside it would be a second command, slipped in behind the first.
     if line.is_empty() || line.len() > LONGEST_COMMAND || line.contains(char::is_control) {
@@ -799,7 +825,10 @@ async fn command_server(
     }
     let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
     match runtime.type_in(id, line.to_owned()) {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Ok(()) => {
+            audit::record(&state.db, &who, Some(id), "server.command", line).await;
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(None) => Err(MISSING),
         Err(Some(now)) => Err(Problem::Conflict(
             format!(
@@ -816,11 +845,12 @@ async fn command_server(
 /// uses, as an [`Event`] in JSON. The page sends nothing back.
 async fn follow_server(
     _: FromHere,
-    _: SignedIn,
+    SignedIn(who): SignedIn,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, Problem> {
+    accounts::may(&state.db, &who, id, None).await?;
     let runtime = state.runtime.clone().ok_or(NO_DOCKER)?;
     let (snapshot, events) = runtime.follow(id).ok_or(MISSING)?;
     Ok(upgrade.on_upgrade(move |socket| follow(socket, runtime, id, snapshot, events)))
@@ -880,7 +910,7 @@ async fn follow(
 )]
 async fn remove_server(
     State(state): State<AppState>,
-    _: SignedIn,
+    Owner(who): Owner,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Problem> {
     let uuid: Option<String> = sqlx::query_scalar("SELECT uuid FROM servers WHERE id = ?")
@@ -895,6 +925,8 @@ async fn remove_server(
             "Stop this server before removing it.".into(),
         ));
     }
+    // Written down while the server still has a name to write.
+    audit::record(&state.db, &who, Some(id), "server.remove", "").await;
     sqlx::query("DELETE FROM servers WHERE id = ?")
         .bind(id)
         .execute(&state.db)

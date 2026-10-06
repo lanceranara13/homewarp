@@ -11,8 +11,8 @@ use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    api::{AppState, Problem, ProblemBody, SignedIn},
-    auth,
+    api::{AppState, Owner, Problem, ProblemBody, SignedIn},
+    audit, auth,
 };
 
 /// An egg is a few kilobytes. This leaves room for a very long install script.
@@ -214,7 +214,7 @@ async fn list_templates(
 )]
 async fn import_template(
     State(state): State<AppState>,
-    _: SignedIn,
+    Owner(who): Owner,
     Json(request): Json<ImportRequest>,
 ) -> Result<(StatusCode, Json<Template>), Problem> {
     if request.egg.len() > LARGEST_EGG {
@@ -254,6 +254,7 @@ async fn import_template(
         }
         Err(error) => return Err(error.into()),
     };
+    audit::record(&state.db, &who, None, "template.import", &template.name).await;
     Ok((
         StatusCode::CREATED,
         Json(Template::new(id, created_at, template)),
@@ -297,15 +298,16 @@ async fn get_template(
 )]
 async fn remove_template(
     State(state): State<AppState>,
-    _: SignedIn,
+    Owner(who): Owner,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Problem> {
-    let removed = match sqlx::query("DELETE FROM templates WHERE id = ?")
-        .bind(id)
-        .execute(&state.db)
-        .await
-    {
-        Ok(removed) => removed,
+    let removed: Result<Option<String>, _> =
+        sqlx::query_scalar("DELETE FROM templates WHERE id = ? RETURNING name")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await;
+    let name = match removed {
+        Ok(name) => name.ok_or(MISSING)?,
         Err(sqlx::Error::Database(error)) if error.is_foreign_key_violation() => {
             return Err(Problem::Conflict(
                 "A server is made from this template. Remove the server first.".into(),
@@ -313,8 +315,6 @@ async fn remove_template(
         }
         Err(error) => return Err(error.into()),
     };
-    if removed.rows_affected() == 0 {
-        return Err(MISSING);
-    }
+    audit::record(&state.db, &who, None, "template.remove", &name).await;
     Ok(StatusCode::NO_CONTENT)
 }

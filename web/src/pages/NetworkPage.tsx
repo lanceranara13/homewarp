@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 
 import { checkGate, connectGate, disconnectGate, type Gate, type PortProtocol } from '../api/client'
 import { Button, Confirm, CopyChip, Field, PageBar, Pill, Problem, Steps, buttonClass, type Tone } from '../components/ui'
+import { bytes } from '../format'
 import { EVERY_GATE, addressOf, gateLook, gateQuery, isChanging } from '../gate'
 
 const PROTOCOLS: Record<PortProtocol, string> = { tcp: 'TCP', udp: 'UDP', both: 'TCP and UDP' }
@@ -206,6 +207,7 @@ function Ports({ gate }: { gate: Gate }) {
                 <th className={cell}>{connected ? 'Public address' : 'Address at home'}</th>
                 <th className={cell}>Protocol</th>
                 <th className={cell}>Server</th>
+                {connected && <th className={`${cell} text-right`}>Traffic, last day</th>}
               </tr>
             </thead>
             <tbody>
@@ -224,6 +226,8 @@ function Ports({ gate }: { gate: Gate }) {
                       {port.server}
                     </Link>
                   </td>
+                  {/* What the VPS counted through the port, both ways. A server reached at home only goes uncounted. */}
+                  {connected && <td className={`${cell} text-right tabular-nums`}>{bytes(port.traffic_bytes)}</td>}
                 </tr>
               ))}
             </tbody>

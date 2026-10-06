@@ -27,6 +27,12 @@ const BUTTON_VARIANTS = {
 
 type ButtonVariant = keyof typeof BUTTON_VARIANTS
 
+/** A layer that floats over the page: a menu, a popover, the phone's navigation. */
+export const FLOATING = 'z-50 rounded-lg border border-hairline-strong bg-surface-3 shadow-float'
+
+/** One row of a menu. */
+export const MENU_ITEM = 'flex h-8 items-center gap-2 rounded-sm px-2 text-body text-ink outline-none data-highlighted:bg-surface-2'
+
 /** How a button looks, for a link that is dressed as one. */
 export function buttonClass(variant: ButtonVariant = 'secondary') {
   return `${BUTTON} ${BUTTON_VARIANTS[variant]}`
@@ -78,6 +84,27 @@ export function Field({ label, hint, mono = false, className = '', ...input }: F
           {hint}
         </div>
       )}
+    </div>
+  )
+}
+
+type SelectProps = Omit<ComponentProps<'select'>, 'id'> & { label: string }
+
+/** A labelled choice among a few: label above, as a field has it. */
+export function Select({ label, className = '', children, ...select }: SelectProps) {
+  const id = useId()
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <label htmlFor={id} className="text-caption text-ink-subtle">
+        {label}
+      </label>
+      <select
+        {...select}
+        id={id}
+        className={`h-10 rounded-md border border-hairline-strong bg-surface-1 px-2 text-body text-ink md:h-8 ${className}`}
+      >
+        {children}
+      </select>
     </div>
   )
 }
@@ -187,6 +214,7 @@ const STATES: Record<ServerState, { word: string; tone: Tone }> = {
   running: { word: 'Running', tone: 'running' },
   stopping: { word: 'Stopping', tone: 'starting' },
   crashed: { word: 'Crashed', tone: 'crashed' },
+  restoring: { word: 'Restoring', tone: 'installing' },
 }
 
 /** What a server is doing. */

@@ -5,14 +5,17 @@ import { LayoutGrid, Plus } from 'lucide-react'
 import { CopyChip, PageBar, StatusPill, buttonClass } from '../components/ui'
 import { addressOf, useGate } from '../gate'
 import { EVERY, serversQuery } from '../servers'
+import { useOwner } from '../session'
 
 /** The landing page: every server, what it is doing and where players reach it. */
 export function ServersPage() {
   const { data: servers } = useSuspenseQuery({ ...serversQuery, refetchInterval: EVERY.list })
   // Wanted, not needed: the cards are painted with the address at home, and take the VPS's once it is known.
   const gate = useGate()
+  // Making a server is the owner's to do.
+  const owner = useOwner()
   // The page's one primary action: in the bar once there are servers, in the empty state until then.
-  const newLink = (
+  const newLink = owner && (
     <Link to="/servers/new" className={buttonClass('primary')}>
       <Plus aria-hidden size={16} />
       New server
@@ -27,7 +30,9 @@ export function ServersPage() {
           <section className="flex flex-1 flex-col items-center justify-center py-16 text-center">
             <LayoutGrid aria-hidden size={32} className="mb-3 text-ink-faint" />
             <h2 className="text-section text-ink">No servers yet.</h2>
-            <p className="mt-1">Pick a game and Homewarp handles the rest.</p>
+            <p className="mt-1">
+              {owner ? 'Pick a game and Homewarp handles the rest.' : 'The owner of this Homewarp has not let this account into one.'}
+            </p>
             <div className="mt-4">{newLink}</div>
           </section>
         ) : (

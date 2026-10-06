@@ -18,6 +18,21 @@ export type Usage = components['schemas']['Usage']
 export type Gate = components['schemas']['GateView']
 export type PortProtocol = components['schemas']['PortProtocol']
 export type ExtraPort = components['schemas']['ExtraPort']
+export type FileEntry = components['schemas']['FileEntry']
+export type DiskUse = components['schemas']['DiskUse']
+export type Unpacked = components['schemas']['Unpacked']
+export type Account = components['schemas']['Account']
+export type Permission = components['schemas']['Permission']
+export type ServerUser = components['schemas']['ServerUser']
+export type ActivityEntry = components['schemas']['ActivityEntry']
+type NewAccount = components['schemas']['NewAccount']
+export type Backup = components['schemas']['Backup']
+export type Backups = components['schemas']['Backups']
+export type Schedule = components['schemas']['Schedule']
+export type ScheduleSettings = components['schemas']['ScheduleSettings']
+export type Task = components['schemas']['Task']
+export type TaskAction = components['schemas']['Action']
+export type Settings = components['schemas']['Settings']
 type NewGate = components['schemas']['NewGate']
 type SetupRequest = components['schemas']['SetupRequest']
 type LoginRequest = components['schemas']['LoginRequest']
@@ -151,6 +166,252 @@ export function followServer(id: number): WebSocket {
 export async function removeServer(id: number): Promise<void> {
   const { error, response } = await signedIn(() => api.DELETE('/api/v1/servers/{id}', { params: { path: { id } } }))
   if (!response.ok) fail(error)
+}
+
+/** What is in one folder of a server's files, folders first. Null where there is no such folder. */
+export async function listFiles(id: number, path: string): Promise<FileEntry[] | null> {
+  const { data, error, response } = await signedIn(() =>
+    api.GET('/api/v1/servers/{id}/files', { params: { path: { id }, query: { path } } }),
+  )
+  if (response.status === 404) return null
+  return data ?? fail(error)
+}
+
+/** A file's text. Null where there is no such file. What is not text, or is too long, is refused in words. */
+export async function readFile(id: number, path: string): Promise<string | null> {
+  const { data, error, response } = await signedIn(() =>
+    api.GET('/api/v1/servers/{id}/files/content', { params: { path: { id }, query: { path } } }),
+  )
+  if (response.status === 404) return null
+  return data ? data.text : fail(error)
+}
+
+/**
+ * Sends a file to a server: an upload, or what the editor saves. It takes the
+ * place of a file that is there by that name. Not sent with `fetch`, which
+ * does not say how far an upload has got.
+ */
+export function writeFile(
+  id: number,
+  path: string,
+  body: Blob | string,
+  sent?: (bytes: number) => void,
+  stop?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('PUT', `/api/v1/servers/${id}/files/content?path=${encodeURIComponent(path)}`)
+    request.upload.onprogress = (event) => sent?.(event.loaded)
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) return resolve()
+      if (request.status === 401) return reject(new SignedOut())
+      try {
+        fail(JSON.parse(request.responseText))
+      } catch (error) {
+        // What `fail` threw, or what an answer that is not JSON made of itself.
+        reject(error instanceof SyntaxError ? new Error('Homewarp gave an answer this page does not understand.') : error)
+      }
+    }
+    request.onerror = () => reject(new Error('Homewarp is not answering. Check that it is running.'))
+    request.onabort = () => reject(new Error('The upload was stopped.'))
+    stop?.addEventListener('abort', () => request.abort())
+    request.send(body)
+  })
+}
+
+/** Where the browser fetches a file from to save it. */
+export function downloadUrl(id: number, path: string): string {
+  return `/api/v1/servers/${id}/files/download?path=${encodeURIComponent(path)}`
+}
+
+export async function makeFolder(id: number, path: string): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/files/folder', { params: { path: { id } }, body: { path } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Moves a file or a folder, which is also how it gets another name. Never onto something that is there. */
+export async function moveFile(id: number, from: string, to: string): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/files/move', { params: { path: { id } }, body: { from, to } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Deletes files, and folders with all that is in them. There is no bringing them back. */
+export async function removeFiles(id: number, paths: string[]): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/files/remove', { params: { path: { id } }, body: { paths } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Packs what is named, in a folder, into one archive there. The answer is the archive's name. */
+export async function packFiles(id: number, folder: string, names: string[]): Promise<string> {
+  const { data, error } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/files/pack', { params: { path: { id } }, body: { folder, names } }),
+  )
+  return data ? data.name : fail(error)
+}
+
+/** Unpacks an archive into the folder it is in. */
+export async function unpackFile(id: number, path: string): Promise<Unpacked> {
+  const { data, error } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/files/unpack', { params: { path: { id } }, body: { path } }),
+  )
+  return data ?? fail(error)
+}
+
+/** What a server's files take of the disk, and what is left of it. */
+export async function getDiskUse(id: number): Promise<DiskUse> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/servers/{id}/files/usage', { params: { path: { id } } }))
+  return data ?? fail(error)
+}
+
+/** A server's backups, the newest first, and how many are kept. */
+export async function listBackups(id: number): Promise<Backups> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/servers/{id}/backups', { params: { path: { id } } }))
+  return data ?? fail(error)
+}
+
+/** Begins a backup. The answer comes at once, with the backup still being made. */
+export async function makeBackup(id: number, name: string): Promise<Backup> {
+  const { data, error } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/backups', { params: { path: { id } }, body: { name } }),
+  )
+  return data ?? fail(error)
+}
+
+/** Says how many finished backups of a server are kept, from the next one that is done. */
+export async function keepBackups(id: number, kept: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.PUT('/api/v1/servers/{id}/backups/kept', { params: { path: { id } }, body: { kept } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Where the browser fetches a backup's file from to save it. */
+export function backupUrl(id: number, backup: number): string {
+  return `/api/v1/servers/${id}/backups/${backup}/download`
+}
+
+/** Begins putting a backup back: the server's files become what it says they were. */
+export async function restoreBackup(id: number, backup: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/backups/{backup_id}/restore', { params: { path: { id, backup_id: backup } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+export async function removeBackup(id: number, backup: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.DELETE('/api/v1/servers/{id}/backups/{backup_id}', { params: { path: { id, backup_id: backup } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** What a server does by the clock, by name. */
+export async function listSchedules(id: number): Promise<Schedule[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/servers/{id}/schedules', { params: { path: { id } } }))
+  return data ?? fail(error)
+}
+
+export async function createSchedule(id: number, body: ScheduleSettings): Promise<Schedule> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/servers/{id}/schedules', { params: { path: { id } }, body }))
+  return data ?? fail(error)
+}
+
+export async function changeSchedule(id: number, schedule: number, body: ScheduleSettings): Promise<Schedule> {
+  const { data, error } = await signedIn(() =>
+    api.PUT('/api/v1/servers/{id}/schedules/{schedule_id}', { params: { path: { id, schedule_id: schedule } }, body }),
+  )
+  return data ?? fail(error)
+}
+
+export async function removeSchedule(id: number, schedule: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.DELETE('/api/v1/servers/{id}/schedules/{schedule_id}', { params: { path: { id, schedule_id: schedule } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Sets a schedule off now, whatever its times. What the run came to is then in the schedule. */
+export async function runSchedule(id: number, schedule: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/schedules/{schedule_id}/run', { params: { path: { id, schedule_id: schedule } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** What is set for this Homewarp as a whole. Only the owner may ask. */
+export async function getSettings(): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/settings'))
+  return data ?? fail(error)
+}
+
+/** Changes what is set. The answer is the settings as they are kept. */
+export async function changeSettings(body: Settings): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/settings', { body }))
+  return data ?? fail(error)
+}
+
+/** Every account, the owner's first. Only the owner may ask. */
+export async function listAccounts(): Promise<Account[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/users'))
+  return data ?? fail(error)
+}
+
+/** Makes an account. It sees no server until it is let into one. */
+export async function createAccount(body: NewAccount): Promise<Account> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/users', { body }))
+  return data ?? fail(error)
+}
+
+export async function removeAccount(id: number): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/users/{id}', { params: { path: { id } } }))
+  if (!response.ok) fail(error)
+}
+
+/** Gives an account another password, and signs it out wherever it was signed in. */
+export async function setPassword(id: number, password: string): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.PUT('/api/v1/users/{id}/password', { params: { path: { id } }, body: { password } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Changes the password of whoever is signed in here. Their other sessions end. */
+export async function changeOwnPassword(current: string, password: string): Promise<void> {
+  const { error, response } = await signedIn(() => api.POST('/api/v1/account/password', { body: { current, password } }))
+  if (!response.ok) fail(error)
+}
+
+/** The accounts that have been let into a server, and what each may do there. */
+export async function listServerUsers(id: number): Promise<ServerUser[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/servers/{id}/users', { params: { path: { id } } }))
+  return data ?? fail(error)
+}
+
+/** Lets an account into a server, or changes what it may do there. With nothing named it may look. */
+export async function letIn(id: number, userId: number, permissions: Permission[]): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.PUT('/api/v1/servers/{id}/users/{user_id}', { params: { path: { id, user_id: userId } }, body: { permissions } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+export async function turnOut(id: number, userId: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.DELETE('/api/v1/servers/{id}/users/{user_id}', { params: { path: { id, user_id: userId } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** What was done through the panel, the newest first, a hundred lines at a time. */
+export async function listActivity(asked: { server?: number; user?: number; before?: number }): Promise<ActivityEntry[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/activity', { params: { query: asked } }))
+  return data ?? fail(error)
 }
 
 /** The Gate, how the tunnel to it is doing, and every port of every server. */

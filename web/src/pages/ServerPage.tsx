@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Link, getRouteApi, notFound, useNavigate } from '@tanstack/react-router'
-import { Play, SlidersHorizontal, Square, Trash2 } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Link, Outlet, getRouteApi, notFound, useNavigate } from '@tanstack/react-router'
+import { Play, Square, Trash2 } from 'lucide-react'
+import { createContext, use, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import {
   changeServer,
@@ -9,6 +9,7 @@ import {
   followServer,
   powerServer,
   removeServer,
+  type Permission,
   type Power,
   type ServerEvent,
   type ServerSettings,
@@ -18,19 +19,30 @@ import {
 import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill, buttonClass } from '../components/ui'
 import { addressOf, useGate } from '../gate'
 import { EVERY, serverQuery, serversQuery } from '../servers'
+import { useOwner } from '../session'
 import { templateQuery } from '../templates'
 import { ServerForm } from './NewServerPage'
 
 const route = getRouteApi('/shell/servers/$serverId')
-const settingsRoute = getRouteApi('/shell/servers/$serverId/settings')
 
 /** How many lines of console a page holds on to. */
 const KEPT_LINES = 1000
 /** The states in which a server has a process, and so uses some of the machine. */
 const USES: ServerState[] = ['starting', 'running', 'stopping']
 
-/** One server: what it is doing, where players reach it, its power controls and its console. */
-export function ServerPage() {
+/** What the socket has told a page about its server. */
+type Followed = { state: ServerState; lines: string[]; usage: Usage | null }
+
+/** What the socket has said, for the tab that shows it. Null while there is no socket. */
+const Live = createContext<Followed | null>(null)
+
+/**
+ * The frame every page of one server sits in: its name, what it is doing, where
+ * players reach it and its power controls, always in view, and under them the
+ * tabs (DESIGN.md, Inside a server). The socket is the frame's, so a console
+ * left for another tab is as it was on coming back.
+ */
+export function ServerLayout() {
   const { serverId } = route.useParams()
   const id = Number(serverId)
   const followed = useFollowed(id)
@@ -40,47 +52,160 @@ export function ServerPage() {
   // The loader turns away an address with no server behind it; this is one removed since.
   if (!server) throw notFound()
   const state = followed?.state ?? server.state
-  const running = state === 'starting' || state === 'running'
   // Wanted, not needed: the chip is painted with the address at home, and takes the VPS's once it is known.
   const gate = useGate()
+  const owner = useOwner()
 
   return (
     <>
       <PageBar title={server.name} crumb={<Link to="/">Servers</Link>}>
-        <div className="flex shrink-0 gap-2">
-          <Link to="/servers/$serverId/settings" params={{ serverId }} title="Settings" className={buttonClass()}>
-            <SlidersHorizontal aria-hidden size={16} />
-            <span className="sr-only md:not-sr-only">Settings</span>
-          </Link>
-          <RemoveServer id={server.id} name={server.name} />
-        </div>
+        {owner && <RemoveServer id={server.id} name={server.name} />}
       </PageBar>
-      <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
+      <div className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
         <div className="flex flex-wrap items-start gap-3">
           <div className="flex min-h-10 flex-wrap items-center gap-3 md:min-h-8">
             <StatusPill state={state} />
             <CopyChip text={addressOf(gate, server.port)} />
           </div>
-          <div className="ml-auto">
-            <PowerControls id={server.id} state={state} />
-          </div>
+          {/* What an account has not been let do is not put before it to be refused. */}
+          {server.permissions.includes('power') && (
+            <div className="ml-auto">
+              <PowerControls id={server.id} state={state} />
+            </div>
+          )}
         </div>
-        <div className="grid gap-4 wide:grid-cols-[minmax(0,1fr)_16rem]">
-          <Console id={server.id} lines={followed?.lines ?? server.console} open={running} />
-          <UsageTiles usage={followed?.usage ?? null} />
-        </div>
-        <p className="text-small text-ink-subtle">
+        <Tabs serverId={serverId} may={server.permissions} owner={owner} />
+        <main className="flex min-w-0 flex-1 flex-col gap-4">
+          <Live value={followed}>
+            <Outlet />
+          </Live>
+        </main>
+      </div>
+    </>
+  )
+}
+
+const TAB = 'flex h-10 shrink-0 items-center border-b-2 px-3 text-body font-medium transition-colors duration-120 ease-out'
+const TAB_HERE = { className: 'border-accent text-ink' }
+const TAB_ELSEWHERE = { className: 'border-transparent text-ink-subtle hover:text-ink' }
+
+/** Underline tabs on a hairline. They scroll sideways on a narrow screen, and never wrap (DESIGN.md, Tabs). */
+function Tabs({ serverId, may, owner }: { serverId: string; may: Permission[]; owner: boolean }) {
+  return (
+    // The hairline is the frame's and the underlines are the tabs': the row of tabs sits a pixel
+    // into it, as a whole, because a row that scrolls sideways cuts off what hangs out of it.
+    <div className="border-b border-hairline">
+      <nav aria-label="Server" className="-mb-px flex overflow-x-auto">
+        <Link
+          to="/servers/$serverId"
+          params={{ serverId }}
+          activeOptions={{ exact: true }}
+          className={TAB}
+          activeProps={TAB_HERE}
+          inactiveProps={TAB_ELSEWHERE}
+        >
+          Console
+        </Link>
+        {/* Here for every folder, and for the editor too. */}
+        {may.includes('files') && (
+          <Link
+            to="/servers/$serverId/files"
+            params={{ serverId }}
+            activeOptions={{ includeSearch: false }}
+            className={TAB}
+            activeProps={TAB_HERE}
+            inactiveProps={TAB_ELSEWHERE}
+          >
+            Files
+          </Link>
+        )}
+        {may.includes('backups') && (
+          <Link
+            to="/servers/$serverId/backups"
+            params={{ serverId }}
+            className={TAB}
+            activeProps={TAB_HERE}
+            inactiveProps={TAB_ELSEWHERE}
+          >
+            Backups
+          </Link>
+        )}
+        {may.includes('schedules') && (
+          <Link
+            to="/servers/$serverId/schedules"
+            params={{ serverId }}
+            className={TAB}
+            activeProps={TAB_HERE}
+            inactiveProps={TAB_ELSEWHERE}
+          >
+            Schedules
+          </Link>
+        )}
+        {owner && (
+          <Link
+            to="/servers/$serverId/users"
+            params={{ serverId }}
+            className={TAB}
+            activeProps={TAB_HERE}
+            inactiveProps={TAB_ELSEWHERE}
+          >
+            Users
+          </Link>
+        )}
+        {may.includes('settings') && (
+          <Link
+            to="/servers/$serverId/settings"
+            params={{ serverId }}
+            className={TAB}
+            activeProps={TAB_HERE}
+            inactiveProps={TAB_ELSEWHERE}
+          >
+            Settings
+          </Link>
+        )}
+      </nav>
+    </div>
+  )
+}
+
+/** The console, what the server uses of the machine, and what it is made of. */
+export function ConsoleTab() {
+  const { serverId } = route.useParams()
+  const id = Number(serverId)
+  // The frame keeps this fresh; here it is only read.
+  const { data: server } = useSuspenseQuery(serverQuery(id))
+  const followed = use(Live)
+  const owner = useOwner()
+  if (!server) throw notFound()
+  const state = followed?.state ?? server.state
+
+  return (
+    <>
+      <div className="grid gap-4 wide:grid-cols-[minmax(0,1fr)_16rem]">
+        <Console
+          id={server.id}
+          lines={followed?.lines ?? server.console}
+          open={state === 'starting' || state === 'running'}
+          may={server.permissions.includes('console')}
+        />
+        <UsageTiles usage={followed?.usage ?? null} />
+      </div>
+      <p className="text-small text-ink-subtle">
+        {/* Templates are the owner's: to anyone else this is a name, and leads nowhere. */}
+        {owner ? (
           <Link to="/templates/$templateId" params={{ templateId: String(server.template_id) }} className="text-accent hover:underline">
             {server.template}
           </Link>
-          {' · '}
-          <code className="font-mono wrap-anywhere">{server.image}</code>
-          {` · ${server.memory_mb} MB`}
-          {server.cpu_percent > 0 && ` · ${server.cpu_percent} % of a core`}
-          {server.ports.length > 0 &&
-            ` · also on ${server.ports.map((further) => `${further.port}${!further.protocol || further.protocol === 'both' ? '' : `/${further.protocol}`}`).join(', ')}`}
-        </p>
-      </main>
+        ) : (
+          server.template
+        )}
+        {' · '}
+        <code className="font-mono wrap-anywhere">{server.image}</code>
+        {` · ${server.memory_mb} MB`}
+        {server.cpu_percent > 0 && ` · ${server.cpu_percent} % of a core`}
+        {server.ports.length > 0 &&
+          ` · also on ${server.ports.map((further) => `${further.port}${!further.protocol || further.protocol === 'both' ? '' : `/${further.protocol}`}`).join(', ')}`}
+      </p>
     </>
   )
 }
@@ -90,8 +215,8 @@ export function ServerPage() {
  * its template asks. It has to be stopped, and is as it was changed from its
  * next start.
  */
-export function ServerSettingsPage() {
-  const { serverId } = settingsRoute.useParams()
+export function ServerSettingsTab() {
+  const { serverId } = route.useParams()
   const id = Number(serverId)
   const { data: server } = useSuspenseQuery(serverQuery(id))
   if (!server) throw notFound()
@@ -111,39 +236,26 @@ export function ServerSettingsPage() {
 
   return (
     <>
-      <PageBar
-        title="Settings"
-        crumb={
-          <Link to="/servers/$serverId" params={{ serverId }}>
-            {server.name}
+      <p className="max-w-140 text-small text-ink-subtle">
+        A server is changed while it is stopped, and runs as it was changed from its next start. Its files are not
+        touched.
+      </p>
+      <ServerForm
+        template={template}
+        start={server}
+        submit="Save"
+        pending={changing.isPending}
+        problem={changing.error?.message}
+        onSubmit={(settings) => changing.mutate(settings)}
+        cancel={
+          <Link to="/servers/$serverId" params={{ serverId }} className={buttonClass('ghost')}>
+            Cancel
           </Link>
         }
       />
-      <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
-        <p className="max-w-140 text-small text-ink-subtle">
-          A server is changed while it is stopped, and runs as it was changed from its next start. Its files are not
-          touched.
-        </p>
-        <ServerForm
-          template={template}
-          start={server}
-          submit="Save"
-          pending={changing.isPending}
-          problem={changing.error?.message}
-          onSubmit={(settings) => changing.mutate(settings)}
-          cancel={
-            <Link to="/servers/$serverId" params={{ serverId }} className={buttonClass('ghost')}>
-              Cancel
-            </Link>
-          }
-        />
-      </main>
     </>
   )
 }
-
-/** What the socket has told a page about its server. */
-type Followed = { state: ServerState; lines: string[]; usage: Usage | null }
 
 function told(before: Followed | null, event: ServerEvent): Followed | null {
   switch (event.kind) {
@@ -257,7 +369,7 @@ function PowerControls({ id, state }: { id: number; state: ServerState }) {
  * while the server runs. It keeps to the newest line unless the reader has
  * scrolled up to look at older ones.
  */
-function Console({ id, lines, open }: { id: number; lines: string[]; open: boolean }) {
+function Console({ id, lines, open, may }: { id: number; lines: string[]; open: boolean; may: boolean }) {
   const box = useRef<HTMLDivElement>(null)
   const following = useRef(true)
   useEffect(() => {
@@ -283,7 +395,8 @@ function Console({ id, lines, open }: { id: number; lines: string[]; open: boole
           </div>
         ))}
       </div>
-      <CommandLine id={id} open={open} />
+      {/* An account that may only look has the console to read, and no line to type into. */}
+      {may && <CommandLine id={id} open={open} />}
     </div>
   )
 }

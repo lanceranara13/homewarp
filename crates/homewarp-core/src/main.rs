@@ -56,8 +56,27 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
-    let state = AppState::start(db, runtime).await?;
+    // SFTP is served where `HOMEWARP_SFTP` says: an address, or `unix:<path>`
+    // for a door to pass connections to. `HOMEWARP_SFTP_PORT` is the port
+    // people reach it on, where that is a door's and not this program's own.
+    let sftp = env::var("HOMEWARP_SFTP").ok().filter(|at| !at.is_empty());
+    let sftp_port = env::var("HOMEWARP_SFTP_PORT")
+        .ok()
+        .or_else(|| Some(sftp.as_ref()?.rsplit_once(':')?.1.to_owned()))
+        .and_then(|port| port.parse().ok());
+    let state = AppState::start(db, &data, runtime)
+        .await?
+        .sftp_at(sftp.as_ref().and(sftp_port));
     state.keep_tunnel();
+    state.keep_schedules();
+    if let Some(listen) = sftp {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = homewarp_core::serve_sftp(state, listen).await {
+                tracing::error!("SFTP is not served: {error:#}");
+            }
+        });
+    }
     let said = |at: &str| {
         tracing::info!(
             "Homewarp {} is listening on {at}",

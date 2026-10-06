@@ -19,16 +19,27 @@ bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 cap-std = "4"
 # Kernel WireGuard over netlink: a VPS has the module, and often not the `wg` tool.
 defguard_wireguard_rs = "0.12"
+# Gzip written in Rust: nothing here needs a C compiler for the home machine.
+flate2 = "1"
 futures-util = "0.3"
 getrandom = "0.4"
 # Patterns in an egg's rules are PHP's, where `\w` is ASCII unless asked otherwise: as here.
 regex-lite = "0.1"
+# SFTP for servers' files. With ring for its cryptography, which asks for a C
+# compiler and no more: what it would pick by itself asks for cmake as well.
+russh = { version = "0.64", default-features = false, features = ["ring"] }
+russh-sftp = "3"
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
+# Already here by way of cap-std. Asked for by name for the free space on a disk
+# and for who this process runs as, neither of which the standard library says.
+rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+# Without extended attributes, which no server's files need kept.
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "time", "fs", "sync"] }
@@ -37,6 +48,12 @@ tracing = "0.1"
 utoipa = "6"
 utoipa-axum = "0.3"
 tracing-subscriber = "0.3"
+# Only the two ways of packing that zip files in the wild use, stored and deflated,
+# and the second through flate2 as above.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# Backups. The one C library here: several times as fast as gzip on a home
+# machine's two cores, which is what a backup of a world is waited for on.
+zstd = { version = "0.14", default-features = false }
 
 # Line tables keep backtraces useful at a fraction of the disk the homelab would
 # otherwise spend on debug info (PLAN.md §10: ~8 GB for all build caches).

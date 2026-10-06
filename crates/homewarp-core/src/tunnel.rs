@@ -11,6 +11,7 @@
 //! between two rounds, by a reboot or by another program, has to come back.
 
 use std::{
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     sync::{
@@ -27,7 +28,8 @@ use homewarp_net::{
     probe_packets, route_replies, take_down,
 };
 use homewarp_proto::{
-    Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Rotate, Rotated, Status,
+    Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status,
+    Through,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::SqlitePool;
@@ -41,8 +43,8 @@ use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    api::{AppState, Problem, ProblemBody, SignedIn},
-    auth,
+    api::{AppState, Owner, Problem, ProblemBody, SignedIn},
+    audit, auth,
     runtime::Runtime,
     servers::{self, PortProtocol},
 };
@@ -173,6 +175,8 @@ pub(crate) struct Tunnel {
     told: Mutex<Option<Desired>>,
     /// Set when a Gate has just been enrolled: the self-probe is due.
     check_due: AtomicBool,
+    /// What the Gate had counted through each port when it was last heard from.
+    counted: Mutex<BTreeMap<(u16, Protocol), u64>>,
 }
 
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -206,6 +210,7 @@ impl Tunnel {
             up_for: Mutex::default(),
             told: Mutex::default(),
             check_due: AtomicBool::new(false),
+            counted: Mutex::default(),
         })
     }
 
@@ -264,11 +269,16 @@ impl Tunnel {
             return false;
         }
         let heard = match self.tend(gate).await {
-            Ok((status, latency)) => Heard {
-                status: Some(status),
-                latency_ms: Some(latency),
-                problem: None,
-            },
+            Ok((status, latency)) => {
+                if let Err(error) = self.count(&status.traffic).await {
+                    tracing::warn!("what went through the Gate could not be added up: {error:#}");
+                }
+                Heard {
+                    status: Some(status),
+                    latency_ms: Some(latency),
+                    problem: None,
+                }
+            }
             // A VPS that has not run its command yet is no problem to report.
             Err(error)
                 if waiting
@@ -286,6 +296,53 @@ impl Tunnel {
         };
         *lock(&self.heard) = heard;
         waiting
+    }
+
+    /// Adds what has gone through each port since the Gate was last heard
+    /// from to the count of the hour it is now.
+    ///
+    /// The Gate counts from when it last set its rules, so a count that has
+    /// gone down has started again and is all new. The first count this Core
+    /// sees of a port is where it counts on from, and is not added: how much
+    /// of it went through while no Core was listening is not known.
+    async fn count(&self, traffic: &[Through]) -> anyhow::Result<()> {
+        let hour = auth::now() / 3600;
+        let more: Vec<(u16, &str, u64)> = {
+            let mut counted = lock(&self.counted);
+            traffic
+                .iter()
+                .filter_map(|now| {
+                    let more = match counted.insert((now.port, now.protocol), now.bytes) {
+                        None => 0,
+                        Some(before) if now.bytes >= before => now.bytes - before,
+                        Some(_) => now.bytes,
+                    };
+                    let protocol = match now.protocol {
+                        Protocol::Tcp => "tcp",
+                        Protocol::Udp => "udp",
+                    };
+                    (more > 0).then_some((now.port, protocol, more))
+                })
+                .collect()
+        };
+        for (port, protocol, bytes) in more {
+            sqlx::query(
+                "INSERT INTO traffic (port, protocol, hour, bytes) VALUES (?, ?, ?, ?)
+                 ON CONFLICT (port, protocol, hour) DO UPDATE SET bytes = bytes + excluded.bytes",
+            )
+            .bind(port)
+            .bind(protocol)
+            .bind(hour)
+            .bind(i64::try_from(bytes).unwrap_or(i64::MAX))
+            .execute(&self.db)
+            .await?;
+        }
+        // A week of hours is kept, of which a day is shown.
+        sqlx::query("DELETE FROM traffic WHERE hour < ?")
+            .bind(hour - 7 * 24)
+            .execute(&self.db)
+            .await?;
+        Ok(())
     }
 
     /// Takes home's end out of the kernel, if this Core put it there.
@@ -762,6 +819,19 @@ struct ForwardedPort {
     server_id: i64,
     /// The server's name.
     server: String,
+    /// What the Gate counted through it in the last day, both ways together.
+    /// Nothing where no Gate has counted.
+    traffic_bytes: i64,
+}
+
+/// What went through each port in the last day, as the hours of it add up.
+async fn through(db: &SqlitePool) -> anyhow::Result<HashMap<u16, i64>> {
+    let counted: Vec<(u16, i64)> =
+        sqlx::query_as("SELECT port, SUM(bytes) FROM traffic WHERE hour > ? GROUP BY port")
+            .bind(auth::now() / 3600 - 24)
+            .fetch_all(db)
+            .await?;
+    Ok(counted.into_iter().collect())
 }
 
 /// The Gate, and how the tunnel to it is doing.
@@ -806,7 +876,11 @@ struct NewGate {
 
 async fn view(state: &AppState) -> Result<GateView, Problem> {
     // Neither read depends on the other, so neither waits for the other.
-    let (gate, ports) = tokio::try_join!(state.tunnel.gate(), servers::published(&state.db))?;
+    let (gate, ports, through) = tokio::try_join!(
+        state.tunnel.gate(),
+        servers::published(&state.db),
+        through(&state.db)
+    )?;
     let heard = lock(&state.tunnel.heard).clone();
     let now = auth::now();
     let ports = ports
@@ -816,6 +890,7 @@ async fn view(state: &AppState) -> Result<GateView, Problem> {
             protocol: published.protocol,
             server_id: published.server_id,
             server: published.server,
+            traffic_bytes: through.get(&published.port).copied().unwrap_or(0),
         })
         .collect();
     let status = heard.status;
@@ -865,8 +940,18 @@ async fn view(state: &AppState) -> Result<GateView, Problem> {
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
     )
 )]
-async fn get_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<GateView>, Problem> {
-    Ok(Json(view(&state).await?))
+async fn get_gate(
+    State(state): State<AppState>,
+    SignedIn(who): SignedIn,
+) -> Result<Json<GateView>, Problem> {
+    let mut view = view(&state).await?;
+    // The command enrols a VPS, and the ports are every server's: both are the
+    // owner's. Any account may know where players reach the servers it is in.
+    if !who.owner {
+        view.command = None;
+        view.ports.clear();
+    }
+    Ok(Json(view))
 }
 
 /// Starts connecting a VPS: makes the keys of a tunnel to it and answers with
@@ -886,7 +971,7 @@ async fn get_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<Gat
 )]
 async fn enrol_gate(
     State(state): State<AppState>,
-    _: SignedIn,
+    Owner(who): Owner,
     Json(new): Json<NewGate>,
 ) -> Result<(StatusCode, Json<GateView>), Problem> {
     let invalid = |sentence: &'static str| Err(Problem::Invalid(sentence.into()));
@@ -952,6 +1037,7 @@ async fn enrol_gate(
         *lock(&state.tunnel.heard) = Heard::default();
     }
     state.tunnel.wake();
+    audit::record(&state.db, &who, None, "gate.connect", address).await;
     Ok((StatusCode::CREATED, Json(view(&state).await?)))
 }
 
@@ -967,7 +1053,10 @@ async fn enrol_gate(
         (status = CONFLICT, body = ProblemBody, description = "No Gate is connected, or it cannot be reached."),
     )
 )]
-async fn check_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<GateView>, Problem> {
+async fn check_gate(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+) -> Result<Json<GateView>, Problem> {
     {
         let tunnel = &state.tunnel;
         let _busy = tunnel.busy.lock().await;
@@ -994,6 +1083,7 @@ async fn check_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<G
             }
         }
     }
+    audit::record(&state.db, &who, None, "gate.check", "").await;
     Ok(Json(view(&state).await?))
 }
 
@@ -1010,7 +1100,7 @@ async fn check_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<G
 )]
 async fn disconnect_gate(
     State(state): State<AppState>,
-    _: SignedIn,
+    Owner(who): Owner,
 ) -> Result<StatusCode, Problem> {
     let tunnel = &state.tunnel;
     let _busy = tunnel.busy.lock().await;
@@ -1029,5 +1119,6 @@ async fn disconnect_gate(
     }
     sqlx::query("DELETE FROM gate").execute(&state.db).await?;
     tunnel.take_down().await;
+    audit::record(&state.db, &who, None, "gate.disconnect", "").await;
     Ok(StatusCode::NO_CONTENT)
 }

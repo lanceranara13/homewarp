@@ -23,6 +23,8 @@ homewarp-net = { path = "../homewarp-net" }
 homewarp-proto = { path = "../homewarp-proto" }
 homewarp-runtime = { path = "../homewarp-runtime" }
 homewarp-template = { path = "../homewarp-template" }
+russh.workspace = true
+russh-sftp.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true

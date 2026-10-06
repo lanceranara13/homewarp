@@ -3,6 +3,7 @@
 
 use std::{
     borrow::Cow,
+    path::Path,
     sync::{Arc, OnceLock},
 };
 
@@ -22,7 +23,10 @@ use sqlx::SqlitePool;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::{auth, runtime::Runtime, servers, templates, tunnel, tunnel::Tunnel, ui};
+use crate::{
+    accounts, audit, auth, backups, files, runtime::Runtime, schedules, servers, settings,
+    templates, tunnel, tunnel::Tunnel, ui,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -30,27 +34,39 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) db: SqlitePool,
+    /// The directory everything is kept in: servers' files among it.
+    pub(crate) data: Arc<Path>,
     /// What runs servers. There is none where Docker cannot be reached.
     pub(crate) runtime: Option<Arc<Runtime>>,
     /// Home's end of the tunnel to the Gate, if there is a Gate.
     pub(crate) tunnel: Arc<Tunnel>,
     setup_code: Option<Arc<str>>,
+    sftp_port: Option<u16>,
 }
 
 impl AppState {
     /// Looks for an account and, if there is none yet, makes the code that
     /// creating the first one will ask for.
-    pub async fn start(db: SqlitePool, runtime: Option<Arc<Runtime>>) -> Result<Self, sqlx::Error> {
+    pub async fn start(
+        db: SqlitePool,
+        data: &Path,
+        runtime: Option<Arc<Runtime>>,
+    ) -> Result<Self, sqlx::Error> {
         let setup_code = if has_users(&db).await? {
             None
         } else {
             Some(auth::new_setup_code().into())
         };
+        audit::forget_old(&db).await?;
+        backups::settle(&db, data).await?;
+        schedules::settle(&db).await?;
         Ok(Self {
             tunnel: Tunnel::new(db.clone(), runtime.clone()),
             db,
+            data: data.into(),
             runtime,
             setup_code,
+            sftp_port: None,
         })
     }
 
@@ -58,6 +74,19 @@ impl AppState {
     /// caller, because it changes this machine's network and tests must not.
     pub fn keep_tunnel(&self) {
         self.tunnel.keep();
+    }
+
+    /// Starts doing what servers are scheduled to do, when its time comes.
+    /// Left to the caller as well: a test has no use for a clock of its own.
+    pub fn keep_schedules(&self) {
+        tokio::spawn(schedules::keep(self.clone()));
+    }
+
+    /// Says which port SFTP is reached on, for the pages that tell people.
+    /// Nothing, where it is not served.
+    pub fn sftp_at(mut self, port: Option<u16>) -> Self {
+        self.sftp_port = port;
+        self
     }
 
     /// The setup code, if this process started without an account. Whoever can
@@ -88,7 +117,13 @@ fn api() -> OpenApiRouter<AppState> {
         .routes(routes!(logout))
         .merge(templates::routes())
         .merge(servers::routes())
+        .merge(files::routes())
         .merge(tunnel::routes())
+        .merge(accounts::routes())
+        .merge(audit::routes())
+        .merge(backups::routes())
+        .merge(schedules::routes())
+        .merge(settings::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.
@@ -161,12 +196,18 @@ struct Session {
     /// Who is signed in, if anyone.
     user: Option<User>,
     version: &'static str,
+    /// The port SFTP is reached on at this machine, where it is served.
+    sftp_port: Option<u16>,
 }
 
-#[derive(Serialize, ToSchema)]
-struct User {
-    id: i64,
-    username: String,
+/// An account.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub(crate) struct User {
+    pub(crate) id: i64,
+    pub(crate) username: String,
+    /// The account made at setup. It may do everything; any other account
+    /// only what it has been let do, with the servers it has been let into.
+    pub(crate) owner: bool,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -260,6 +301,7 @@ async fn session(
         setup_required: !has_users,
         user,
         version: VERSION,
+        sftp_port: state.sftp_port,
     }))
 }
 
@@ -298,8 +340,8 @@ async fn setup(
     // One statement, so that two people finishing setup at the same moment
     // cannot both come away with an account.
     let created = sqlx::query(
-        "INSERT INTO users (username, password_hash, created_at)
-         SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+        "INSERT INTO users (username, password_hash, created_at, owner)
+         SELECT ?, ?, ?, 1 WHERE NOT EXISTS (SELECT 1 FROM users)",
     )
     .bind(&username)
     .bind(hash)
@@ -309,14 +351,13 @@ async fn setup(
     if created.rows_affected() == 0 {
         return Err(DONE);
     }
-    sign_in(
-        &state.db,
-        User {
-            id: created.last_insert_rowid(),
-            username,
-        },
-    )
-    .await
+    let user = User {
+        id: created.last_insert_rowid(),
+        username,
+        owner: true,
+    };
+    audit::record(&state.db, &user, None, "account.setup", "").await;
+    sign_in(&state, user).await
 }
 
 #[utoipa::path(
@@ -332,13 +373,20 @@ async fn login(
     State(state): State<AppState>,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response, Problem> {
-    let found: Option<(i64, String, String)> =
-        sqlx::query_as("SELECT id, username, password_hash FROM users WHERE username = ?")
+    let found: Option<(i64, String, String, bool)> =
+        sqlx::query_as("SELECT id, username, password_hash, owner FROM users WHERE username = ?")
             .bind(request.username.trim())
             .fetch_optional(&state.db)
             .await?;
     let (user, hash) = match found {
-        Some((id, username, hash)) => (Some(User { id, username }), Some(hash)),
+        Some((id, username, hash, owner)) => (
+            Some(User {
+                id,
+                username,
+                owner,
+            }),
+            Some(hash),
+        ),
         None => (None, None),
     };
     // An unknown name costs the same work as a wrong password, so how long the
@@ -351,19 +399,32 @@ async fn login(
         auth::verify_password(&request.password, hash)
     })
     .await?;
-    let Some(user) = user.filter(|_| correct) else {
+    if !correct {
+        // Against an account that is there, it is written down for its owner
+        // to see. What was typed where no account is, is not: it is as likely
+        // a password in the wrong field as a name.
+        if let Some(user) = &user {
+            audit::record(&state.db, user, None, "account.sign_in_failed", "").await;
+        }
+        return Err(Problem::Unauthorized("Wrong username or password."));
+    }
+    let Some(user) = user else {
         return Err(Problem::Unauthorized("Wrong username or password."));
     };
     sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
         .bind(auth::now())
         .execute(&state.db)
         .await?;
-    sign_in(&state.db, user).await
+    audit::record(&state.db, &user, None, "account.sign_in", "").await;
+    sign_in(&state, user).await
 }
 
 #[utoipa::path(post, path = "/api/v1/logout", responses((status = NO_CONTENT, description = "Signed out.")))]
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, Problem> {
     if let Some(token) = auth::token_from(&headers) {
+        if let Some(user) = current_user(&state.db, &headers).await? {
+            audit::record(&state.db, &user, None, "account.sign_out", "").await;
+        }
         sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(auth::token_hash(token))
             .execute(&state.db)
@@ -373,7 +434,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
 }
 
 /// Starts a session for `user` and answers with its cookie.
-async fn sign_in(db: &SqlitePool, user: User) -> Result<Response, Problem> {
+async fn sign_in(state: &AppState, user: User) -> Result<Response, Problem> {
     let token = auth::new_token();
     let now = auth::now();
     sqlx::query(
@@ -383,12 +444,13 @@ async fn sign_in(db: &SqlitePool, user: User) -> Result<Response, Problem> {
     .bind(user.id)
     .bind(now)
     .bind(now + auth::SESSION_SECONDS)
-    .execute(db)
+    .execute(&state.db)
     .await?;
     let session = Session {
         setup_required: false,
         user: Some(user),
         version: VERSION,
+        sftp_port: state.sftp_port,
     };
     Ok((
         [(SET_COOKIE, auth::cookie(&token, auth::SESSION_SECONDS))],
@@ -397,7 +459,7 @@ async fn sign_in(db: &SqlitePool, user: User) -> Result<Response, Problem> {
         .into_response())
 }
 
-async fn has_users(db: &SqlitePool) -> Result<bool, sqlx::Error> {
+pub(crate) async fn has_users(db: &SqlitePool) -> Result<bool, sqlx::Error> {
     let any: i64 = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
         .fetch_one(db)
         .await?;
@@ -408,33 +470,57 @@ async fn current_user(db: &SqlitePool, headers: &HeaderMap) -> Result<Option<Use
     let Some(token) = auth::token_from(headers) else {
         return Ok(None);
     };
-    let found: Option<(i64, String)> = sqlx::query_as(
-        "SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id
+    let found: Option<(i64, String, bool)> = sqlx::query_as(
+        "SELECT users.id, users.username, users.owner
+         FROM sessions JOIN users ON users.id = sessions.user_id
          WHERE sessions.token_hash = ? AND sessions.expires_at > ?",
     )
     .bind(auth::token_hash(token))
     .bind(auth::now())
     .fetch_optional(db)
     .await?;
-    Ok(found.map(|(id, username)| User { id, username }))
+    Ok(found.map(|(id, username, owner)| User {
+        id,
+        username,
+        owner,
+    }))
 }
 
-/// A request from someone signed in. An endpoint is private by asking for this.
-pub(crate) struct SignedIn;
+/// A request from someone signed in, and who that is. An endpoint is private
+/// by asking for this.
+pub(crate) struct SignedIn(pub(crate) User);
 
 impl FromRequestParts<AppState> for SignedIn {
     type Rejection = Problem;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
         match current_user(&state.db, &parts.headers).await? {
-            Some(_) => Ok(Self),
+            Some(user) => Ok(Self(user)),
             None => Err(Problem::Unauthorized("Sign in first.")),
         }
     }
 }
 
-/// Runs slow, CPU-bound work (password hashing) off the async threads.
-async fn blocking<T: Send + 'static>(
+/// A request from the owner of this Homewarp. What changes the machine, or
+/// who may use it, asks for this.
+pub(crate) struct Owner(pub(crate) User);
+
+impl FromRequestParts<AppState> for Owner {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        match SignedIn::from_request_parts(parts, state).await? {
+            SignedIn(user) if user.owner => Ok(Self(user)),
+            _ => Err(Problem::Forbidden(
+                "Only the owner of this Homewarp can do that.",
+            )),
+        }
+    }
+}
+
+/// Runs work that would hold up the async threads off them: hashing a
+/// password, and whatever reads or writes a server's files.
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, Problem> {
     tokio::task::spawn_blocking(work)
@@ -442,7 +528,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| Problem::Internal(error.into()))
 }
 
-fn valid_username(typed: &str) -> Result<&str, Problem> {
+pub(crate) fn valid_username(typed: &str) -> Result<&str, Problem> {
     let name = typed.trim();
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     if name.is_empty() || name.len() > 32 || !name.chars().all(allowed) {
@@ -453,7 +539,7 @@ fn valid_username(typed: &str) -> Result<&str, Problem> {
     Ok(name)
 }
 
-fn valid_password(password: &str) -> Result<(), Problem> {
+pub(crate) fn valid_password(password: &str) -> Result<(), Problem> {
     match password.chars().count() {
         10..=256 => Ok(()),
         _ => Err(Problem::Invalid(

@@ -6,18 +6,23 @@ import { DropdownMenu, Popover } from 'radix-ui'
 import { gateLook, useGate } from '../gate'
 import { sessionQuery, useSignOut } from '../session'
 import { DonationHeart, HeartMessage } from './DonationHeart'
-import { Button, Mark, StateMark } from './ui'
+import { Button, FLOATING, MENU_ITEM, Mark, StateMark } from './ui'
 
-/**
- * The five destinations of DESIGN.md. One without `to` is not built yet: it is
- * shown, so the shape of the panel is there from the start, but it leads nowhere.
- */
-const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates' | '/network' }[] = [
+type Destination = {
+  label: string
+  icon: LucideIcon
+  to: '/' | '/templates' | '/network' | '/activity' | '/settings'
+  /** For the owner alone: what is about the machine and not about one server. */
+  owners?: true
+}
+
+/** The five destinations of DESIGN.md. An account that is not the owner's has two of them. */
+const DESTINATIONS: Destination[] = [
   { label: 'Servers', icon: LayoutGrid, to: '/' },
-  { label: 'Templates', icon: Blocks, to: '/templates' },
-  { label: 'Network', icon: Waypoints, to: '/network' },
-  { label: 'Activity', icon: ScrollText },
-  { label: 'Settings', icon: Settings },
+  { label: 'Templates', icon: Blocks, to: '/templates', owners: true },
+  { label: 'Network', icon: Waypoints, to: '/network', owners: true },
+  { label: 'Activity', icon: ScrollText, to: '/activity', owners: true },
+  { label: 'Settings', icon: Settings, to: '/settings' },
 ]
 
 const ROW = 'flex h-8 w-full items-center gap-3 rounded-md px-2.5 text-body font-medium'
@@ -32,7 +37,6 @@ function useWithin(): (to: string) => boolean {
   const here = useRouterState({ select: (state) => state.location.pathname })
   return (to) => (to === '/' ? here === '/' || here.startsWith('/servers') : here.startsWith(to))
 }
-const FLOATING = 'z-50 rounded-lg border border-hairline-strong bg-surface-3 shadow-float'
 
 /**
  * The frame every signed-in page sits in: a sidebar that is 232px wide from
@@ -41,6 +45,8 @@ const FLOATING = 'z-50 rounded-lg border border-hairline-strong bg-surface-3 sha
 export function AppShell() {
   const { data: session } = useSuspenseQuery(sessionQuery)
   const username = session.user?.username ?? ''
+  const owner = session.user?.owner ?? false
+  const destinations = DESTINATIONS.filter((destination) => owner || !destination.owners)
   const within = useWithin()
 
   return (
@@ -51,22 +57,16 @@ export function AppShell() {
           <span className="sr-only text-section wide:not-sr-only">Homewarp</span>
         </div>
         <nav aria-label="Main" className="mt-4 flex flex-col gap-1">
-          {DESTINATIONS.map(({ label, icon: Icon, to }) =>
-            to ? (
-              <Link key={label} to={to} aria-current={within(to) ? 'page' : undefined} className={within(to) ? ROW_HERE : ROW_LIVE}>
-                <Icon aria-hidden className="w-5 shrink-0" size={16} />
-                <span className="sr-only wide:not-sr-only">{label}</span>
-              </Link>
-            ) : (
-              <span key={label} aria-disabled="true" title={`${label} is not built yet`} className={`${ROW} cursor-not-allowed text-ink-faint`}>
-                <Icon aria-hidden className="w-5 shrink-0" size={16} />
-                <span className="sr-only wide:not-sr-only">{label}</span>
-              </span>
-            ),
-          )}
+          {destinations.map(({ label, icon: Icon, to }) => (
+            <Link key={label} to={to} aria-current={within(to) ? 'page' : undefined} className={within(to) ? ROW_HERE : ROW_LIVE}>
+              <Icon aria-hidden className="w-5 shrink-0" size={16} />
+              <span className="sr-only wide:not-sr-only">{label}</span>
+            </Link>
+          ))}
         </nav>
         <div className="mt-auto flex flex-col gap-1">
-          <GateMark />
+          {/* It leads to the Network page, which is the owner's. */}
+          {owner && <GateMark />}
           <DonationHeart />
           <AccountMenu username={username} />
         </div>
@@ -76,7 +76,7 @@ export function AppShell() {
         <Outlet />
       </div>
 
-      <BottomBar username={username} />
+      <BottomBar username={username} destinations={destinations} />
     </div>
   )
 }
@@ -111,10 +111,7 @@ function AccountMenu({ username }: { username: string }) {
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content side="top" align="start" sideOffset={8} className={`${FLOATING} min-w-40 p-1`}>
-          <DropdownMenu.Item
-            onSelect={() => signOut.mutate()}
-            className="flex h-8 items-center gap-2 rounded-sm px-2 text-body text-ink outline-none data-highlighted:bg-surface-2"
-          >
+          <DropdownMenu.Item onSelect={() => signOut.mutate()} className={MENU_ITEM}>
             <LogOut aria-hidden size={16} />
             Sign out
           </DropdownMenu.Item>
@@ -124,27 +121,20 @@ function AccountMenu({ username }: { username: string }) {
   )
 }
 
-/** The phone's navigation: the first three destinations, and "More" for the rest of the sidebar. */
-function BottomBar({ username }: { username: string }) {
+/** The phone's navigation: the first three destinations, and "More" for the others and the rest of the sidebar. */
+function BottomBar({ username, destinations }: { username: string; destinations: Destination[] }) {
   const signOut = useSignOut()
   const within = useWithin()
   const tab ='flex h-11 min-w-16 flex-col items-center justify-center gap-0.5 rounded-md px-2 text-caption'
 
   return (
     <nav aria-label="Main" className={`${FLOATING} fixed inset-x-3 bottom-3 flex h-14 items-center justify-around md:hidden`}>
-      {DESTINATIONS.slice(0, 3).map(({ label, icon: Icon, to }) =>
-        to ? (
-          <Link key={label} to={to} aria-current={within(to) ? 'page' : undefined} className={`${tab} ${within(to) ? 'text-ink' : 'text-ink-muted'}`}>
-            <Icon aria-hidden size={18} />
-            {label}
-          </Link>
-        ) : (
-          <span key={label} aria-disabled="true" className={`${tab} text-ink-faint`}>
-            <Icon aria-hidden size={18} />
-            {label}
-          </span>
-        ),
-      )}
+      {destinations.slice(0, 3).map(({ label, icon: Icon, to }) => (
+        <Link key={label} to={to} aria-current={within(to) ? 'page' : undefined} className={`${tab} ${within(to) ? 'text-ink' : 'text-ink-muted'}`}>
+          <Icon aria-hidden size={18} />
+          {label}
+        </Link>
+      ))}
       <Popover.Root>
         <Popover.Trigger className={`${tab} text-ink-muted`}>
           <Ellipsis aria-hidden size={18} />
@@ -152,6 +142,18 @@ function BottomBar({ username }: { username: string }) {
         </Popover.Trigger>
         <Popover.Portal>
           <Popover.Content side="top" align="end" sideOffset={12} className={`${FLOATING} w-72 p-4`}>
+            {destinations.length > 3 && (
+              <div className="mb-4 flex flex-col gap-1 border-b border-hairline pb-3">
+                {destinations.slice(3).map(({ label, icon: Icon, to }) => (
+                  <Popover.Close asChild key={label}>
+                    <Link to={to} className={ROW_LIVE}>
+                      <Icon aria-hidden className="w-5 shrink-0" size={16} />
+                      {label}
+                    </Link>
+                  </Popover.Close>
+                ))}
+              </div>
+            )}
             <HeartMessage />
             <div className="mt-4 flex items-center justify-between gap-3 border-t border-hairline pt-3">
               <span className="truncate text-ink">{username}</span>

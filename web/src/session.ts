@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQueryClient } from '@tanstack/react-query'
+import { queryOptions, useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 
 import { getSession, signOut, type Session } from './api/client'
@@ -12,6 +12,15 @@ export const sessionQuery = queryOptions({
   queryFn: getSession,
   staleTime: 60_000,
 })
+
+/**
+ * Whether the account signed in here owns this Homewarp. The owner may do
+ * everything and makes the other accounts; they see the servers they have been
+ * let into. For the pages inside the shell, where the session is known.
+ */
+export function useOwner(): boolean {
+  return useSuspenseQuery(sessionQuery).data.user?.owner ?? false
+}
 
 /** For a request that ends signed in (setup, sign-in): keeps its answer and opens the panel. */
 export function useEnter<Input>(request: (input: Input) => Promise<Session>) {

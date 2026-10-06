@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
         gid: 4857,
         network: NETWORK.to_owned(),
         timezone: "UTC".to_owned(),
+        resolvers: homewarp_runtime::RESOLVERS.map(str::to_owned).to_vec(),
     };
 
     let engine = Engine::connect()?;

@@ -104,7 +104,7 @@ cmd_deploy() {
     docker logs homewarp 2>&1 | grep 'setup code' | tail -1 || true"
 }
 
-# A throwaway copy of the last build on port 3601, with data of its own, for
+# A throwaway copy of the last build on port 3601, SFTP on 2023, with data of its own, for
 # trying what needs an account without touching staging's. It runs as the
 # deployment does, behind a door of its own: it shares the Docker daemon, so a
 # server made in it is a real container, and the machine's network, so a VPS
@@ -115,7 +115,7 @@ cmd_scratch() {
   local data=$REMOTE/scratch
   if [ "${1:-up}" = down ]; then
     home "had=\$(docker exec homewarp-scratch sh -c 'test -e /sys/class/net/homewarp0 && echo tunnel' 2>/dev/null || true)
-          docker rm -f homewarp-scratch homewarp-scratch-door >/dev/null 2>&1 || true
+          docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp >/dev/null 2>&1 || true
           for id in \$(ls $data/servers 2>/dev/null); do
             docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown >/dev/null 2>&1 || true
           done
@@ -126,15 +126,18 @@ cmd_scratch() {
           docker run --rm -v $REMOTE:/homewarp alpine:3.20 rm -rf /homewarp/scratch"
     return
   fi
-  home "docker rm -f homewarp-scratch homewarp-scratch-door >/dev/null 2>&1 || true"
+  home "docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp >/dev/null 2>&1 || true"
   home "set -e
     mkdir -p $data
     docker run -d --name homewarp-scratch --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
       --cap-add NET_ADMIN --security-opt no-new-privileges:true --network host \
-      -e HOMEWARP_DATA=$data -e HOMEWARP_LISTEN=unix:$data/run/panel.sock -v $data:$data \
+      -e HOMEWARP_DATA=$data -e HOMEWARP_LISTEN=unix:$data/run/panel.sock \
+      -e HOMEWARP_SFTP=unix:$data/run/sftp.sock -e HOMEWARP_SFTP_PORT=2023 -v $data:$data \
       -v /var/run/docker.sock:/var/run/docker.sock homewarp:dev >/dev/null
     docker run -d --name homewarp-scratch-door --read-only --cap-drop ALL --security-opt no-new-privileges:true \
       -v $data/run:/run/homewarp -p 3601:3600 homewarp:dev door 0.0.0.0:3600 /run/homewarp/panel.sock >/dev/null
+    docker run -d --name homewarp-scratch-sftp --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+      -v $data/run:/run/homewarp -p 2023:2022 homewarp:dev door 0.0.0.0:2022 /run/homewarp/sftp.sock >/dev/null
     for _ in \$(seq 30); do curl -fsS -o /dev/null http://127.0.0.1:3601/api/v1/health 2>/dev/null && break; sleep 1; done
     docker logs homewarp-scratch 2>&1 | grep -E 'setup code|cannot run servers' | tail -2"
 }

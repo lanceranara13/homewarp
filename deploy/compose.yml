@@ -31,6 +31,10 @@ services:
       # machine's own firewall, and one that shuts what it was not told about
       # (ufw does) would shut the panel. The door below is how it is reached.
       HOMEWARP_LISTEN: "unix:${HOMEWARP_DATA_DIR}/run/panel.sock"
+      # SFTP for servers' files, behind a door of its own for the same reason.
+      # The port is the one that door publishes, which the panel tells people.
+      HOMEWARP_SFTP: "unix:${HOMEWARP_DATA_DIR}/run/sftp.sock"
+      HOMEWARP_SFTP_PORT: "2022"
     volumes:
       # The same path inside as outside: Core gives Docker the paths of servers'
       # files, and Docker reads paths on the host.
@@ -51,5 +55,20 @@ services:
     security_opt: ["no-new-privileges:true"]
     command: ["door", "0.0.0.0:3600", "/run/homewarp/panel.sock"]
     ports: ["3600:3600"]
+    volumes:
+      - "${HOMEWARP_DATA_DIR}/run:/run/homewarp"
+
+  # SFTP's door: the same again, for the port a file-transfer program connects
+  # to. Who may sign in, and to which server's files, is Core's to say.
+  sftp-door:
+    image: homewarp:dev
+    container_name: homewarp-sftp-door
+    depends_on: [homewarp]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["door", "0.0.0.0:2022", "/run/homewarp/sftp.sock"]
+    ports: ["2022:2022"]
     volumes:
       - "${HOMEWARP_DATA_DIR}/run:/run/homewarp"

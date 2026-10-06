@@ -1,16 +1,22 @@
 //! The API as a browser meets it: requests in, responses out, a real database
 //! file underneath.
 
+use std::{os::unix::fs::symlink, path::PathBuf, time::Duration};
+
 use axum::{
     Router,
     body::{Body, to_bytes},
     http::{
-        Request, StatusCode,
-        header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE},
+        HeaderMap, Request, StatusCode,
+        header::{
+            CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE,
+            X_CONTENT_TYPE_OPTIONS,
+        },
     },
 };
 use homewarp_core::{AppState, app, open, openapi};
 use serde_json::{Value, json};
+use sqlx::SqlitePool;
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
@@ -55,7 +61,9 @@ variables:
 struct Panel {
     app: Router,
     setup_code: String,
-    _files: tempfile::TempDir,
+    db: SqlitePool,
+    /// The directory the panel keeps everything in.
+    files: tempfile::TempDir,
 }
 
 struct Answer {
@@ -80,7 +88,9 @@ async fn panel() -> Panel {
     let files = tempfile::tempdir().unwrap();
     let db = open(&files.path().join("homewarp.db")).await.unwrap();
     // No Docker here: what servers do on it is tried on the homelab.
-    let state = AppState::start(db, None).await.unwrap();
+    let state = AppState::start(db.clone(), files.path(), None)
+        .await
+        .unwrap();
     let setup_code = state
         .setup_code()
         .expect("a new database has no account")
@@ -88,7 +98,8 @@ async fn panel() -> Panel {
     Panel {
         app: app(state),
         setup_code,
-        _files: files,
+        db,
+        files,
     }
 }
 
@@ -133,6 +144,50 @@ impl Panel {
     async fn delete(&self, path: &str, cookie: Option<&str>) -> Answer {
         let request = Request::delete(path).header(COOKIE, cookie.unwrap_or_default());
         self.send(request.body(Body::empty()).unwrap()).await
+    }
+
+    /// Sends a file's bytes as an upload does: as the body, as they are.
+    async fn upload(&self, path: &str, bytes: &[u8], cookie: Option<&str>) -> Answer {
+        let request = Request::put(path).header(COOKIE, cookie.unwrap_or_default());
+        self.send(request.body(Body::from(bytes.to_vec())).unwrap())
+            .await
+    }
+
+    /// Asks for what is not JSON, and returns it with its headers.
+    async fn download(&self, path: &str, cookie: Option<&str>) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let request = Request::get(path).header(COOKIE, cookie.unwrap_or_default());
+        let response = self
+            .app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (status, headers) = (response.status(), response.headers().clone());
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, headers, bytes.to_vec())
+    }
+
+    /// Puts a server in the database as one made and installed earlier, and
+    /// returns where its files are kept. There is no Docker here to make one with.
+    async fn a_server(&self) -> PathBuf {
+        sqlx::query(
+            "INSERT INTO templates (name, definition, source, created_at)
+             VALUES ('Example', '{}', '', 0)",
+        )
+        .execute(&self.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO servers
+                 (uuid, name, template_id, image, memory_mb, cpu_percent, port, variables, eula,
+                  installed, created_at)
+             VALUES ('a-server', 'Survival', 1, 'example.invalid/java:21', 1024, 0, 25565, '[]',
+                     0, 1, 0)",
+        )
+        .execute(&self.db)
+        .await
+        .unwrap();
+        self.files.path().join("servers/a-server")
     }
 
     /// Finishes setup as `lance` and returns the session cookie.
@@ -643,6 +698,926 @@ async fn servers_are_for_someone_signed_in() {
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
         assert_eq!(answer.body["error"], "There is no such server.");
     }
+}
+
+#[tokio::test]
+async fn a_servers_files_are_browsed_written_and_packed() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let root = panel.a_server().await;
+    let files = "/api/v1/servers/1/files";
+    let cookie = Some(cookie.as_str());
+
+    let empty = panel.get(files, cookie).await;
+    assert_eq!(empty.status, StatusCode::OK, "{}", empty.body);
+    assert_eq!(empty.body, json!([]));
+
+    // An upload, into a folder that is not there yet.
+    let motd = format!("{files}/content?path=config/motd.txt");
+    let put = panel.upload(&motd, b"hello", cookie).await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.body);
+    assert_eq!(
+        std::fs::read(root.join("config/motd.txt")).unwrap(),
+        b"hello"
+    );
+    let top = panel.get(files, cookie).await;
+    assert_eq!(top.body[0]["name"], "config");
+    assert_eq!(top.body[0]["kind"], "folder");
+    let inside = panel.get(&format!("{files}?path=/config/"), cookie).await;
+    assert_eq!(inside.body[0]["name"], "motd.txt");
+    assert_eq!(inside.body[0]["kind"], "file");
+    assert_eq!(inside.body[0]["size"], 5);
+    assert!(inside.body[0]["modified"].as_i64().unwrap() > 1_700_000_000);
+    assert_eq!(inside.body.as_array().unwrap().len(), 1);
+
+    // The editor reads text, saves the same way an upload arrives, and leaves the rest alone.
+    assert_eq!(
+        panel.get(&motd, cookie).await.body,
+        json!({ "text": "hello" })
+    );
+    let saved = panel.upload(&motd, "hello, world".as_bytes(), cookie).await;
+    assert_eq!(saved.status, StatusCode::NO_CONTENT);
+    assert_eq!(panel.get(&motd, cookie).await.body["text"], "hello, world");
+    let blob = format!("{files}/content?path=blob%20one.bin");
+    panel.upload(&blob, &[0xff, 0xfe, 0x00], cookie).await;
+    let not_text = panel.get(&blob, cookie).await;
+    assert_eq!(not_text.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        not_text.body["error"],
+        "That file is not text. Download it instead."
+    );
+    for path in ["config", "nothing.txt"] {
+        let answer = panel
+            .get(&format!("{files}/content?path={path}"), cookie)
+            .await;
+        assert!(answer.status.is_client_error(), "{path}");
+    }
+
+    // A download is the file as it is, and never something a browser shows.
+    let (status, headers, bytes) = panel
+        .download(&format!("{files}/download?path=blob%20one.bin"), cookie)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, [0xff, 0xfe, 0x00]);
+    assert_eq!(headers[CONTENT_TYPE], "application/octet-stream");
+    assert_eq!(headers[X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert_eq!(
+        headers[CONTENT_DISPOSITION],
+        "attachment; filename=\"blob one.bin\"; filename*=UTF-8''blob%20one.bin"
+    );
+
+    // Folders, moving and deleting.
+    let folder = format!("{files}/folder");
+    let world = json!({ "path": "world" });
+    let made = panel.post(&folder, world.clone(), cookie).await;
+    assert_eq!(made.status, StatusCode::NO_CONTENT, "{}", made.body);
+    assert_eq!(
+        panel.post(&folder, world, cookie).await.status,
+        StatusCode::CONFLICT
+    );
+    let moving = format!("{files}/move");
+    let moved = json!({ "from": "config/motd.txt", "to": "world/motd.txt" });
+    assert_eq!(
+        panel.post(&moving, moved, cookie).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let onto = json!({ "from": "blob one.bin", "to": "world/motd.txt" });
+    let refused = panel.post(&moving, onto, cookie).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.body["error"],
+        "Something by that name is there already."
+    );
+    let removing = format!("{files}/remove");
+    let gone = json!({ "paths": ["blob one.bin", "config"] });
+    assert_eq!(
+        panel.post(&removing, gone.clone(), cookie).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        panel.post(&removing, gone, cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let top = panel.get(files, cookie).await;
+    assert_eq!(top.body.as_array().unwrap().len(), 1);
+
+    // Packed, deleted, and unpacked again.
+    let packing = format!("{files}/pack");
+    let nothing = json!({ "folder": "", "names": [] });
+    assert_eq!(
+        panel.post(&packing, nothing, cookie).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let packed = panel
+        .post(
+            &packing,
+            json!({ "folder": "", "names": ["world"] }),
+            cookie,
+        )
+        .await;
+    assert_eq!(packed.status, StatusCode::OK, "{}", packed.body);
+    let archive = packed.body["name"].as_str().unwrap().to_owned();
+    assert!(archive.starts_with("archive-") && archive.ends_with(".tar.gz"));
+    panel
+        .post(&removing, json!({ "paths": ["world"] }), cookie)
+        .await;
+    assert!(!root.join("world").exists());
+    let unpacking = format!("{files}/unpack");
+    let unpacked = panel
+        .post(&unpacking, json!({ "path": archive }), cookie)
+        .await;
+    assert_eq!(unpacked.status, StatusCode::OK, "{}", unpacked.body);
+    assert_eq!(unpacked.body, json!({ "files": 1, "skipped": 0 }));
+    assert_eq!(
+        std::fs::read(root.join("world/motd.txt")).unwrap(),
+        b"hello, world"
+    );
+    let not_one = panel
+        .post(&unpacking, json!({ "path": "world/motd.txt" }), cookie)
+        .await;
+    assert_eq!(not_one.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let usage = panel.get(&format!("{files}/usage"), cookie).await;
+    assert_eq!(usage.status, StatusCode::OK);
+    assert!(usage.body["used_bytes"].as_u64().unwrap() > 0);
+    assert!(usage.body["free_bytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn a_servers_files_end_at_its_own_folder() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let root = panel.a_server().await;
+    let files = "/api/v1/servers/1/files";
+    let cookie = Some(cookie.as_str());
+    // What is beside the server's files is the machine's, and a server that
+    // has been taken over can leave a link to it among them.
+    let secret = panel.files.path().join("secret.txt");
+    std::fs::write(&secret, "the machine's own").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    symlink(panel.files.path(), root.join("out")).unwrap();
+
+    for path in [
+        "../secret.txt",
+        "/../../secret.txt",
+        "a/../../secret.txt",
+        "%2e%2e/secret.txt",
+        ".",
+    ] {
+        for answer in [
+            panel.get(&format!("{files}?path={path}"), cookie).await,
+            panel
+                .get(&format!("{files}/content?path={path}"), cookie)
+                .await,
+            panel
+                .upload(&format!("{files}/content?path={path}"), b"x", cookie)
+                .await,
+        ] {
+            assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+        }
+        let (status, _, _) = panel
+            .download(&format!("{files}/download?path={path}"), cookie)
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+    }
+
+    for answer in [
+        panel.get(&format!("{files}?path=out"), cookie).await,
+        panel
+            .get(&format!("{files}/content?path=out/secret.txt"), cookie)
+            .await,
+    ] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            answer.body["error"],
+            "That leads out of this server's files."
+        );
+    }
+    let (status, _, bytes) = panel
+        .download(&format!("{files}/download?path=out/secret.txt"), cookie)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!String::from_utf8_lossy(&bytes).contains("the machine's own"));
+    let through = [
+        panel
+            .upload(
+                &format!("{files}/content?path=out/planted.txt"),
+                b"x",
+                cookie,
+            )
+            .await,
+        panel
+            .post(
+                &format!("{files}/folder"),
+                json!({ "path": "out/planted" }),
+                cookie,
+            )
+            .await,
+        panel
+            .post(
+                &format!("{files}/move"),
+                json!({ "from": "out/secret.txt", "to": "taken.txt" }),
+                cookie,
+            )
+            .await,
+        panel
+            .post(
+                &format!("{files}/remove"),
+                json!({ "paths": ["out/secret.txt"] }),
+                cookie,
+            )
+            .await,
+        panel
+            .post(
+                &format!("{files}/pack"),
+                json!({ "folder": "out", "names": ["secret.txt"] }),
+                cookie,
+            )
+            .await,
+        panel
+            .post(
+                &format!("{files}/unpack"),
+                json!({ "path": "out/secret.txt" }),
+                cookie,
+            )
+            .await,
+    ];
+    for answer in through {
+        assert!(answer.status.is_client_error(), "{}", answer.body);
+    }
+    // The server's folder itself is not one of its files.
+    for path in ["", "/", "world/../.."] {
+        let answer = panel
+            .post(
+                &format!("{files}/remove"),
+                json!({ "paths": [path] }),
+                cookie,
+            )
+            .await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{path:?}");
+    }
+    // Deleting the link deletes the link.
+    let unlinked = panel
+        .post(
+            &format!("{files}/remove"),
+            json!({ "paths": ["out"] }),
+            cookie,
+        )
+        .await;
+    assert_eq!(unlinked.status, StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "the machine's own"
+    );
+    assert!(root.exists());
+    let beside: Vec<_> = std::fs::read_dir(panel.files.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with("homewarp.db"))
+        .collect();
+    assert_eq!(beside.len(), 2, "{beside:?}");
+}
+
+#[tokio::test]
+async fn files_are_for_someone_signed_in_and_a_server_that_is_there() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let files = "/api/v1/servers/1/files";
+    let paths = json!({ "paths": ["a"] });
+    let each = |cookie: Option<&'static str>| {
+        let panel = &panel;
+        let paths = paths.clone();
+        async move {
+            vec![
+                panel.get(files, cookie).await,
+                panel.get(&format!("{files}/content?path=a"), cookie).await,
+                panel.get(&format!("{files}/download?path=a"), cookie).await,
+                panel.get(&format!("{files}/usage"), cookie).await,
+                panel
+                    .upload(&format!("{files}/content?path=a"), b"x", cookie)
+                    .await,
+                panel
+                    .post(&format!("{files}/folder"), json!({ "path": "a" }), cookie)
+                    .await,
+                panel
+                    .post(
+                        &format!("{files}/move"),
+                        json!({ "from": "a", "to": "b" }),
+                        cookie,
+                    )
+                    .await,
+                panel.post(&format!("{files}/remove"), paths, cookie).await,
+                panel
+                    .post(
+                        &format!("{files}/pack"),
+                        json!({ "folder": "", "names": ["a"] }),
+                        cookie,
+                    )
+                    .await,
+                panel
+                    .post(&format!("{files}/unpack"), json!({ "path": "a" }), cookie)
+                    .await,
+            ]
+        }
+    };
+    for answer in each(None).await {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+    let cookie: &'static str = cookie.leak();
+    for answer in each(Some(cookie)).await {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND);
+        assert_eq!(answer.body["error"], "There is no such server.");
+    }
+    // Asking after a server that is not there makes nothing for it.
+    assert!(!panel.files.path().join("servers").exists());
+}
+
+#[tokio::test]
+async fn an_account_does_what_it_has_been_let_do_and_no_more() {
+    let panel = panel().await;
+    let owner = panel.set_up().await;
+    panel.a_server().await;
+    let owner = Some(owner.as_str());
+    let password = "another long password";
+
+    let new = json!({ "username": "sam", "password": password });
+    let made = panel.post("/api/v1/users", new.clone(), owner).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    assert_eq!(made.body["owner"], false);
+    let sam_id = made.body["id"].as_i64().unwrap();
+    assert_eq!(
+        panel.post("/api/v1/users", new.clone(), owner).await.status,
+        StatusCode::CONFLICT
+    );
+    let weak = json!({ "username": "jo", "password": "short" });
+    assert_eq!(
+        panel.post("/api/v1/users", weak, owner).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let signed = panel.post("/api/v1/login", new.clone(), None).await;
+    assert_eq!(signed.status, StatusCode::OK);
+    assert_eq!(signed.body["user"]["owner"], false);
+    let sam = signed.cookie();
+    let sam = Some(sam.as_str());
+
+    // A server it has not been let into is not there.
+    assert_eq!(panel.get("/api/v1/servers", sam).await.body, json!([]));
+    for path in ["/api/v1/servers/1", "/api/v1/servers/1/files"] {
+        assert_eq!(panel.get(path, sam).await.status, StatusCode::NOT_FOUND);
+    }
+    // And what changes the machine, or who may use it, is the owner's.
+    let grant = format!("/api/v1/servers/1/users/{sam_id}");
+    let files = json!({ "permissions": ["files", "files"] });
+    for answer in [
+        panel.get("/api/v1/users", sam).await,
+        panel.post("/api/v1/users", new, sam).await,
+        panel.delete("/api/v1/users/1", sam).await,
+        panel.get("/api/v1/activity", sam).await,
+        panel
+            .post("/api/v1/templates", json!({ "egg": EGG }), sam)
+            .await,
+        panel.delete("/api/v1/templates/1", sam).await,
+        panel.post("/api/v1/servers", json!({}), sam).await,
+        panel.delete("/api/v1/servers/1", sam).await,
+        panel
+            .post("/api/v1/gate", json!({ "address": "203.0.113.10" }), sam)
+            .await,
+        panel.delete("/api/v1/gate", sam).await,
+        panel.get("/api/v1/servers/1/users", sam).await,
+        panel.put(&grant, files.clone(), sam).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+        assert_eq!(
+            answer.body["error"],
+            "Only the owner of this Homewarp can do that."
+        );
+    }
+
+    // Let in, it may look.
+    let looking = json!({ "permissions": [] });
+    assert_eq!(
+        panel.put(&grant, looking, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let seen = panel.get("/api/v1/servers/1", sam).await;
+    assert_eq!(seen.status, StatusCode::OK, "{}", seen.body);
+    assert_eq!(seen.body["permissions"], json!([]));
+    let listed = panel.get("/api/v1/servers", sam).await;
+    assert_eq!(listed.body[0]["name"], "Survival");
+    let touching = || async {
+        [
+            panel.get("/api/v1/servers/1/files", sam).await,
+            panel
+                .upload("/api/v1/servers/1/files/content?path=a", b"x", sam)
+                .await,
+            panel
+                .post("/api/v1/servers/1/power", json!({ "action": "start" }), sam)
+                .await,
+            panel
+                .post(
+                    "/api/v1/servers/1/command",
+                    json!({ "command": "say hi" }),
+                    sam,
+                )
+                .await,
+            panel
+                .put(
+                    "/api/v1/servers/1",
+                    json!({ "name": "Mine", "memory_mb": 1024, "port": 25565 }),
+                    sam,
+                )
+                .await,
+        ]
+    };
+    for answer in touching().await {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+        assert_eq!(
+            answer.body["error"],
+            "Your account has not been let do that with this server."
+        );
+    }
+
+    // Let do one thing, it may do that one.
+    assert_eq!(
+        panel.put(&grant, files, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let seen = panel.get("/api/v1/servers/1", sam).await;
+    assert_eq!(seen.body["permissions"], json!(["files"]));
+    let [listing, upload, power, command, settings] = touching().await;
+    assert_eq!(listing.status, StatusCode::OK);
+    assert_eq!(upload.status, StatusCode::NO_CONTENT);
+    for answer in [power, command, settings] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    }
+    let users = panel.get("/api/v1/servers/1/users", owner).await;
+    assert_eq!(
+        users.body,
+        json!([{ "user_id": sam_id, "username": "sam", "permissions": ["files"] }])
+    );
+    let accounts = panel.get("/api/v1/users", owner).await;
+    assert_eq!(accounts.body[0]["username"], "lance");
+    assert_eq!(accounts.body[0]["owner"], true);
+    assert_eq!(accounts.body[1]["username"], "sam");
+    assert_eq!(accounts.body[1]["servers"], 1);
+
+    // The owner is in every server, and is not let in or turned out.
+    let owner_grant = "/api/v1/servers/1/users/1";
+    assert_eq!(
+        panel
+            .put(owner_grant, json!({ "permissions": [] }), owner)
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        panel.delete("/api/v1/users/1", owner).await.status,
+        StatusCode::CONFLICT
+    );
+
+    // Turned out, the server is gone from its sight again.
+    assert_eq!(
+        panel.delete(&grant, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        panel.delete(&grant, owner).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        panel.get("/api/v1/servers/1", sam).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // It changes its own password, knowing the one it has.
+    let own = "/api/v1/account/password";
+    let wrong = json!({ "current": "not this one at all", "password": "a third long password" });
+    assert_eq!(
+        panel.post(own, wrong, sam).await.status,
+        StatusCode::FORBIDDEN
+    );
+    let right = json!({ "current": password, "password": "a third long password" });
+    assert_eq!(
+        panel.post(own, right, sam).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        panel.get("/api/v1/servers", sam).await.status,
+        StatusCode::OK
+    );
+    let old = json!({ "username": "sam", "password": password });
+    assert_eq!(
+        panel.post("/api/v1/login", old, None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    // The owner gives it another, and it is signed out where it was signed in.
+    let reset = json!({ "password": "a fourth long password" });
+    assert_eq!(
+        panel
+            .put(&format!("/api/v1/users/{sam_id}/password"), reset, owner)
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        panel.get("/api/v1/servers", sam).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let again = json!({ "username": "sam", "password": "a fourth long password" });
+    let signed = panel.post("/api/v1/login", again, None).await;
+    assert_eq!(signed.status, StatusCode::OK);
+    let sam = signed.cookie();
+
+    // Removed, it is signed out for good.
+    let account = format!("/api/v1/users/{sam_id}");
+    assert_eq!(
+        panel.delete(&account, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        panel.delete(&account, owner).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        panel.get("/api/v1/servers", Some(&sam)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn what_is_done_is_written_down_for_the_owner() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    panel.a_server().await;
+    let cookie = Some(cookie.as_str());
+
+    panel
+        .upload("/api/v1/servers/1/files/content?path=a.txt", b"x", cookie)
+        .await;
+    let moved = json!({ "from": "a.txt", "to": "b.txt" });
+    panel
+        .post("/api/v1/servers/1/files/move", moved, cookie)
+        .await;
+    // What was refused did not happen, and is not written down as if it had.
+    let onto = json!({ "from": "nothing.txt", "to": "b.txt" });
+    panel
+        .post("/api/v1/servers/1/files/move", onto, cookie)
+        .await;
+    let wrong = json!({ "username": "lance", "password": "not the password" });
+    panel.post("/api/v1/login", wrong, None).await;
+    let nobody = json!({ "username": "hunter2", "password": "not the password" });
+    panel.post("/api/v1/login", nobody, None).await;
+
+    let log = panel.get("/api/v1/activity", cookie).await;
+    assert_eq!(log.status, StatusCode::OK, "{}", log.body);
+    let actions = |log: &Value| -> Vec<String> {
+        let lines = log.as_array().unwrap().iter();
+        lines
+            .map(|line| line["action"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        actions(&log.body),
+        [
+            "account.sign_in_failed",
+            "files.move",
+            "files.write",
+            "account.setup"
+        ]
+    );
+    let moved = &log.body[1];
+    assert_eq!(moved["detail"], "a.txt to b.txt");
+    assert_eq!(moved["username"], "lance");
+    assert_eq!(moved["user_id"], 1);
+    assert_eq!(moved["server"], "Survival");
+    assert_eq!(moved["server_id"], 1);
+    assert!(moved["at"].as_i64().unwrap() > 1_700_000_000);
+    assert_eq!(log.body[3]["server"], Value::Null);
+
+    let of_server = panel.get("/api/v1/activity?server=1", cookie).await;
+    assert_eq!(actions(&of_server.body), ["files.move", "files.write"]);
+    let older = format!("/api/v1/activity?before={}", moved["id"]);
+    let older = panel.get(&older, cookie).await;
+    assert_eq!(actions(&older.body), ["files.write", "account.setup"]);
+    let nobodys = panel.get("/api/v1/activity?user=99", cookie).await;
+    assert_eq!(nobodys.body, json!([]));
+    assert_eq!(
+        panel.get("/api/v1/activity", None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+impl Panel {
+    /// Asks again until the answer is as wanted. For what is answered at once
+    /// and done afterwards: a backup, a schedule's run.
+    async fn until(
+        &self,
+        path: &str,
+        cookie: Option<&str>,
+        wanted: impl Fn(&Value) -> bool,
+    ) -> Value {
+        for _ in 0..250 {
+            let answer = self.get(path, cookie).await;
+            if wanted(&answer.body) {
+                return answer.body;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{path} never came to be as wanted");
+    }
+}
+
+#[tokio::test]
+async fn a_backup_is_made_kept_and_put_back() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let root = panel.a_server().await;
+    let cookie = Some(cookie.as_str());
+    let level = "/api/v1/servers/1/files/content?path=world/level.dat";
+    panel.upload(level, b"level", cookie).await;
+    let backups = "/api/v1/servers/1/backups";
+    let done = |all: &Value| all["backups"][0]["state"] == "done";
+
+    let none = panel.get(backups, cookie).await;
+    assert_eq!(none.body, json!({ "kept": 3, "backups": [] }));
+    let long = json!({ "name": "x".repeat(61) });
+    assert_eq!(
+        panel.post(backups, long, cookie).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // Begun at once, done a moment later.
+    let begun = panel
+        .post(backups, json!({ "name": " Before the update " }), cookie)
+        .await;
+    assert_eq!(begun.status, StatusCode::ACCEPTED, "{}", begun.body);
+    assert_eq!(begun.body["name"], "Before the update");
+    let first = begun.body["id"].as_i64().unwrap();
+    let all = panel.until(backups, cookie, done).await;
+    assert!(all["backups"][0]["size_bytes"].as_i64().unwrap() > 0);
+    assert!(all["backups"][0]["finished_at"].as_i64().unwrap() > 1_700_000_000);
+    // Kept beside the server's files, and not among them.
+    let kept_at = panel
+        .files
+        .path()
+        .join(format!("backups/a-server/{first}.tar.zst"));
+    assert!(kept_at.exists());
+
+    let one = format!("{backups}/{first}");
+    let (status, headers, bytes) = panel.download(&format!("{one}/download"), cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes[..4], [0x28, 0xb5, 0x2f, 0xfd]);
+    let saved_as = headers[CONTENT_DISPOSITION].to_str().unwrap();
+    assert!(
+        saved_as.starts_with("attachment; filename=\"Before the update-20"),
+        "{saved_as}"
+    );
+    assert!(saved_as.ends_with(".tar.zst"), "{saved_as}");
+
+    // Put back, the files are what they were: what came since is gone.
+    panel.upload(level, b"newer", cookie).await;
+    panel
+        .upload(
+            "/api/v1/servers/1/files/content?path=added.txt",
+            b"x",
+            cookie,
+        )
+        .await;
+    let restored = panel
+        .post(&format!("{one}/restore"), json!({}), cookie)
+        .await;
+    assert_eq!(restored.status, StatusCode::ACCEPTED, "{}", restored.body);
+    panel
+        .until(level, cookie, |file| file["text"] == "level")
+        .await;
+    assert!(!root.join("added.txt").exists());
+
+    // One more than is kept, and the oldest goes.
+    let kept = format!("{backups}/kept");
+    for (number, status) in [
+        (0, StatusCode::UNPROCESSABLE_ENTITY),
+        (21, StatusCode::UNPROCESSABLE_ENTITY),
+        (1, StatusCode::NO_CONTENT),
+    ] {
+        assert_eq!(
+            panel
+                .put(&kept, json!({ "kept": number }), cookie)
+                .await
+                .status,
+            status
+        );
+    }
+    let second = panel.post(backups, json!({}), cookie).await;
+    assert_eq!(second.body["name"], "Backup");
+    let second = second.body["id"].as_i64().unwrap();
+    let all = panel
+        .until(backups, cookie, |all| {
+            done(all) && all["backups"].as_array().unwrap().len() == 1
+        })
+        .await;
+    assert_eq!(all["kept"], 1);
+    assert_eq!(all["backups"][0]["id"], second);
+    assert!(!kept_at.exists());
+    for gone in ["download", "restore"] {
+        let path = format!("{one}/{gone}");
+        let answer = match gone {
+            "restore" => panel.post(&path, json!({}), cookie).await.status,
+            _ => panel.download(&path, cookie).await.0,
+        };
+        assert_eq!(answer, StatusCode::NOT_FOUND);
+    }
+
+    let last = format!("{backups}/{second}");
+    assert_eq!(
+        panel.delete(&last, cookie).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        panel.delete(&last, cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(panel.get(backups, cookie).await.body["backups"], json!([]));
+    assert_eq!(
+        panel.get("/api/v1/servers/2/backups", cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_schedule_is_kept_with_the_time_it_comes_next() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    panel.a_server().await;
+    let cookie = Some(cookie.as_str());
+    let schedules = "/api/v1/servers/1/schedules";
+    assert_eq!(panel.get(schedules, cookie).await.body, json!([]));
+
+    // Four in the morning, on a clock eight hours ahead of UTC.
+    let nightly = json!({
+        "name": " Nightly backup ",
+        "cron": "0  4 * * *",
+        "utc_offset": 480,
+        "enabled": true,
+        "tasks": [
+            { "action": "command", "command": "save-all" },
+            { "action": "backup", "wait_seconds": 10 },
+        ],
+    });
+    let made = panel.post(schedules, nightly.clone(), cookie).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    assert_eq!(made.body["name"], "Nightly backup");
+    assert_eq!(made.body["cron"], "0 4 * * *");
+    assert_eq!(made.body["tasks"][1]["wait_seconds"], 10);
+    assert_eq!(made.body["last_run_at"], Value::Null);
+    let next = made.body["next_run_at"].as_i64().unwrap();
+    assert_eq!((next + 480 * 60) % 86_400, 4 * 3600);
+    let id = made.body["id"].as_i64().unwrap();
+    let listed = panel.get(schedules, cookie).await;
+    assert_eq!(listed.body, json!([made.body]));
+
+    let with = |change: Value| {
+        let mut changed = nightly.clone();
+        for (key, value) in change.as_object().unwrap() {
+            changed[key] = value.clone();
+        }
+        changed
+    };
+    for (wrong, said) in [
+        (
+            json!({ "cron": "nope" }),
+            "A schedule's time is five fields: minute, hour, day, month and weekday.",
+        ),
+        (
+            json!({ "cron": "0 25 * * *" }),
+            "The hour is 0 to 23, and \"25\" is not that.",
+        ),
+        (json!({ "cron": "0 0 30 2 *" }), "That time never comes."),
+        (
+            json!({ "name": " " }),
+            "A schedule's name is 1 to 60 characters.",
+        ),
+        (
+            json!({ "utc_offset": 900 }),
+            "That is not a clock's distance from UTC.",
+        ),
+        (json!({ "tasks": [] }), "A schedule does 1 to 10 things."),
+        (
+            json!({ "tasks": [{ "action": "command", "command": "one\ntwo" }] }),
+            "A command is one line of up to 1000 characters.",
+        ),
+        (
+            json!({ "tasks": [{ "action": "command" }] }),
+            "A command is one line of up to 1000 characters.",
+        ),
+        (
+            json!({ "tasks": [{ "action": "stop", "wait_seconds": 3601 }] }),
+            "A task waits an hour at the most.",
+        ),
+    ] {
+        let answer = panel.post(schedules, with(wrong), cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{said}");
+        assert_eq!(answer.body["error"], said);
+    }
+
+    // Not enabled, it has no next time.
+    let one = format!("{schedules}/{id}");
+    let off = panel
+        .put(
+            &one,
+            with(json!({ "enabled": false, "name": "Nightly" })),
+            cookie,
+        )
+        .await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    assert_eq!(off.body["name"], "Nightly");
+    assert_eq!(off.body["next_run_at"], Value::Null);
+    // Set off by hand it runs all the same, and says what that came to.
+    let run = panel.post(&format!("{one}/run"), json!({}), cookie).await;
+    assert_eq!(run.status, StatusCode::ACCEPTED);
+    let ran = panel
+        .until(schedules, cookie, |all| {
+            all[0]["last_result"] != Value::Null
+        })
+        .await;
+    assert_eq!(
+        ran[0]["last_result"],
+        "Not run: Homewarp cannot reach Docker."
+    );
+    assert!(ran[0]["last_run_at"].as_i64().unwrap() > 1_700_000_000);
+
+    assert_eq!(
+        panel.delete(&one, cookie).await.status,
+        StatusCode::NO_CONTENT
+    );
+    for answer in [
+        panel.delete(&one, cookie).await,
+        panel.put(&one, nightly.clone(), cookie).await,
+        panel.post(&format!("{one}/run"), json!({}), cookie).await,
+        panel.get("/api/v1/servers/2/schedules", cookie).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.body);
+    }
+    // What a schedule did when nobody asked is written down under Homewarp's name.
+    let log = panel.get("/api/v1/activity", cookie).await;
+    let ran = log
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|line| line["action"] == "schedule.ran")
+        .unwrap();
+    assert_eq!(ran["username"], "Homewarp");
+    assert_eq!(ran["user_id"], Value::Null);
+    assert_eq!(
+        ran["detail"],
+        "Nightly: Not run: Homewarp cannot reach Docker."
+    );
+}
+
+#[tokio::test]
+async fn where_servers_look_names_up_is_the_owners_to_set() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let cookie = Some(cookie.as_str());
+    let settings = "/api/v1/settings";
+
+    let first = panel.get(settings, cookie).await;
+    assert_eq!(first.body, json!({ "resolvers": ["1.1.1.1", "1.0.0.1"] }));
+    // Kept each once, as addresses are written.
+    let quad9 = json!({ "resolvers": ["9.9.9.9", " 9.9.9.9 ", "149.112.112.112"] });
+    let changed = panel.put(settings, quad9, cookie).await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"] });
+    assert_eq!(changed.body, kept);
+
+    for (wrong, said) in [
+        (
+            json!(["192.168.1.1"]),
+            "Servers are kept from the home network, so they could not ask 192.168.1.1. Give a resolver on the internet, such as 1.1.1.1 or 9.9.9.9.",
+        ),
+        (
+            json!(["dns.example"]),
+            "dns.example is not an IPv4 address.",
+        ),
+        (json!([]), "Give one to three resolvers."),
+        (
+            json!(["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]),
+            "Give one to three resolvers.",
+        ),
+    ] {
+        let answer = panel
+            .put(settings, json!({ "resolvers": wrong }), cookie)
+            .await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{said}");
+        assert_eq!(answer.body["error"], said);
+    }
+    assert_eq!(panel.get(settings, cookie).await.body, kept);
+    assert_eq!(
+        panel.get(settings, None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 /// The web client's types are generated from `web/openapi.json`. If this fails,

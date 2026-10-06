@@ -24,14 +24,11 @@ use crate::Console;
 /// What an install script may use while it runs.
 const INSTALL_MEMORY: i64 = 1024 * 1024 * 1024;
 const PIDS: i64 = 512;
-/// Where servers look names up. Left to Docker they would ask the home's own
-/// resolver, which is as a rule the router, and a server is kept from every
-/// address on the home network. Wings gives its servers these two as well.
-const RESOLVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
-
-fn resolvers() -> Option<Vec<String>> {
-    Some(RESOLVERS.map(str::to_owned).to_vec())
-}
+/// Where servers look names up unless told otherwise. Left to Docker they would
+/// ask the home's own resolver, which is as a rule the router, and a server is
+/// kept from every address on the home network. Wings gives its servers these
+/// two as well.
+pub const RESOLVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -89,6 +86,8 @@ pub struct Server {
     pub gid: u32,
     pub network: String,
     pub timezone: String,
+    /// Where it looks names up.
+    pub resolvers: Vec<String>,
 }
 
 impl Server {
@@ -304,7 +303,7 @@ impl Engine {
                     format!("{}:/mnt/install:ro", install.scratch.display()),
                 ]),
                 network_mode: Some(server.network.clone()),
-                dns: resolvers(),
+                dns: Some(server.resolvers.clone()),
                 memory: Some(INSTALL_MEMORY),
                 memory_swap: Some(INSTALL_MEMORY),
                 pids_limit: Some(PIDS),
@@ -450,7 +449,7 @@ impl Engine {
                 binds: Some(vec![format!("{}:/home/container", server.dir.display())]),
                 port_bindings: Some(published),
                 network_mode: Some(server.network.clone()),
-                dns: resolvers(),
+                dns: Some(server.resolvers.clone()),
                 memory: Some(server.memory_limit()),
                 memory_swap: Some(server.memory_limit()),
                 // Docker counts in billionths of a core.
@@ -681,6 +680,7 @@ mod tests {
             gid: 4857,
             network: "homewarp-br".to_owned(),
             timezone: "UTC".to_owned(),
+            resolvers: super::RESOLVERS.map(str::to_owned).to_vec(),
         }
     }
 
