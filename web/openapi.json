@@ -6,6 +6,91 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/api/v1/gate": {
+      "get": {
+        "summary": "The Gate, and how the tunnel to it is doing.",
+        "operationId": "get_gate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Connects this home to a Gate that is already running. The tunnel comes up\nwithin a few seconds; asking again shows how it went.",
+        "operationId": "connect_gate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The Gate is kept, and the tunnel is on its way up."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Something given will not do.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Forgets the Gate and takes home's end of the tunnel down. Servers go back\nto being reached on the home network only.",
+        "operationId": "disconnect_gate",
+        "responses": {
+          "204": {
+            "description": "There is no Gate now."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "health",
@@ -878,6 +963,99 @@
           }
         ],
         "description": "What a page that follows a server is sent, over its socket."
+      },
+      "GateSettings": {
+        "type": "object",
+        "description": "What it takes to reach a Gate that is already running.",
+        "required": [
+          "address",
+          "wg_port",
+          "private_key",
+          "gate_public_key",
+          "preshared_key",
+          "token",
+          "api_port"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The VPS's public address or name."
+          },
+          "api_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "gate_public_key": {
+            "type": "string"
+          },
+          "nat": {
+            "type": "boolean",
+            "description": "Have servers see the Gate's address and not their players' own: for a\nhome where the way back through the tunnel cannot be made to work."
+          },
+          "preshared_key": {
+            "type": "string"
+          },
+          "private_key": {
+            "type": "string",
+            "description": "Home's own key for the tunnel, the public half of which the Gate has."
+          },
+          "token": {
+            "type": "string"
+          },
+          "wg_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "GateView": {
+        "type": "object",
+        "description": "The Gate as the Network page shows it.",
+        "required": [
+          "connected",
+          "transparent",
+          "forwards"
+        ],
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The VPS's public address: what players type."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "Whether a Gate has been connected at all."
+          },
+          "forwards": {
+            "type": "integer",
+            "description": "How many ports the Gate forwards.",
+            "minimum": 0
+          },
+          "handshake_age_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long ago the Gate was heard from over the tunnel. None if it never was.",
+            "minimum": 0
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the Gate could not be reached, when it could not."
+          },
+          "transparent": {
+            "type": "boolean",
+            "description": "Whether servers see their players' own addresses, and not the Gate's."
+          }
+        }
       },
       "Health": {
         "type": "object",

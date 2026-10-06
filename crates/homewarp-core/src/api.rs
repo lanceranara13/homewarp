@@ -22,7 +22,7 @@ use sqlx::SqlitePool;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::{auth, runtime::Runtime, servers, templates, ui};
+use crate::{auth, runtime::Runtime, servers, templates, tunnel, tunnel::Tunnel, ui};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -32,6 +32,8 @@ pub struct AppState {
     pub(crate) db: SqlitePool,
     /// What runs servers. There is none where Docker cannot be reached.
     pub(crate) runtime: Option<Arc<Runtime>>,
+    /// Home's end of the tunnel to the Gate, if there is a Gate.
+    pub(crate) tunnel: Arc<Tunnel>,
     setup_code: Option<Arc<str>>,
 }
 
@@ -45,10 +47,17 @@ impl AppState {
             Some(auth::new_setup_code().into())
         };
         Ok(Self {
+            tunnel: Tunnel::new(db.clone()),
             db,
             runtime,
             setup_code,
         })
+    }
+
+    /// Starts keeping the tunnel as the database says it should be. Left to the
+    /// caller, because it changes this machine's network and tests must not.
+    pub fn keep_tunnel(&self) {
+        self.tunnel.keep();
     }
 
     /// The setup code, if this process started without an account. Whoever can
@@ -79,6 +88,7 @@ fn api() -> OpenApiRouter<AppState> {
         .routes(routes!(logout))
         .merge(templates::routes())
         .merge(servers::routes())
+        .merge(tunnel::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.

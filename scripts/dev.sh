@@ -147,11 +147,13 @@ cmd_gen() {
 }
 
 # Builds the Gate as a VPS will run it: one static binary that needs nothing installed.
+# Core is built the same way beside it, for the lab, whose home has no glibc.
 cmd_gate() {
   cmd_sync && builder
-  in_builder 'cargo build --release -p homewarp-gate --target x86_64-unknown-linux-musl
-              mkdir -p deploy/out && cp /target/x86_64-unknown-linux-musl/release/homewarp-gate deploy/out/
-              ls -l deploy/out/homewarp-gate | cut -d" " -f5- '
+  in_builder 'cargo build --release -p homewarp-gate -p homewarp-core --target x86_64-unknown-linux-musl
+              mkdir -p deploy/out && cd /target/x86_64-unknown-linux-musl/release
+              cp homewarp-gate /work/deploy/out/ && cp homewarp /work/deploy/out/homewarp-static
+              ls -l /work/deploy/out | cut -d" " -f5- '
 }
 
 # The simulated VPS, internet and home (lab/run.sh), with the Gate just built. HOME_FW=nftables switches

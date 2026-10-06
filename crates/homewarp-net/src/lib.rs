@@ -30,6 +30,10 @@ pub enum Error {
     Interface(String),
     #[error("WireGuard: {0}")]
     WireGuard(String),
+    #[error("the way back could not be set up: {0}")]
+    Ip(io::Error),
+    #[error("the way back could not be set up: {0}")]
+    Routing(String),
     #[error("nft could not be run: {0}")]
     Nft(#[from] io::Error),
     #[error("nft refused the rules: {0}")]
@@ -169,6 +173,8 @@ pub fn bring_up(link: &Link) -> Result<(), Error> {
                     && peer.allowed_ips.len() == 1
                     && peer.allowed_ips[0].address == allowed.address
                     && peer.allowed_ips[0].cidr == allowed.cidr
+                    // Home dials. If the Gate has moved, home has to be told where to.
+                    && link.peer_endpoint.is_none_or(|at| peer.endpoint == Some(at))
             });
         if as_wanted {
             return Ok(());
@@ -216,6 +222,89 @@ pub fn heard() -> Result<Heard, Error> {
         heard.handshake_age_seconds = heard.handshake_age_seconds.or(age);
     }
     Ok(heard)
+}
+
+/// Home's whole table, as nft reads it.
+///
+/// A connection that comes in from the Gate is marked, and the mark is put on
+/// its replies, which [`route_replies`] then sends back into the tunnel: that
+/// is what lets a server see its players' own addresses. The rest is what
+/// neither the Gate nor a game server may do. From the tunnel, only what
+/// Docker published on `bridge` gets in; a server reaches neither this
+/// machine nor the networks behind it.
+pub fn home_ruleset(bridge: &str) -> Result<String, Error> {
+    let named_well = (1..=15).contains(&bridge.len())
+        && bridge
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if !named_well {
+        return Err(Error::Interface(bridge.to_owned()));
+    }
+    Ok(format!(
+        r#"table inet homewarp
+delete table inet homewarp
+table inet homewarp {{
+  chain mark_in {{
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "homewarp0" ct state new ct mark set 0x4857
+    iifname != "homewarp0" ct mark 0x4857 meta mark set ct mark
+  }}
+  chain input {{
+    type filter hook input priority filter; policy accept;
+    iifname {{ "homewarp0", "{bridge}" }} ct state established,related accept
+    iifname "homewarp0" counter drop
+    iifname "{bridge}" counter drop
+  }}
+  chain forward {{
+    type filter hook forward priority filter - 1; policy accept;
+    iifname "homewarp0" oifname "{bridge}" ct status dnat accept
+    iifname "homewarp0" counter drop
+    iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
+    oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
+  }}
+}}
+"#
+    ))
+}
+
+fn ip(arguments: &[&str]) -> Result<(), Error> {
+    let done = Command::new("ip")
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(Error::Ip)?;
+    if !done.status.success() {
+        let said = String::from_utf8_lossy(&done.stderr);
+        return Err(Error::Routing(said.trim().to_owned()));
+    }
+    Ok(())
+}
+
+/// Home's way back: replies that carry the mark leave by the tunnel and not by
+/// the home's own line, and the tunnel's interface alone lets in packets from
+/// addresses that route elsewhere, which is what every player's is.
+pub fn route_replies() -> Result<(), Error> {
+    // Taken away first, so that doing this twice leaves one rule and not two.
+    let _ = ip(&["rule", "del", "fwmark", "0x4857", "lookup", "4857"]);
+    ip(&["rule", "add", "fwmark", "0x4857", "lookup", "4857"])?;
+    ip(&[
+        "route", "replace", "default", "dev", INTERFACE, "table", "4857",
+    ])?;
+    std::fs::write(
+        format!("/proc/sys/net/ipv4/conf/{INTERFACE}/rp_filter"),
+        "2",
+    )
+    .map_err(Error::Ip)
+}
+
+/// Removes everything this crate makes, on either end: the table, the way
+/// back and the interface. What is not there is passed over.
+pub fn take_down() {
+    let _ = ip(&["rule", "del", "fwmark", "0x4857", "lookup", "4857"]);
+    let _ = ip(&["link", "del", INTERFACE]);
+    let _ = apply("table inet homewarp\ndelete table inet homewarp\n");
 }
 
 /// Hands a ruleset to nft, which makes all of it take effect or none of it.
@@ -293,6 +382,24 @@ mod tests {
     fn nat_mode_is_one_rule_more() {
         let nat = gate_ruleset("eth0", HOME, &desired(Mode::Nat, &[])).unwrap();
         assert!(nat.contains("oifname \"homewarp0\" masquerade"));
+    }
+
+    #[test]
+    fn home_marks_what_comes_from_the_gate_and_lets_in_only_what_docker_published() {
+        let rules = super::home_ruleset("homewarp-br").unwrap();
+        // The mark goes on a connection as it arrives, and onto its replies only.
+        assert!(rules.contains("iifname \"homewarp0\" ct state new ct mark set 0x4857"));
+        assert!(rules.contains("iifname != \"homewarp0\" ct mark 0x4857 meta mark set ct mark"));
+        assert!(
+            rules.contains("iifname \"homewarp0\" oifname \"homewarp-br\" ct status dnat accept")
+        );
+        assert!(rules.contains(
+            "iifname { \"homewarp0\", \"homewarp-br\" } ct state established,related accept"
+        ));
+        assert!(matches!(
+            super::home_ruleset("br\" accept; #"),
+            Err(Error::Interface(_))
+        ));
     }
 
     #[test]

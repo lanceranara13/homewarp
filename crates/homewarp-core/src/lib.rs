@@ -6,6 +6,7 @@ mod db;
 mod runtime;
 mod servers;
 mod templates;
+mod tunnel;
 mod ui;
 
 pub use api::{AppState, app, openapi};

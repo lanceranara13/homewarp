@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let state = AppState::start(db, runtime).await?;
+    state.keep_tunnel();
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(
         "Homewarp {} is listening on http://{listen}",

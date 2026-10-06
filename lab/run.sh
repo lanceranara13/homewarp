@@ -36,27 +36,58 @@ dc()   { docker compose -p homewarp-lab --progress quiet "$@"; }
 in_()  { dc exec -T "$1" sh -s; }
 vars() { local v; for v in "$@"; do printf "%s='%s'\n" "$v" "${!v}"; done; }
 
-# What home says to the Gate, through the tunnel: all that it is to forward, and how.
+# Asks Core, on home, as the panel's page would.
+core() {  # method, path, [json]
+  dc exec -T home curl -fsS -m 10 -b /run/hw/jar -c /run/hw/jar -X "$1" \
+    -H 'Content-Type: application/json' ${3:+-d "$3"} "http://127.0.0.1:3600/api/v1$2"
+}
+
+# A lab egg, as the JSON Core's import takes: a server in the lab's own image.
+egg() {  # name, startup command
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+print(json.dumps({"egg": json.dumps({
+    "meta": {"version": "PTDL_v2"}, "name": sys.argv[1], "description": "For the lab.",
+    "docker_images": {"lab": "homewarp-lab-yolk"}, "startup": sys.argv[2],
+    "config": {"files": "{}", "startup": "{\"done\": \"ready\"}", "stop": "^C"},
+    "scripts": {"installation": {"script": None, "container": "homewarp-lab-yolk", "entrypoint": "sh"}},
+    "variables": []})}))
+PY
+}
+
+# What the Gate says of itself, asked from home through the tunnel.
+gate_says() {
+  dc exec -T home curl -s -m 5 -H "Authorization: Bearer $(dc exec -T gate cat /run/hw/token)" \
+    "http://$GATE_TUN:$API_PORT/v1/status"
+}
+
+# Tells Core where its Gate is, as enrolling a VPS will. Core then makes its end
+# of the tunnel and tells the Gate what to forward: its servers' ports.
 push() {  # transparent | nat
-  local token
-  token=$(dc exec -T gate cat /run/hw/token)
-  dc exec -T home curl -fsS -m 5 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-    -d "{\"generation\":$(date +%s),\"mode\":\"$1\",\"forwards\":[{\"port\":$PORT,\"protocol\":\"tcp\"},{\"port\":$PORT,\"protocol\":\"udp\"},{\"port\":$IPERF,\"protocol\":\"tcp\"},{\"port\":$IPERF,\"protocol\":\"udp\"}]}" \
-    "http://$GATE_TUN:$API_PORT/v1/state" | sed 's/^/   the gate answers: /'
-  echo
+  local nat=false
+  [ "$1" = nat ] && nat=true
+  core PUT /gate "{\"address\":\"$GATE_IP\",\"wg_port\":$WG_PORT,\"private_key\":\"$(dc exec -T home cat /run/hw/key)\",\"gate_public_key\":\"$(dc exec -T gate sh -c 'wg pubkey < /run/hw/key')\",\"preshared_key\":\"$(dc exec -T home cat /run/hw/psk)\",\"token\":\"$(dc exec -T gate cat /run/hw/token)\",\"api_port\":$API_PORT,\"nat\":$nat}"
+  # Core gets to it within its ten seconds.
+  for _ in $(seq 20); do
+    gate_says | grep -q "\"mode\":\"$1\",\"forwards\":4" && break
+    sleep 1
+  done
+  echo "   the gate says: $(gate_says)"
 }
 
 # Starts the Gate program on the simulated VPS, as its service would.
 start_gate() { dc exec -d gate sh -c 'homewarp-gate /run/hw >>/run/hw/log 2>&1'; }
 
 cmd_up() {
-  local HOME_PUB GATE_PUB TOKEN
+  local HOME_PUB GATE_PUB TOKEN code
 
   echo "== containers"
   dc build
   dc up -d
   for _ in $(seq 60); do dc exec -T home docker info >/dev/null 2>&1 && break; sleep 1; done
   docker save homewarp-lab-node | dc exec -T home docker load -q >/dev/null
+  docker build -q -t homewarp-lab-yolk -f yolk.Dockerfile . >/dev/null
+  docker save homewarp-lab-yolk | dc exec -T home docker load -q >/dev/null
 
   echo "== keys: each side makes its own; only public keys and the preshared key travel"
   HOME_PUB=$(in_ home <<'EOF'
@@ -98,68 +129,31 @@ EOF
   for _ in $(seq 20); do dc exec -T gate test -e /sys/class/net/homewarp0 && break; sleep 0.5; done
   dc exec -T gate sh -c 'cat /run/hw/log' | sed 's/^/   /'
 
-  echo "== home: game container behind a published port, tunnel, return path"
-  { vars GATE_PUB GATE_IP GATE_TUN WG_PORT HOME_TUN GAME_IP PORT IPERF CLOSED SVC; cat <<'EOF'; } | in_ home
+  echo "== home: Core itself, which makes the servers and its end of the tunnel"
+  dc cp ../deploy/out/homewarp-static home:/usr/local/bin/homewarp
+  { vars SVC; cat <<'EOF'; } | in_ home
 set -eu
-docker rm -f game >/dev/null 2>&1 || true
-docker network inspect homewarp-br >/dev/null 2>&1 ||
-  docker network create -d bridge --subnet 10.213.80.0/24 \
-    -o com.docker.network.bridge.name=homewarp-br \
-    -o com.docker.network.bridge.enable_icc=false homewarp-br >/dev/null
-# Hardened the way PLAN.md §5.6 says every server will be.
-docker run -d --name game --network homewarp-br --ip "$GAME_IP" \
-  --user 4857:4857 --cap-drop ALL --security-opt no-new-privileges \
-  --read-only --tmpfs /tmp --pids-limit 256 --memory 256m \
-  -e PORT="$PORT" -e IPERF="$IPERF" -e CLOSED="$CLOSED" \
-  -p "$PORT:$PORT/tcp" -p "$PORT:$PORT/udp" -p "$IPERF:$IPERF/tcp" -p "$IPERF:$IPERF/udp" \
-  homewarp-lab-node /lab/game.sh >/dev/null
+pkill homewarp 2>/dev/null || true
+docker ps -aq --filter label=homewarp.server | xargs -r docker rm -f >/dev/null
+ip link del homewarp0 2>/dev/null || true
+rm -rf /run/hw/core /run/hw/jar && mkdir -p /run/hw/core
 SVC="$SVC" /lab/listen.sh </dev/null >/dev/null 2>&1 &
-
 # The worst case for the return path: a host that filters reverse paths strictly.
 sysctl -qw net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.default.rp_filter=1
-
-ip link del homewarp0 2>/dev/null || true
-ip link add homewarp0 type wireguard
-wg set homewarp0 private-key /run/hw/key peer "$GATE_PUB" preshared-key /run/hw/psk \
-  endpoint "$GATE_IP:$WG_PORT" allowed-ips 0.0.0.0/0 persistent-keepalive 25
-ip addr add "$HOME_TUN/30" dev homewarp0
-ip link set homewarp0 mtu 1380 up
-# Players arrive on this link from addresses that route elsewhere, so it alone goes loose.
-sysctl -qw net.ipv4.conf.homewarp0.rp_filter=2
-
-ip rule del fwmark 0x4857 lookup 4857 2>/dev/null || true
-ip rule add fwmark 0x4857 lookup 4857
-ip route replace default dev homewarp0 table 4857
-
-nft -f - <<'NFT'
-table inet homewarp
-delete table inet homewarp
-table inet homewarp {
-  chain mark_in {
-    type filter hook prerouting priority mangle; policy accept;
-    iifname "homewarp0" ct state new ct mark set 0x4857           # this flow came from the gate
-    iifname != "homewarp0" ct mark 0x4857 meta mark set ct mark   # so its replies go back that way
-  }
-  chain input {
-    type filter hook input priority filter; policy accept;
-    iifname { "homewarp0", "homewarp-br" } ct state established,related accept
-    iifname "homewarp0" counter drop      # the gate may not reach host services
-    iifname "homewarp-br" counter drop    # nor may a game container
-  }
-  chain forward {
-    type filter hook forward priority filter - 1; policy accept;
-    iifname "homewarp0" oifname "homewarp-br" ct status dnat accept
-    iifname "homewarp0" counter drop      # from the tunnel: published game ports, nothing else
-    iifname "homewarp-br" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ct state new counter drop
-    oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
-  }
-}
-NFT
-
-ping -c 2 -W 2 -q "$GATE_TUN" | tail -2
+HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=127.0.0.1:3600 homewarp >/run/hw/core.log 2>&1 &
 EOF
+  for _ in $(seq 40); do core GET /health >/dev/null 2>&1 && break; sleep 0.5; done
+  code=$(dc exec -T home sh -c "grep -o 'setup code: .*' /run/hw/core.log | cut -d' ' -f3")
+  core POST /setup "{\"code\":\"$code\",\"username\":\"lab\",\"password\":\"only-in-the-lab\"}" >/dev/null
+  core POST /templates "$(egg 'Lab game' "PORT={{SERVER_PORT}} IPERF=5999 CLOSED=$CLOSED /lab/game.sh")" >/dev/null
+  core POST /templates "$(egg 'Lab iperf' 'exec iperf3 -s -p {{SERVER_PORT}}')" >/dev/null
+  core POST /servers "{\"name\":\"game\",\"template_id\":1,\"memory_mb\":256,\"port\":$PORT}" >/dev/null
+  for _ in $(seq 30); do [ -n "$(dc exec -T home docker ps -q --filter publish=$PORT)" ] && break; sleep 1; done
+  core POST /servers "{\"name\":\"iperf\",\"template_id\":2,\"memory_mb\":256,\"port\":$IPERF}" >/dev/null
+  for _ in $(seq 30); do [ -n "$(dc exec -T home docker ps -q --filter publish=$IPERF)" ] && break; sleep 1; done
+  dc exec -T home docker ps --format '   {{.Names}}  {{.Ports}}' | cut -c1-110
 
-  echo "== home tells the gate what to forward"
+  echo "== Core is told where its Gate is"
   push transparent
 }
 
@@ -183,7 +177,11 @@ seen() {  # tcp | udp
 # What answers when $1 connects to $2:$3; empty when nothing does.
 reach() {
   local cmd="socat -u TCP:$2:$3,connect-timeout=3 - 2>/dev/null || true"
-  if [ "$1" = game ]; then dc exec -T home docker exec game sh -c "$cmd"; else dc exec -T "$1" sh -c "$cmd"; fi
+  if [ "$1" = game ]; then
+    dc exec -T home sh -c "docker exec \$(docker ps -q --filter publish=$PORT) sh -c '$cmd'"
+  else
+    dc exec -T "$1" sh -c "$cmd"
+  fi
 }
 blocked() {  # label, from, address, port
   if [ -z "$(reach "$2" "$3" "$4")" ]; then ok "$1"; else fail "$1"; fi

@@ -900,6 +900,8 @@ dependencies = [
  "axum",
  "futures-util",
  "getrandom 0.4.3",
+ "homewarp-net",
+ "homewarp-proto",
  "homewarp-runtime",
  "homewarp-template",
  "rust-embed",

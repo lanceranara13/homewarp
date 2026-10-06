@@ -19,6 +19,8 @@ argon2.workspace = true
 axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
 getrandom.workspace = true
+homewarp-net = { path = "../homewarp-net" }
+homewarp-proto = { path = "../homewarp-proto" }
 homewarp-runtime = { path = "../homewarp-runtime" }
 homewarp-template = { path = "../homewarp-template" }
 rust-embed.workspace = true
