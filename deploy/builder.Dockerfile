@@ -17,8 +17,22 @@ RUN mkdir -p /cargo /target && chmod 1777 /cargo /target
 ENV CARGO_HOME=/cargo CARGO_TARGET_DIR=/target CARGO_TERM_COLOR=never HOME=/tmp
 # The WireGuard library carries a userspace fallback whose cryptography is partly C.
 ENV CC_x86_64_unknown_linux_musl=musl-gcc
-# And for ARM64, which the cheapest VPS tiers often are: a C compiler for that
-# same part, which also links the binary against the musl that Rust brings.
-ENV CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc \
+# And for ARM64, which the cheapest VPS tiers often are, and which a home
+# machine may be as well. The compiler is the cross one, made to read musl's
+# own headers and the kernel's, and none of glibc's: what is compiled against
+# one C library's idea of a file or a lock and linked with another's is wrong
+# in ways that show late. SQLite, compiled the other way, did not link at all.
+RUN dpkg --add-architecture arm64 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends musl-dev:arm64 \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /opt/arm64-kernel-headers \
+ && for part in linux asm asm-generic; do ln -s /usr/aarch64-linux-gnu/include/$part /opt/arm64-kernel-headers/$part; done \
+ && printf '%s\n' '#!/bin/sh' \
+      'exec aarch64-linux-gnu-gcc -nostdinc -isystem /usr/include/aarch64-linux-musl -isystem "$(aarch64-linux-gnu-gcc -print-file-name=include)" -isystem /opt/arm64-kernel-headers "$@"' \
+      > /usr/local/bin/aarch64-linux-musl-gcc \
+ && chmod 755 /usr/local/bin/aarch64-linux-musl-gcc
+# The linker is still the cross one: Rust brings the musl it links against.
+ENV CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
 WORKDIR /work
