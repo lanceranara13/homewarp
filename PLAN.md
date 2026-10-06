@@ -317,7 +317,7 @@ Core reproduces the contract Wings gives to a container, so unmodified eggs and
 - "Started" detection from the `done` string; stop via command or `^C` / `^SIGTERM` etc.
 - Variable validation: a Rust port of the Laravel rule subset eggs actually use
   (`required`, `nullable`, `string`, `numeric`, `integer`, `boolean`, `max`, `min`,
-  `between`, `in`, `regex`).
+  `between`, `in`, `regex`, and the eight more that the egg corpus of §10 turned up).
 - Feature flags such as `eula` (prompt to accept when the console asks).
 
 Import formats: Pterodactyl `PTDL_v1` / `PTDL_v2` (JSON) and Pelican `PLCN_v1`–`v3`
@@ -338,6 +338,11 @@ CPU limits, dedicated bridge with inter-container traffic off, **no route to the
 `subusers`, `audit_log`, `settings`.
 
 One file, WAL mode, embedded migrations. No external database.
+
+A template is one row: the whole document the importer made, as JSON, with the egg it
+came from beside it. Nothing is ever asked of a part of a template, and a better
+importer can read the egg again. So there is no `template_variables` table; a server's
+own values can be kept by variable name.
 
 ### 5.8 API and UI
 
@@ -732,6 +737,34 @@ Found on the way:
 - **Not shown:** crash detection and restart, statistics, the other config-file parsers,
   variable validation, a SteamCMD game. Those are Phase 2.
 
+### Egg corpus (2026-10-06)
+
+The importer was run, through Core's API, over 116 eggs as their authors publish them:
+an even sample of `pelican-eggs/minecraft` (39), `pelican-eggs/games-steamcmd` (39) and
+`pelican-eggs/generic` (24), and all 14 that ship with Pterodactyl's panel. Both
+families of format are in there, as YAML and as JSON.
+
+| | Result |
+|---|---|
+| Read | 115 of 116. They made 100 templates: 15 were a second export of an egg already read, and were turned away by name. |
+| Refused | 1: BungeeCord, whose `config.yml` replaces by pattern (`servers.*.address`). The importer says so rather than guess. |
+| Stop | 54 by a console command, 46 by an interrupt. Nine of the 116 spell the interrupt `^^C`. Wings does not know that spelling and sends SIGKILL (`environment/docker/power.go`); Homewarp reads it as the interrupt that was meant. Until this run it kept a signal named `^C`, which would have failed at the first stop. |
+| Install | All 100 have an install script and a "started" string. |
+| Images | 64 offer one image; 32 offer four or more (Java versions). |
+| Features | `steam_disk_space` 38, `eula` 32, `java_version` 32, `pid_limit` 32, `gsl_token` 3. |
+
+Validation rules, by how many of the 100 templates use each: `required` 97, `string`
+95, `max` 65, `nullable` 63, `boolean` 48, `in` 37, `between` 24, `regex` 24, `numeric`
+22, `integer` 19, `alpha_dash` 10, `min` 8, `digits_between` 6, `alpha_num` 6, `size` 5,
+`gt` 2, `url` 2, `ends_with` 1, `not_in` 1, and one `int` where `integer` was meant. The
+eleven first listed in §5.6 are not enough: the validator needs the other eight, and
+has to name a rule it does not know when the egg is imported, not when a server starts.
+Two eggs carry an empty entry in a list of rules, which the importer kept as a rule;
+it drops them now.
+
+This was one run with a throwaway script, against a throwaway copy of Core. The
+standing corpus of §12 is still to build.
+
 ### Real-world tests
 
 - Staging Core on the homelab itself (Compose project at `/home/lance/homewarp`, port 3600).
@@ -778,11 +811,34 @@ Each phase ends with something that works on the homelab.
 - The donation popover has no links yet, and says so. The four destinations besides
   Servers are shown dimmed and lead nowhere.
 
-**Phase 2 — Servers**
+**Phase 2 — Servers** — *templates done 2026-10-06; the rest to do*
 - Template import (all egg formats), validation rules, config-file parsers.
 - Install flow, lifecycle state machine, console WebSocket, stats, limits, crash recovery.
 - UI: template gallery, create-server wizard, server page with console.
 - *Exit:* Paper, one SteamCMD game and one non-game template install and run on the LAN.
+- *Done so far: templates.* Core keeps them (§5.7) behind four endpoints: list, import,
+  read one, remove. The panel has a Templates page: a gallery, an import page that
+  takes an egg as a file or pasted, and a page for each template that lays out all the
+  egg tells Homewarp to do (images, startup command, variables with their rules, the
+  install script), with removal behind a question.
+- Driven in a browser against a throwaway copy of the staging build, so that staging's
+  own database was left without an account: the published Paper egg and Pterodactyl's
+  Rust egg imported from files, BungeeCord and a second Paper refused in words, a
+  template removed, and a session ended behind the page's back, which leads to sign-in.
+  Looked at 390, 900 and 1250 px wide in the dark theme and at 1250 px in the light one.
+- Measured: a page opened cold makes two requests, the session and its own read, and
+  they leave in the same millisecond. Reached from inside the panel it makes one. The
+  page an import lands on makes none.
+- Found by the page policy, again: the component library's modal layers lock scrolling
+  by writing a `<style>` element into the page, which the policy refuses. The account
+  menu had been doing so since Phase 1, unnoticed. The menu is no longer modal and the
+  one dialog is the browser's own `<dialog>`. The policy is as it was.
+- Found by real eggs: *Egg corpus* in §10.
+- **Still to do in this phase:** the validation rules; the config-file parsers other
+  than `properties`, and replacing by pattern; importing from a URL and a catalogue to
+  pick from, both of which need Core to fetch from the internet, which it does not yet
+  do; protocol per port (§5.6); and everything about servers themselves. The `servers`
+  table comes with the create flow, when its columns are known.
 
 **Phase 3 — Gate and tunnel**
 - `homewarp-gate`, enrollment with key rotation, declarative forwards, self-probe,
@@ -820,7 +876,7 @@ Each phase ends with something that works on the homelab.
 | The VPS is not a blank box: ports already taken, other software's NAT rules | Found on the real VPS. Check each forward for a conflict before applying it and say which rule is in the way; never assume 80, 443 or 25565 are free. |
 | A cheap VPS has less CPU than its size says (steal) | Measured: about 40–60 Mbit/s through the tunnel on the owner's VPS. Show Gate CPU steal on the Network page and warn when it is high. |
 | Core in a container may be unable to set host sysctls it needs elsewhere | Fine on this homelab (values already correct). Checked at startup with a clear message; the systemd install path covers other hosts. |
-| Egg edge cases (odd config parsers, startup quirks) | Test against a fixed corpus of popular eggs; report unsupported features at import time rather than at start. |
+| Egg edge cases (odd config parsers, startup quirks) | A first run over 116 published eggs read all but one and found two faults in the importer (§10). Still to do: keep such a corpus as a standing test; report unsupported features at import time rather than at start. |
 | One public IP means one `:25565` | v1: per-server ports + show the SRV record to add. Phase 7: hostname routing. |
 | Homelab disk nearly full | Build-cache budget and prune script from day one; flagged to the owner. |
 | Slow builds on 2 vCPU | Warm incremental checks at home; release builds can move to CI later. |
@@ -847,7 +903,10 @@ Still open:
    Calagopus/Pterodactyl) or AGPL-3.0 (like Pelican)? With free, donations only, either
    works: MIT/Apache maximises adoption; AGPL stops a company taking a modified version
    closed.
-2. **Disk at home** — free space on the homelab, or a separate volume for server data?
+2. **Disk at home** — decided by the owner on 2026-10-06: server data goes in the
+   deployment's own `data/` directory (`/home/lance/homewarp/data`), no separate volume.
+   The homelab had 31 GB free that day, 87 % used, and a server with its images takes a
+   few of them, so free space is the thing to watch and to show.
 3. **The VPS's state** (§10) — SSH accepting passwords, and 197 package updates
    pending. The old forwards, the full disk and the missing log rotation are dealt with.
    Neither blocks the lab or a first Gate.
@@ -871,9 +930,12 @@ Still open:
      port and nothing else, and the Phase 5 items listed under Phase 1 in §11.
    - *The VPS itself* still takes root logins by password (item 3). That matters more
      once it stands in front of the panel.
-6. **Core's privileges on the homelab** — setting up the tunnel from a container in the
-   host's own network namespace, and mounting the Docker socket, both need the owner's
-   go-ahead before Phases 2 and 3 deploy there.
+6. **Core's privileges on the homelab** — the Docker socket has the owner's go-ahead,
+   given on 2026-10-06 in the words "sure ok if its non breaking". That condition is a
+   rule for the runtime: Core touches only the containers, networks and volumes it made
+   and labelled as its own, never prunes, and never restarts the daemon. Still needing a
+   go-ahead before Phase 3 deploys: setting up the tunnel from a container in the host's
+   own network namespace.
 
 ## 14. Earning from it (explored 2026-10-05)
 
