@@ -82,10 +82,11 @@ const shellRoute = createRoute({
     const known = context.queryClient.getQueryData(sessionQuery.queryKey)
     if (!known || known.user) {
       for (const match of matches) match.staticData.reads?.(context.queryClient, match.params)
-      // The sidebar's mark and the address chips want the Gate. No page waits for it but the
-      // Network pages, so it is asked for here, beside everything else, and by nobody twice.
-      void context.queryClient.prefetchQuery(gateQuery)
     }
+    // The sidebar's mark and the address chips want the Gate, and no page waits for it but the
+    // Network pages. Where someone is known to be signed in it is asked for now, beside the rest;
+    // on a first load the sidebar asks once it is there, which is no later than it could be used.
+    if (known?.user) void context.queryClient.prefetchQuery(gateQuery)
     const to = await home(context)
     if (to !== '/') throw redirect({ to })
   },
@@ -205,7 +206,7 @@ const templateRoute = createRoute({
 const networkRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/network',
-  // The shell has asked for the Gate already; this page is the one that waits for the answer.
+  staticData: { reads: (queryClient) => void queryClient.prefetchQuery(gateQuery) },
   loader: async ({ context }) => {
     await context.queryClient.ensureQueryData(gateQuery)
   },
@@ -215,6 +216,7 @@ const networkRoute = createRoute({
 const connectRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/network/connect',
+  staticData: { reads: (queryClient) => void queryClient.prefetchQuery(gateQuery) },
   loader: async ({ context }) => {
     await context.queryClient.ensureQueryData(gateQuery)
   },

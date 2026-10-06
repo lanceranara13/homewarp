@@ -50,13 +50,6 @@ function amount(bytes: number): string {
   return `${unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
 }
 
-/** 75 seconds as "1 min ago". */
-function ago(seconds: number): string {
-  if (seconds < 60) return `${seconds} s ago`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`
-  return `${Math.floor(seconds / 3600)} h ago`
-}
-
 /** The tunnel, how it is doing, and every port players reach a server by. */
 export function NetworkPage() {
   const gate = useGateHere()
@@ -141,7 +134,11 @@ function Tunnel({ gate }: { gate: Gate }) {
           The internet
         </Place>
         <Wire down={down} />
-        <Place label="Gate" pill={<Pill tone={look.tone}>{look.word}</Pill>} sub="your VPS">
+        <Place
+          label="Gate"
+          pill={<Pill tone={look.tone}>{down ? 'Unreachable' : gate.latency_ms == null ? 'Up' : `${gate.latency_ms} ms`}</Pill>}
+          sub="your VPS"
+        >
           <span className="font-mono text-mono">{gate.address}</span>
         </Place>
         <Wire down={down} />
@@ -158,7 +155,6 @@ function Tunnel({ gate }: { gate: Gate }) {
       ) : (
         gate.reachable && (
           <p className="text-small text-ink-subtle">
-            {gate.handshake_age_seconds != null && `The Gate heard from home ${ago(gate.handshake_age_seconds)} · `}
             {amount(gate.received_bytes)} from home and {amount(gate.sent_bytes)} to it through the tunnel
             {gate.version && ` · Gate ${gate.version}`}
           </p>
