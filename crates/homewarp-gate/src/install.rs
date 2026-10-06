@@ -3,6 +3,9 @@
 //! `join` turns a join token into this Gate's `config.json`, opens what the
 //! VPS's own firewall keeps shut, and installs and starts the service. `leave`
 //! takes all of that away again. Nothing else on the machine is touched.
+//!
+//! Port 80 is not opened here. It is asked for only when the panel is given a
+//! name, and on a VPS with a web server it is that server's and open already.
 
 use std::{
     fs,
@@ -16,7 +19,7 @@ use anyhow::{Context, bail, ensure};
 use homewarp_net::{INTERFACE, default_interface, take_down};
 use homewarp_proto::JoinToken;
 
-use crate::{Config, Options, read};
+use crate::{Config, Options, RUN, read};
 
 /// Where the service is run from, and what it is called.
 const PROGRAM: &str = "/usr/local/bin/homewarp-gate";
@@ -69,7 +72,9 @@ fn has_systemd() -> bool {
 }
 
 /// The service: started at boot, started again if it ever ends, and held to
-/// what it needs, which is the network and its own directory.
+/// what it needs, which is the network, its own directory and one more under
+/// `/run` for what a web server on the VPS is to read. It may take port 80,
+/// which it does only while a certificate's questions are being answered.
 fn unit(dir: &Path) -> String {
     format!(
         "[Unit]
@@ -83,9 +88,10 @@ ExecStart={PROGRAM} run --dir {dir}
 Restart=always
 RestartSec=2
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 ProtectSystem=strict
 ReadWritePaths={dir}
+RuntimeDirectory=homewarp-gate
 ProtectHome=yes
 PrivateTmp=yes
 MemoryMax=64M
@@ -271,6 +277,7 @@ pub(crate) fn leave(options: &Options) -> anyhow::Result<()> {
         }
         _ => {}
     }
+    let _ = fs::remove_dir_all(RUN);
     let _ = fs::remove_file(PROGRAM);
     println!("This machine is no longer a Homewarp Gate.");
     Ok(())
@@ -291,7 +298,9 @@ mod tests {
             )
         );
         assert!(unit.contains("ProtectSystem=strict\nReadWritePaths=/var/lib/homewarp-gate\n"));
-        assert!(unit.contains("CapabilityBoundingSet=CAP_NET_ADMIN\n"));
+        // Under `/run`, and so gone with the service: answers a web server may read.
+        assert!(unit.contains("RuntimeDirectory=homewarp-gate\n"));
+        assert!(unit.contains("CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE\n"));
     }
 
     #[test]

@@ -10,6 +10,10 @@
 //! is the last thing Core asked for, kept so that a reboot comes back to it
 //! before home has been heard from again.
 //!
+//! Outside that directory it keeps one more, `/run/homewarp-gate/challenges`,
+//! and only while a certificate for the panel's name is being asked for: the
+//! answers to the authority's questions, which the VPS's port 80 has to serve.
+//!
 //! `homewarp-gate join <token>` enrols a VPS, `homewarp-gate leave` undoes
 //! that, and `homewarp-gate run` is what the service it installs runs.
 
@@ -19,7 +23,7 @@ use std::{
     env, fs,
     io::Read,
     net::{Ipv4Addr, SocketAddr},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -28,7 +32,7 @@ use std::{
 use anyhow::{Context, bail, ensure};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path as Named, State},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     routing::{get, post, put},
 };
@@ -36,7 +40,9 @@ use homewarp_net::{
     Link, ProbeForward, apply, bring_up, counted, gate_ruleset, gate_ruleset_uncounted, has_table,
     heard, new_keypair,
 };
-use homewarp_proto::{Desired, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status};
+use homewarp_proto::{
+    Answer, AnsweredBy, Answering, Desired, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status,
+};
 use serde::{Deserialize, Serialize};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -49,6 +55,13 @@ const LOOK: Duration = Duration::from_secs(30);
 /// How long after agreeing to change keys the change is made: long enough for
 /// the answer to get home under the old ones.
 const SWITCH_AFTER: Duration = Duration::from_millis(500);
+/// Where the answers to a certificate authority's questions are put. Not in
+/// this Gate's own directory, which nobody else may read: a web server on the
+/// VPS has to read these, and they are no secret.
+pub(crate) const RUN: &str = "/run/homewarp-gate";
+const CHALLENGES: &str = "/run/homewarp-gate/challenges";
+/// A certificate for one name asks one question at a time, or two.
+const MOST_CHALLENGES: usize = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
@@ -117,6 +130,8 @@ struct Gate {
     /// Keys made for home to see, and not in use until home says it has them.
     next: Mutex<Option<Config>>,
     probe: Mutex<Option<Probing>>,
+    /// What serves the answers on port 80, while this Gate does that itself.
+    answering: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -235,7 +250,10 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
         desired: Mutex::new(desired),
         next: Mutex::default(),
         probe: Mutex::default(),
+        answering: Mutex::default(),
     });
+    // Answers that a Gate which stopped left behind are to questions long over.
+    let _ = fs::remove_dir_all(CHALLENGES);
     gate.apply_again()?;
     let listener = listen(at).await?;
     tokio::spawn(keep_set_up(Arc::clone(&gate)));
@@ -245,6 +263,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
         .route("/v1/rotate", post(rotate))
         .route("/v1/rotate/commit", post(commit))
         .route("/v1/probe", post(probe))
+        .route("/v1/challenge/{token}", put(answer).delete(unanswer))
         .with_state(gate);
     // The kernel is left as it is on the way out: forwarding does not stop
     // because this process does.
@@ -540,4 +559,164 @@ fn free_port(gate: &Gate) -> anyhow::Result<std::net::TcpListener> {
         }
     }
     bail!("no port could be found for a probe")
+}
+
+/// Whether text is a challenge's token, and so what a file of answers may be
+/// called: letters that can name no other directory than the one it is put in.
+fn is_token(text: &str) -> bool {
+    (1..=128).contains(&text.len())
+        && text
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+}
+
+/// Whether text is an answer: a token, a dot and the mark of a key.
+fn is_answer(text: &str) -> bool {
+    (1..=512).contains(&text.len())
+        && text
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+/// Puts the answer to a certificate authority's question where the VPS's port
+/// 80 serves it. Where nothing has that port this Gate takes it, for as long
+/// as there are answers to give; where a web server has it, that server is to
+/// serve this directory, and the reply says so.
+async fn answer(
+    State(gate): State<Arc<Gate>>,
+    headers: HeaderMap,
+    Named(token): Named<String>,
+    Json(asked): Json<Answer>,
+) -> Result<Json<Answering>, Refusal> {
+    allowed(&gate, &headers)?;
+    if !is_token(&token) || !is_answer(&asked.answer) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "That is not a challenge's token and its answer.".to_owned(),
+        ));
+    }
+    let dir = Path::new(CHALLENGES);
+    fs::create_dir_all(dir).map_err(failed)?;
+    let kept = dir.join(&token);
+    if !kept.exists() && fs::read_dir(dir).map_err(failed)?.count() >= MOST_CHALLENGES {
+        return Err((
+            StatusCode::CONFLICT,
+            "There are as many answers here as a Gate keeps.".to_owned(),
+        ));
+    }
+    // Written beside the file and moved over it, so that it is never half
+    // there, and readable by whatever serves it, whoever this runs as.
+    let beside = dir.join(format!(".{token}.new"));
+    fs::write(&beside, &asked.answer).map_err(failed)?;
+    fs::set_permissions(&beside, fs::Permissions::from_mode(0o644)).map_err(failed)?;
+    fs::rename(&beside, &kept).map_err(failed)?;
+    for open in [RUN, CHALLENGES] {
+        fs::set_permissions(open, fs::Permissions::from_mode(0o755)).map_err(failed)?;
+    }
+    Ok(Json(Answering {
+        by: serve_answers(&gate),
+        directory: CHALLENGES.to_owned(),
+    }))
+}
+
+/// Takes an answer away again. With the last one gone, port 80 is let go of.
+async fn unanswer(
+    State(gate): State<Arc<Gate>>,
+    headers: HeaderMap,
+    Named(token): Named<String>,
+) -> Result<StatusCode, Refusal> {
+    allowed(&gate, &headers)?;
+    if !is_token(&token) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "That is not a challenge's token.".to_owned(),
+        ));
+    }
+    match fs::remove_file(Path::new(CHALLENGES).join(&token)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(failed(error)),
+        _ => {}
+    }
+    let none_left = fs::read_dir(CHALLENGES).map_or(true, |mut answers| answers.next().is_none());
+    if none_left && let Some(serving) = lock(&gate.answering).take() {
+        serving.abort();
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Has this Gate serve the answers on port 80, unless it does already or
+/// something else on the VPS has that port.
+fn serve_answers(gate: &Gate) -> AnsweredBy {
+    let mut answering = lock(&gate.answering);
+    if answering
+        .as_ref()
+        .is_some_and(|serving| !serving.is_finished())
+    {
+        return AnsweredBy::Gate;
+    }
+    // Both families at once where the machine has both: an authority asks
+    // over IPv6 a name that has such an address.
+    let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, 80))
+        .or_else(|_| std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 80)))
+        .and_then(|listener| {
+            listener.set_nonblocking(true)?;
+            tokio::net::TcpListener::from_std(listener)
+        });
+    let Ok(listener) = listener else {
+        return AnsweredBy::WebServer;
+    };
+    let answers = Router::new().route("/.well-known/acme-challenge/{token}", get(answered));
+    *answering = Some(tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, answers).await {
+            tracing::error!("{error:#}");
+        }
+    }));
+    AnsweredBy::Gate
+}
+
+/// What anyone on the internet may ask on port 80 while there are answers:
+/// one of them, by its token, and nothing else.
+async fn answered(Named(token): Named<String>) -> Result<String, StatusCode> {
+    if !is_token(&token) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    fs::read_to_string(Path::new(CHALLENGES).join(token)).map_err(|_| StatusCode::NOT_FOUND)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_answer, is_token};
+
+    #[test]
+    fn a_token_names_a_file_in_the_directory_of_answers_and_nothing_else() {
+        for token in ["a", "LoqXcYV8q5ONbJQxbmR7SCTNo3tiAXDfowyjxAjEuX0", "-_"] {
+            assert!(is_token(token), "{token}");
+        }
+        let long = "a".repeat(129);
+        for odd in [
+            "",
+            ".",
+            "..",
+            "../config.json",
+            "a/b",
+            "a\\b",
+            "a.b",
+            ".hidden",
+            "a b",
+            "a\0",
+            "ü",
+            long.as_str(),
+        ] {
+            assert!(!is_token(odd), "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn an_answer_is_a_token_a_dot_and_the_mark_of_a_key() {
+        assert!(is_answer(
+            "LoqXcYV8q5ONbJQxbmR7SCTNo3tiAXDfowyjxAjEuX0.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI"
+        ));
+        for odd in ["", "<script>", "a b", "a\nb", "a/b"] {
+            assert!(!is_answer(odd), "{odd:?}");
+        }
+    }
 }

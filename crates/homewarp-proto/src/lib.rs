@@ -112,6 +112,35 @@ pub struct Probe {
     pub port: u16,
 }
 
+/// The answer to a question a certificate authority asks of the panel's name
+/// (`PUT /v1/challenge/<token>`). The name leads to the VPS, so the authority
+/// asks there, on port 80 at `/.well-known/acme-challenge/<token>`; Core has
+/// the answer, and the Gate puts it where that is served until
+/// `DELETE /v1/challenge/<token>`. The answer is no secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answer {
+    pub answer: String,
+}
+
+/// Who serves an answer on the VPS's port 80.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnsweredBy {
+    /// The Gate itself, which has the port for as long as there are answers.
+    Gate,
+    /// A web server that had the port already, and has to serve the Gate's
+    /// directory of answers at that path.
+    WebServer,
+}
+
+/// Where an answer was put, and who serves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answering {
+    pub by: AnsweredBy,
+    /// The directory the answers are files in, named by their tokens.
+    pub directory: String,
+}
+
 /// What a VPS is handed to become a home's Gate (PLAN.md §5.5): one line of
 /// text, made by Core and given to `homewarp-gate join`.
 ///
