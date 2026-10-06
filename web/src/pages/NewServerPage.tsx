@@ -35,13 +35,16 @@ export function ChooseTemplatePage() {
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
         <Steps steps={STEPS} at={0} />
         {templates.length === 0 ? (
-          <p>
-            There is no template to make a server from yet.{' '}
-            <Link to="/templates/import" className="text-accent hover:underline">
-              Import an egg
-            </Link>{' '}
-            first.
-          </p>
+          <div className="flex max-w-140 flex-col items-start gap-3">
+            <p>
+              Homewarp runs a game from its egg: a small file that says how the game is installed and started. There is
+              none here yet. The Pelican community publishes eggs for hundreds of games, and Homewarp fetches the one you
+              pick.
+            </p>
+            <Link to="/templates/import" search={{ then: 'server' }} className={buttonClass('primary')}>
+              Find a game
+            </Link>
+          </div>
         ) : (
           <ul className="grid gap-4 md:grid-cols-2 wide:grid-cols-3">
             {templates.map((template) => (
@@ -57,6 +60,15 @@ export function ChooseTemplatePage() {
               </li>
             ))}
           </ul>
+        )}
+        {templates.length > 0 && (
+          <p className="text-small text-ink-subtle">
+            Not here?{' '}
+            <Link to="/templates/import" search={{ then: 'server' }} className="text-accent hover:underline">
+              Find another game
+            </Link>{' '}
+            in the catalogue.
+          </p>
         )}
       </main>
     </>

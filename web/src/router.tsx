@@ -243,6 +243,9 @@ const importTemplateRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/templates/import',
   beforeLoad: ({ context }) => ownersOnly(context),
+  // Come to from the new-server wizard, the page leads back into it once the egg is imported.
+  validateSearch: (search: Record<string, unknown>): { then?: 'server' } =>
+    search.then === 'server' ? { then: 'server' } : {},
   component: ImportTemplatePage,
 })
 

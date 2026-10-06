@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { Link, getRouteApi, useNavigate } from '@tanstack/react-router'
 import { useId, useRef, useState } from 'react'
 
 import { fetchEgg, importTemplate, refreshCatalogue, type Catalogue } from '../api/client'
 import { Button, Field, PageBar, Problem, buttonClass } from '../components/ui'
 import { when } from '../format'
 import { catalogueQuery, templateQuery, templatesQuery } from '../templates'
+
+const route = getRouteApi('/shell/templates/import')
 
 /** The server takes no more than this, and a file that is larger is not an egg. */
 const LARGEST_EGG = 1 << 20
@@ -20,13 +22,16 @@ export function ImportTemplatePage() {
   const text = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  // Come to from the new-server wizard: the egg is on the way to being a server.
+  const forServer = route.useSearch().then === 'server'
   const importing = useMutation({
     mutationFn: importTemplate,
     onSuccess: async (template) => {
       // The page this opens has its answer already, and the gallery asks afresh when next shown.
       queryClient.setQueryData(templateQuery(template.id).queryKey, template)
       queryClient.removeQueries({ queryKey: templatesQuery.queryKey, exact: true })
-      await navigate({ to: '/templates/$templateId', params: { templateId: String(template.id) } })
+      const params = { templateId: String(template.id) }
+      await navigate(forServer ? { to: '/servers/new/$templateId', params } : { to: '/templates/$templateId', params })
     },
   })
   // Fetched is not imported: the text is put where a pasted egg would be, to be read first.
@@ -57,7 +62,10 @@ export function ImportTemplatePage() {
             importing.mutate(egg)
           }}
         >
-          <p>Homewarp reads the eggs that Pterodactyl and Pelican export, as JSON or YAML.</p>
+          <p>
+            Homewarp reads the eggs that Pterodactyl and Pelican export, as JSON or YAML.
+            {forServer && ' Pick one from the catalogue below, or bring your own. Once it is imported you go on to setting the server up.'}
+          </p>
           <div className="flex flex-col gap-1.5">
             <label htmlFor={`${id}-file`} className="text-caption text-ink-subtle">
               Egg file
@@ -102,9 +110,9 @@ export function ImportTemplatePage() {
           )}
           <div className="flex gap-2">
             <Button type="submit" variant="primary" busy={importing.isPending}>
-              Import template
+              {forServer ? 'Import, and set the server up' : 'Import template'}
             </Button>
-            <Link to="/templates" className={buttonClass('ghost')}>
+            <Link to={forServer ? '/servers/new' : '/templates'} className={buttonClass('ghost')}>
               Cancel
             </Link>
           </div>
