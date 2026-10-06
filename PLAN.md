@@ -1423,10 +1423,59 @@ Each phase ends with something that works on the homelab.
     - *Not done here:* SFTP is not forwarded, and a page opened by the name says so in
       place of an address that would not work. A VPS with a firewall and no web server
       needs port 80 opened by hand (Phase 6). No certificate for an address alone.
-- *Still to do:* passkeys, which the name makes possible; the Gate's limit on new
-  connections as a setting; "harden this VPS" with commit-confirm; fuzzing the parsers;
-  a path-traversal suite; the review of §6 against what was built; two-step sign-in
-  looked at in a browser.
+  - *The panel online, on the real machines (2026-10-07).* A throwaway copy on the
+    homelab, the Gate on the owner's VPS, the name `homewarp.apixels.net`, and Let's
+    Encrypt's staging authority, so that nothing was used up of what the real one allows
+    a name in a week. The VPS's nginx was given the one server block the owner allowed
+    (port 80 for that name: the answers from the Gate's directory, everything else sent
+    to `https://$host:8443`). What was seen:
+    - The certificate came at the first asking, nineteen seconds after the name was
+      given: the authority asked from two places, nginx answered both with the Gate's
+      file, and the file was gone again afterwards. It is for that name and no other,
+      and the dates Core read off it are the dates `openssl` reads.
+    - From a browser, through the VPS: port 80 leads to `:8443`; signing in sets a
+      cookie that is `Secure`, `HttpOnly` and `SameSite=Strict`; a change made from the
+      page goes through over HTTP/2; the console's socket opens as `wss://` and frames
+      arrive; nothing was refused. Activity had the browser's own address.
+    - The Gate on the VPS: 1.2 MB of memory, its directory under `/run` readable by
+      nginx, port 8443 forwarded as the one port there was.
+    - What it showed that the lab could not: nothing. What the lab had shown first, the
+      missing `Host` header among it, would each have been a failed evening there.
+    - The staging certificate is one no browser trusts, so the browser was told to go
+      on regardless; a passkey cannot be made on such a page. That is left for the
+      owner's own deployment, which asks the real authority.
+  - *Passkeys.* Made in Settings with the account's password, on the panel's own name
+    over TLS or on the machine itself (`localhost`); signed in with from the sign-in
+    page, nothing typed and nobody named. The device has to have checked who holds it,
+    so no second step is asked for. What a browser sends is read by hand: the few kinds
+    of CBOR an authenticator writes, a P-256 key, a signature checked with `ring`; no
+    library for it. A challenge counts once and for five minutes; a key whose device
+    has counted fewer uses than are known here is taken for a copy. Tried in Chrome
+    with its built-in stand-in for a device, at `localhost` through an SSH tunnel:
+    made, used, shown in Activity as "with a passkey", removed, refused afterwards.
+  - *Two-step sign-in, looked at in a browser:* a wrong code refused in words, the
+    right one turning it on, eight recovery codes, the sign-in page asking for the code
+    after the password, a code refused the second time, a recovery code taken once.
+    Over SFTP the password alone and the password with a wrong code are both refused,
+    and with the code after it a file goes up. `homewarp two-steps-off` turns it off
+    from the machine and is written down under Homewarp's own name.
+  - *A path-traversal suite* (`crates/homewarp-runtime/tests/traversal.rs`): a server's
+    folder with links that lead out every way a link can, and every thing the file
+    layer does tried with every path that could lead out, 1,400 tries, each in a world
+    of its own. What is held to is that the outside is afterwards exactly as it was and
+    that nothing that came back was the outside's. The same for archives and for a
+    backup put back. Its first catch was itself: one check read a moved link the
+    trusting way.
+  - *Fuzzing* (`crates/homewarp-template/tests/fuzz.rs`): real eggs and config files
+    changed at random and read, 4,000 times with every test run and as many as are
+    asked for with `HOMEWARP_FUZZ`; and by name, a YAML file that says ten thousand
+    million things in eleven lines, and files nested a hundred thousand deep. A config
+    file is the server's own, and Core reads it as root at every start.
+  - *The Gate's limit on new connections is a setting* (Settings, New connections):
+    one number, sent with everything else the Gate is told, thirty a second where
+    nothing is set.
+- *Still to do:* "harden this VPS" with commit-confirm; the review of §6 against what
+  was built.
 
 **Phase 6 — Packaging and onboarding**
 - One-line installers, signed releases, self-update, ARM64 builds of Core, docs.

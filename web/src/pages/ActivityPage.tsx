@@ -13,13 +13,15 @@ const route = getRouteApi('/shell/activity')
 const WORDS: Record<string, string> = {
   'account.setup': 'Set this Homewarp up',
   'account.sign_in': 'Signed in',
-  'account.sign_in_failed': 'Tried to sign in, with the wrong password',
+  'account.sign_in_failed': 'Tried to sign in, and was refused',
   'account.sign_out': 'Signed out',
   'account.create': 'Made an account',
   'account.remove': 'Removed an account',
   'account.password': 'Changed a password',
   'account.two_steps_on': 'Turned two-step sign-in on',
   'account.two_steps_off': 'Turned two-step sign-in off',
+  'account.passkey_add': 'Added a passkey',
+  'account.passkey_remove': 'Removed a passkey',
   'template.import': 'Imported a template',
   'template.remove': 'Removed a template',
   'server.create': 'Made the server',
@@ -55,6 +57,9 @@ const WORDS: Record<string, string> = {
   'gate.connect': 'Started connecting a VPS',
   'gate.check': 'Checked the tunnel',
   'gate.disconnect': 'Disconnected the VPS',
+  'panel.name': 'Gave the panel a name',
+  'panel.ask': 'Asked for the panel’s certificate again',
+  'panel.certificate': 'Got a certificate for the panel',
 }
 
 /** What was done through the panel, by whom and to which server: the owner's to read (DESIGN.md, Global navigation). */
