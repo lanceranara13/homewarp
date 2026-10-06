@@ -658,6 +658,41 @@ fn default_route(routes: &str) -> Option<String> {
         .map(|(_, interface)| interface)
 }
 
+/// A network this machine is already on that has some of the same addresses
+/// as `network`, as `eth0 10.213.77.0/24`: one that the tunnel, given those
+/// addresses, would take from the machine or lose to it. The tunnel's own
+/// interface is not counted. None if there is none, or if it cannot be told.
+pub fn network_in_the_way(network: (Ipv4Addr, u8)) -> Option<String> {
+    in_the_way(&fs::read_to_string("/proc/net/route").ok()?, network)
+}
+
+/// Reads the same table of routes for one that shares addresses with `network`.
+fn in_the_way(routes: &str, (network, length): (Ipv4Addr, u8)) -> Option<String> {
+    let wanted = u32::from(network);
+    let wanted_mask = u32::MAX.checked_shl(32 - u32::from(length)).unwrap_or(0);
+    routes.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let interface = *fields.first()?;
+        // The kernel writes an address here with its bytes backwards.
+        let read = |field: &&str| u32::from_str_radix(field, 16).ok().map(u32::swap_bytes);
+        let (destination, mask) = (read(fields.get(1)?)?, read(fields.get(7)?)?);
+        // The default route covers every address and is in nobody's way.
+        if mask == 0 || interface == INTERFACE {
+            return None;
+        }
+        // Two networks share addresses when they agree as far as the shorter
+        // of their two prefixes goes.
+        let both = mask & wanted_mask;
+        (destination & both == wanted & both).then(|| {
+            format!(
+                "{interface} {}/{}",
+                Ipv4Addr::from(destination),
+                mask.count_ones()
+            )
+        })
+    })
+}
+
 /// Removes everything this crate makes, on either end: the table, the way
 /// back and the interface. What is not there is passed over.
 pub fn take_down() {
@@ -928,6 +963,54 @@ mod tests {
         assert_eq!((clamped[0], clamped[31]), (0xf8, 0x7f));
         let clamped = super::clamped(&Key::new([0; 32])).as_array();
         assert_eq!((clamped[0], clamped[31]), (0, 0x40));
+    }
+
+    #[test]
+    fn a_network_with_the_tunnels_addresses_is_found_to_be_in_the_way() {
+        use super::in_the_way;
+
+        let tunnel = (Ipv4Addr::new(10, 213, 77, 0), 30);
+        let table = |routes: &str| {
+            format!(
+                "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n{routes}"
+            )
+        };
+        // An ordinary home: a default route, the LAN, Docker's bridge, the
+        // servers' own bridge, and the tunnel itself once it is up.
+        let ordinary = table(
+            "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+             eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n\
+             docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
+             homewarp-br\t0050D50A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
+             homewarp0\t004DD50A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n",
+        );
+        assert_eq!(in_the_way(&ordinary, tunnel), None);
+        // A LAN that happens to be 10.213.77.0/24, a wider one that holds it,
+        // and a single address inside it.
+        for (route, said) in [
+            (
+                "eth0\t004DD50A\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n",
+                "eth0 10.213.77.0/24",
+            ),
+            (
+                "tun1\t0000D50A\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n",
+                "tun1 10.213.0.0/16",
+            ),
+            (
+                "wg9\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n",
+                "wg9 10.0.0.0/8",
+            ),
+            (
+                "eth1\t024DD50A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0\n",
+                "eth1 10.213.77.2/32",
+            ),
+        ] {
+            assert_eq!(in_the_way(&table(route), tunnel).as_deref(), Some(said));
+        }
+        // Next door is not in the way.
+        let beside = table("eth0\t044DD50A\t00000000\t0001\t0\t0\t100\tFCFFFFFF\t0\t0\t0\n");
+        assert_eq!(in_the_way(&beside, tunnel), None);
+        assert_eq!(in_the_way("", tunnel), None);
     }
 
     #[test]

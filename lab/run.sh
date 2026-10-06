@@ -544,6 +544,12 @@ EOF
   blocked "game cannot reach a service on the home host by its LAN address" game "$HOME_LAN_IP" "$SVC"
   check "and still reaches the internet" "$(reach game "$CLIENT_IP" "$SVC")" "reached $HOME_IP"
 
+  echo "== a home that is already on a network with the tunnel's addresses"
+  dc exec -T home ip route add 10.213.77.0/24 dev eth0
+  check "a VPS is not connected there, and Core says which network is in the way" "$(dc exec -T home curl -s -m 10 -b /run/hw/jar -X POST -H 'Content-Type: application/json' -d "{\"address\":\"$GATE_IP\"}" http://127.0.0.1:3600/api/v1/gate | python3 -c 'import json, sys; print("eth0 10.213.77.0/24" in json.load(sys.stdin).get("error", ""))')" "True"
+  check "and nothing was begun" "$(gate_is state)" "none"
+  dc exec -T home ip route del 10.213.77.0/24 dev eth0
+
   echo "-- drop counters at the gate"
   dc exec -T gate nft list table inet homewarp | grep 'counter packets' | sed 's/^[[:space:]]*/   /'
   return $FAILED

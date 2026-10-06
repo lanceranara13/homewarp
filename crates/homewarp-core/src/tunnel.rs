@@ -25,7 +25,7 @@ use anyhow::{Context, bail};
 use axum::{Json, extract::State, http::StatusCode};
 use homewarp_net::{
     INTERFACE, Link, apply, bring_up, has_keep_table, has_table, home_ruleset, keep_ruleset,
-    new_keypair, new_preshared_key, probe_packets, route_replies, take_down,
+    network_in_the_way, new_keypair, new_preshared_key, probe_packets, route_replies, take_down,
 };
 use homewarp_proto::{
     Answer, Answering, Desired, Forward, Guard, JoinToken, Mode, Open, Probe, ProbeRequest,
@@ -1112,6 +1112,21 @@ async fn enrol_gate(
     {
         return Err(Problem::Conflict(
             "A VPS is connected already. Disconnect it before connecting another.".into(),
+        ));
+    }
+
+    // The tunnel has addresses of its own. A machine that is already on a
+    // network with the same ones would lose that network to the tunnel, or
+    // the tunnel to it, and neither would say why.
+    let tunnel = Ipv4Addr::from(u32::from(GATE) & !3);
+    if let Ok(Some(taken)) =
+        tokio::task::spawn_blocking(move || network_in_the_way((tunnel, 30))).await
+    {
+        return Err(Problem::Conflict(
+            format!(
+                "This machine is already on a network that uses the addresses the tunnel needs ({tunnel}/30): {taken}. A VPS cannot be connected until that network uses others."
+            )
+            .into(),
         ));
     }
 
