@@ -1541,6 +1541,70 @@ Each phase ends with something that works on the homelab.
   firewalld set up by `join` and not only described; the tunnel's addresses checked
   against the home machine's own networks; a home machine with a firewall of its own
   and no Docker to publish the panel's port for it.
+- *Begun 2026-10-07. Done:*
+  - *An egg from its address, and a catalogue* (Templates, Import). The import page
+    takes an address as well as a file or pasted text, and lists the eggs the Pelican
+    community publishes: 326 in ten collections that day, all under the MIT licence.
+    Homewarp ships none of them. One is fetched from its authors when it is picked and
+    put where a pasted egg would be, to be read before it is imported. Core fetches on
+    its owner's word from inside a home network, so what it fetches is held to `https`,
+    the usual port and a name; the name has to lead to addresses on the internet and to
+    none inside a private network, and the address that was looked at is the one
+    connected to. A megabyte and twenty seconds at the most, and a redirection is held
+    to the same again. Tried against the internet from a throwaway copy: the list, an
+    egg, an egg by way of a redirection, and four public names that lead to this
+    machine, a home network and a cloud's own address, each refused.
+  - *The tunnel's addresses held against the home machine's own networks.* Connecting a
+    VPS looks at the machine's routes first, and stops with the network named if one
+    already has `10.213.77.0/30` in it.
+  - *Core for ARM64.* It did not link: its C parts were compiled against glibc's
+    headers and linked with musl, which for the Gate had happened to work. The build
+    container has a compiler for ARM64 that reads musl's headers and the kernel's now.
+    Core is one static file of 21 MB there, and under an emulator makes its database
+    and answers a question of it.
+  - *Releases, and one line on each machine.* `scripts/dev.sh release` builds both
+    programs for both processors and puts a release together: the four files, a list of
+    their checksums, that list signed with an Ed25519 key, and two install scripts with
+    the release's address and the key's public half written into them.
+    - *At home:* `curl -fsSL <releases>/install.sh | sh` fetches Core, checks the
+      signature and then the checksum, builds an image from it and Alpine's `nft` and
+      `ip`, and starts it with its three doors. Run again it is the update, and leaves
+      what was made alone.
+    - *On the VPS:* the panel gives the line, `curl -fsSL <releases>/install-gate.sh |
+      sh -s -- <token>`, where it knows where its releases are; it fetches the Gate,
+      checks it the same way and runs `join`.
+    - *Trusted for the signature, not for where it came from.* The lab makes a release
+      with a key of its own with every run, has its VPS install from it by the panel's
+      line, and then changes the program, the list and the signature in turn: each is
+      refused, and nothing is installed.
+    - *On the real machines* (2026-10-07, a throwaway key, each machine serving the
+      release to itself): the home line took seven seconds on the homelab, as a second
+      instance beside staging; its panel gave the line for the VPS; the VPS, with
+      nothing of Homewarp on it, fetched, checked with its own `openssl` 3.0.2,
+      installed and was connected, 48 ms away with players' addresses preserved. The
+      home line run a second time kept the account and the VPS. Everything was taken
+      off both machines again.
+    - Both scripts are one function called on their last line, so that one cut off on
+      the way does nothing at all.
+  - *Docs:* `docs/installing.md` and `docs/releasing.md`.
+- *The five-minute target, by the parts a machine does:* the home line seven seconds
+  (a first time adds fetching Alpine); a VPS from its line to "connected" about ten;
+  Paper fetched from the catalogue and installed in eight, and at its first start
+  fifteen (Phase 0). Under a minute of machine. The rest is typing, and agreeing to
+  Mojang's EULA, which nobody does for the owner. Not yet done with a person and a
+  stopwatch.
+- *Not done, and why:*
+  - *A public release.* It waits for the licence (§13), for an address to serve it
+    from, and for the owner's own signing key. All three are the owner's.
+  - *Updating by itself.* Running the line again is the update. A Core that replaces
+    the container it runs in, and a Gate that takes a new program through the tunnel,
+    are each a piece of work with its own ways of going wrong.
+  - *firewalld set up by `join`.* Still described and not done. No machine here runs
+    firewalld, and commands for a firewall that were never run against one are not
+    worth shipping.
+  - *A home machine with a firewall of its own and no Docker.* Homewarp needs Docker
+    to run servers at all; the doors are how its ports are published.
+  - *First-run wizard polish.*
 
 **Phase 7 — Later**
 - Minecraft hostname routing (many servers on one `:25565`), sleep + wake-on-connect,

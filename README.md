@@ -19,7 +19,10 @@ home address stays hidden and your router needs no setup.
 > for chosen things, and what is done is written down. The panel can be given a name and
 > reached from anywhere over TLS, through the VPS and unread by it, with a certificate it
 > asks for and renews itself; sign-ins are limited, and take a second step or a passkey.
-> There are no releases yet, so nothing here installs with one line. The
+> It installs with one line on each machine from a signed release, and eggs are fetched
+> from where the community publishes them; there is no public release yet, so that line
+> has nowhere to point but a release you make yourself ([installing](docs/installing.md),
+> [releasing](docs/releasing.md)). The
 > plan is in [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works
