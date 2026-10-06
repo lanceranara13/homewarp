@@ -11,6 +11,7 @@ mod door;
 mod files;
 mod limits;
 mod panel;
+mod passkeys;
 mod runtime;
 mod schedules;
 mod servers;
@@ -21,6 +22,7 @@ mod tls;
 mod totp;
 mod tunnel;
 mod ui;
+mod webauthn;
 
 pub use accounts::two_steps_off;
 pub use api::{AppState, app, openapi};

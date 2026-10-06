@@ -34,6 +34,11 @@ export type Task = components['schemas']['Task']
 export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
 export type Panel = components['schemas']['PanelView']
+export type Passkeys = components['schemas']['Passkeys']
+export type MakeOptions = components['schemas']['MakeOptions']
+export type NewPasskey = components['schemas']['NewPasskey']
+export type SignInOptions = components['schemas']['SignInOptions']
+export type PasskeySignIn = components['schemas']['PasskeySignIn']
 type NewGate = components['schemas']['NewGate']
 type PanelChange = components['schemas']['PanelChange']
 type SetupRequest = components['schemas']['SetupRequest']
@@ -103,6 +108,43 @@ export async function confirmTwoSteps(code: string): Promise<string[]> {
 export async function endTwoSteps(password: string): Promise<void> {
   const { error, response } = await signedIn(() => api.POST('/api/v1/account/two-steps/off', { body: { password } }))
   if (!response.ok) fail(error)
+}
+
+/** The passkeys of the account signed in here, and whether one can be made where this page is. */
+export async function listPasskeys(): Promise<Passkeys> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/account/passkeys'))
+  return data ?? fail(error)
+}
+
+/** Begins making a passkey, given the account's password. The answer is what the browser asks its device for. */
+export async function beginPasskey(password: string): Promise<MakeOptions> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/account/passkeys/begin', { body: { password } }))
+  return data ?? fail(error)
+}
+
+/** Keeps a passkey the browser has just had made. */
+export async function addPasskey(body: NewPasskey): Promise<void> {
+  const { error, response } = await signedIn(() => api.POST('/api/v1/account/passkeys', { body }))
+  if (!response.ok) fail(error)
+}
+
+export async function removePasskey(id: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.DELETE('/api/v1/account/passkeys/{id}', { params: { path: { id } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/** Begins a sign-in with a passkey. Nobody is named: the device says which key it has. */
+export async function beginPasskeySignIn(): Promise<SignInOptions> {
+  const { data, error } = await reach(() => api.POST('/api/v1/login/passkey/begin'))
+  return data ?? fail(error)
+}
+
+/** Signs in with what a device signed. */
+export async function passkeySignIn(body: PasskeySignIn): Promise<Session> {
+  const { data, error } = await reach(() => api.POST('/api/v1/login/passkey', { body }))
+  return data ?? fail(error)
 }
 
 export async function signOut(): Promise<void> {

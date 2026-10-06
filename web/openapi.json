@@ -6,6 +6,198 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/api/v1/account/passkeys": {
+      "get": {
+        "summary": "The passkeys of whoever asks.",
+        "operationId": "list_passkeys",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Passkeys"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Keeps a passkey that the browser has just had made with the challenge\n`begin` handed out.",
+        "operationId": "add_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPasskey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The challenge is no longer out, the key is here already, or there are no passkeys where this was asked from.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "What the device answered does not hold.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/passkeys/begin": {
+      "post": {
+        "summary": "Begins making a passkey: checks the account's password, and answers with\nwhat the browser is to ask its device for. The challenge counts for five\nminutes, and once.",
+        "operationId": "begin_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginPasskey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakeOptions"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The password is wrong.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There are no passkeys where this was asked from, or the account has as many as it can.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong passwords.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/passkeys/{id}": {
+      "delete": {
+        "summary": "Removes one of the passkeys of whoever asks. The device goes on holding\nits half, which opens nothing here any more.",
+        "operationId": "remove_passkey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The passkey.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "It is gone."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account has no such passkey.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/account/password": {
       "post": {
         "summary": "Changes the password of whoever asks. Every other session of the account\nends; the one that asked goes on.",
@@ -469,6 +661,91 @@
           },
           "401": {
             "description": "Wrong username or password.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/login/passkey": {
+      "post": {
+        "summary": "Signs in with a passkey: the device signed the challenge, and checked who\nwas holding it, so neither a password nor a code is asked for.",
+        "operationId": "sign_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeySignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in. The session cookie is set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The passkey did not sign in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There are no passkeys where this was asked from.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many sign-ins that failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/login/passkey/begin": {
+      "post": {
+        "summary": "Begins a sign-in with a passkey: answers with a challenge for the device\nto sign. Nobody is named: the device says which key it has.",
+        "operationId": "begin_sign_in",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInOptions"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There are no passkeys where this was asked from.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3716,6 +3993,19 @@
           }
         }
       },
+      "BeginPasskey": {
+        "type": "object",
+        "description": "What making a passkey begins with.",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The account's password: a passkey is another way in, and whoever adds\none has to be the account's owner and not only someone at its browser."
+          }
+        }
+      },
       "CertificateView": {
         "type": "object",
         "description": "The certificate the panel is served with.",
@@ -4192,6 +4482,41 @@
           }
         }
       },
+      "MakeOptions": {
+        "type": "object",
+        "description": "What a browser is asked to make a passkey with.",
+        "required": [
+          "challenge",
+          "rp_id",
+          "user_handle",
+          "username",
+          "exclude"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string",
+            "description": "What the device is to sign, in the base64 that uses neither `+` nor `/`."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The keys the account has here already, by what their devices call\nthem, so that a device is not given a second."
+          },
+          "rp_id": {
+            "type": "string",
+            "description": "The name the key is bound to."
+          },
+          "user_handle": {
+            "type": "string",
+            "description": "What the device files the key under: the account, in that base64."
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
       "MoveRequest": {
         "type": "object",
         "required": [
@@ -4252,6 +4577,28 @@
             "format": "int32",
             "description": "The UDP port its WireGuard is to listen on. 51820 if none is given.",
             "minimum": 0
+          }
+        }
+      },
+      "NewPasskey": {
+        "type": "object",
+        "description": "A passkey a browser has just had made.",
+        "required": [
+          "name",
+          "client_data",
+          "attestation"
+        ],
+        "properties": {
+          "attestation": {
+            "type": "string"
+          },
+          "client_data": {
+            "type": "string",
+            "description": "What the browser says it was asked, and what the device answered, each\nin the base64 that uses neither `+` nor `/`."
+          },
+          "name": {
+            "type": "string",
+            "description": "What to call it: \"Laptop\", \"Phone\"."
           }
         }
       },
@@ -4435,6 +4782,83 @@
           },
           "state": {
             "$ref": "#/components/schemas/PanelState"
+          }
+        }
+      },
+      "PasskeySignIn": {
+        "type": "object",
+        "description": "A sign-in made with a passkey.",
+        "required": [
+          "id",
+          "client_data",
+          "authenticator_data",
+          "signature"
+        ],
+        "properties": {
+          "authenticator_data": {
+            "type": "string"
+          },
+          "client_data": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "What the device calls the key that signed."
+          },
+          "signature": {
+            "type": "string"
+          }
+        }
+      },
+      "PasskeyView": {
+        "type": "object",
+        "description": "A passkey, as its owner sees it.",
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "In Unix seconds, as every time here."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_used_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it last signed in. Nothing if it never has."
+          },
+          "name": {
+            "type": "string",
+            "description": "What its owner called it."
+          }
+        }
+      },
+      "Passkeys": {
+        "type": "object",
+        "description": "An account's passkeys.",
+        "required": [
+          "available",
+          "passkeys"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether one can be made, or used, where this was asked from."
+          },
+          "passkeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PasskeyView"
+            }
           }
         }
       },
@@ -4935,6 +5359,22 @@
             "type": "string"
           },
           "username": {
+            "type": "string"
+          }
+        }
+      },
+      "SignInOptions": {
+        "type": "object",
+        "description": "What a browser is asked to sign in with.",
+        "required": [
+          "challenge",
+          "rp_id"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string"
+          },
+          "rp_id": {
             "type": "string"
           }
         }

@@ -14,6 +14,8 @@ unsafe_code = "forbid"
 anyhow = "1"
 argon2 = "0.6"
 axum = "0.8"
+# What a browser sends of a passkey comes in base64. Already here by way of others.
+base64 = "0.22"
 # Only the local socket: no HTTP or TLS transport to a remote daemon.
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 cap-std = "4"
@@ -32,6 +34,8 @@ instant-acme = { version = "0.8", default-features = false, features = ["ring", 
 regex-lite = "0.1"
 # In the tests only: a certificate to read, made on the spot.
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+# Checks a passkey's signature. Already here, as what russh and rustls are built on.
+ring = "0.17"
 # SFTP for servers' files. With ring for its cryptography, which asks for a C
 # compiler and no more: what it would pick by itself asks for cmake as well.
 russh = { version = "0.64", default-features = false, features = ["ring"] }

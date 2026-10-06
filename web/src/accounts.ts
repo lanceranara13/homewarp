@@ -1,6 +1,14 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query'
 
-import { getSettings, getTwoSteps, listAccounts, listActivity, listServerUsers, type Permission } from './api/client'
+import {
+  getSettings,
+  getTwoSteps,
+  listAccounts,
+  listActivity,
+  listPasskeys,
+  listServerUsers,
+  type Permission,
+} from './api/client'
 
 /** How many lines of what was done Homewarp answers with at a time. Fewer than that, and there are no older ones. */
 const PAGE = 100
@@ -24,6 +32,13 @@ export function activityQuery(server: number | undefined, user: number | undefin
 export const accountsQuery = queryOptions({
   queryKey: ['accounts'],
   queryFn: listAccounts,
+  staleTime: 5_000,
+})
+
+/** The passkeys of the account signed in here. */
+export const passkeysQuery = queryOptions({
+  queryKey: ['passkeys'],
+  queryFn: listPasskeys,
   staleTime: 5_000,
 })
 

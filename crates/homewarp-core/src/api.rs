@@ -30,6 +30,7 @@ use crate::{
     files,
     limits::Limiter,
     panel::{self, Authority, Panel},
+    passkeys::{self, Challenges},
     runtime::Runtime,
     schedules, servers, settings, templates,
     tls::{Secured, Shown},
@@ -61,6 +62,8 @@ pub struct AppState {
     /// Who that certificate is asked of, and how the asking stands.
     pub(crate) authority: Arc<Authority>,
     pub(crate) panel: Arc<Panel>,
+    /// The challenges that are out for passkeys to sign.
+    pub(crate) challenges: Arc<Challenges>,
 }
 
 impl AppState {
@@ -91,6 +94,7 @@ impl AppState {
             shown: Arc::default(),
             authority: Arc::default(),
             panel: Arc::default(),
+            challenges: Arc::default(),
         })
     }
 
@@ -166,6 +170,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(schedules::routes())
         .merge(settings::routes())
         .merge(panel::routes())
+        .merge(passkeys::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.
@@ -271,7 +276,7 @@ struct Health {
 
 /// Everything the web interface needs to decide what to show first.
 #[derive(Serialize, ToSchema)]
-struct Session {
+pub(crate) struct Session {
     /// True until the first account has been created.
     setup_required: bool,
     /// Who is signed in, if anyone.
@@ -632,7 +637,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
 }
 
 /// Starts a session for `user` and answers with its cookie.
-async fn sign_in(state: &AppState, user: User) -> Result<Response, Problem> {
+pub(crate) async fn sign_in(state: &AppState, user: User) -> Result<Response, Problem> {
     let token = auth::new_token();
     let now = auth::now();
     sqlx::query(

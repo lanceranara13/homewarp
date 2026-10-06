@@ -1,9 +1,11 @@
-import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { KeyRound, Plus, Trash2 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
-import { accountsQuery, settingsQuery, twoStepsQuery } from '../accounts'
+import { accountsQuery, passkeysQuery, settingsQuery, twoStepsQuery } from '../accounts'
 import {
+  addPasskey,
+  beginPasskey,
   beginTwoSteps,
   changeOwnPassword,
   changeSettings,
@@ -11,11 +13,13 @@ import {
   createAccount,
   endTwoSteps,
   removeAccount,
+  removePasskey,
   setPassword,
   type Account,
 } from '../api/client'
 import { Button, Confirm, CopyChip, Field, PageBar, Problem } from '../components/ui'
 import { when } from '../format'
+import { makePasskey, passkeysHere } from '../passkeys'
 import { sessionQuery } from '../session'
 
 /** What is about this Homewarp and not about one server: the account signed in here and, for the owner, the others. */
@@ -28,6 +32,7 @@ export function SettingsPage() {
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-10 p-4 md:p-6">
         <OwnPassword username={session.user?.username ?? ''} />
         <TwoSteps />
+        <Passkeys />
         {session.user?.owner && <Accounts />}
         {session.user?.owner && <Resolvers />}
       </main>
@@ -197,6 +202,93 @@ function TwoSteps() {
 }
 
 /** Where servers look names up: what a server asks when it fetches a plugin, or checks a player's account. */
+/**
+ * The passkeys of the account signed in here. Nothing on the page waits for
+ * them: the section comes when its answer does.
+ */
+function Passkeys() {
+  const queryClient = useQueryClient()
+  const { data: kept } = useQuery(passkeysQuery)
+  const again = () => queryClient.invalidateQueries({ queryKey: passkeysQuery.queryKey })
+  const adding = useMutation({
+    mutationFn: async ({ name, password }: { name: string; password: string }) => {
+      const options = await beginPasskey(password)
+      return addPasskey({ name, ...(await makePasskey(options)) })
+    },
+    onSuccess: again,
+  })
+  const removing = useMutation({ mutationFn: removePasskey, onSuccess: again })
+
+  if (!kept) return null
+  const here = kept.available && passkeysHere()
+
+  return (
+    <Section
+      title="Passkeys"
+      lead="A passkey lives on a device of yours: a phone, a laptop, a security key. With one, signing in is the device asking for your fingerprint, face or PIN, and nothing is typed. It works on this panel’s own address and on no page that only looks like it."
+    >
+      {kept.passkeys.length > 0 && (
+        <ul className="flex max-w-140 flex-col rounded-lg border border-hairline bg-surface-1">
+          {kept.passkeys.map((passkey) => (
+            <li key={passkey.id} className="flex items-center gap-3 border-b border-hairline px-4 py-2 last:border-b-0">
+              <KeyRound aria-hidden className="size-4 shrink-0 text-ink-subtle" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-ink">{passkey.name}</div>
+                <div className="text-small text-ink-subtle">
+                  Made {when(passkey.created_at)}
+                  {passkey.last_used_at ? ` · last used ${when(passkey.last_used_at)}` : ' · not used yet'}
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                aria-label={`Remove ${passkey.name}`}
+                busy={removing.isPending && removing.variables === passkey.id}
+                onClick={() => removing.mutate(passkey.id)}
+              >
+                <Trash2 aria-hidden size={16} />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {removing.error && <Problem>{removing.error.message}</Problem>}
+      {here ? (
+        <form
+          className="flex max-w-80 flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const form = event.currentTarget
+            const typed = (name: string) => String(new FormData(form).get(name) ?? '')
+            adding.mutate({ name: typed('name'), password: typed('password') }, { onSuccess: () => form.reset() })
+          }}
+        >
+          <Field label="What to call it" name="name" required maxLength={40} autoComplete="off" placeholder="Laptop" />
+          <Field
+            label="Your password"
+            name="password"
+            type="password"
+            required
+            autoComplete="current-password"
+            hint="A passkey is another way in, so adding one takes the password."
+          />
+          {adding.error && <Problem>{adding.error.message}</Problem>}
+          <div>
+            <Button type="submit" busy={adding.isPending}>
+              <Plus aria-hidden size={16} />
+              Add a passkey
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <p className="max-w-140 text-small text-ink-subtle">
+          A browser makes a passkey only on a page it trusts. That is this panel reached by its name, which Network sets up,
+          and not by an address on the home network, as it is now.
+        </p>
+      )}
+    </Section>
+  )
+}
+
 function Resolvers() {
   const queryClient = useQueryClient()
   const { data: settings } = useSuspenseQuery(settingsQuery)

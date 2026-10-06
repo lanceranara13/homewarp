@@ -1,9 +1,14 @@
-import { CodeNeeded, signIn } from '../api/client'
+import { KeyRound } from 'lucide-react'
+
+import { CodeNeeded, beginPasskeySignIn, passkeySignIn, signIn } from '../api/client'
 import { Button, Doorway, Field, Problem } from '../components/ui'
+import { passkeysHere, signWithPasskey } from '../passkeys'
 import { useEnter } from '../session'
 
 export function LoginPage() {
   const login = useEnter(signIn)
+  // Nobody is named: the device says which key it has, and the key says whose it is.
+  const withPasskey = useEnter(async () => passkeySignIn(await signWithPasskey(await beginPasskeySignIn())))
 
   return (
     <Doorway title="Sign in" lead="Your game servers are on the other side.">
@@ -36,6 +41,16 @@ export function LoginPage() {
           Sign in
         </Button>
       </form>
+      {/* Only where a browser has passkeys at all: on the panel's own name, over TLS. */}
+      {passkeysHere() && (
+        <div className="mt-4 flex flex-col gap-3 border-t border-hairline pt-4">
+          <Button busy={withPasskey.isPending} onClick={() => withPasskey.mutate(undefined)}>
+            <KeyRound aria-hidden size={16} />
+            Sign in with a passkey
+          </Button>
+          {withPasskey.error && <Problem>{withPasskey.error.message}</Problem>}
+        </div>
+      )}
     </Doorway>
   )
 }

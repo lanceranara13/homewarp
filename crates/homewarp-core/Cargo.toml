@@ -17,6 +17,7 @@ anyhow.workspace = true
 argon2.workspace = true
 # `ws` for the socket a server's page follows it by. Not asked for by the Gate.
 axum = { workspace = true, features = ["ws"] }
+base64.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 homewarp-net = { path = "../homewarp-net" }
@@ -25,6 +26,7 @@ homewarp-runtime = { path = "../homewarp-runtime" }
 homewarp-template = { path = "../homewarp-template" }
 hyper-util.workspace = true
 instant-acme.workspace = true
+ring.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true
 rust-embed.workspace = true
