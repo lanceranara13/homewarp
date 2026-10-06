@@ -5,16 +5,21 @@ import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  notFound,
   redirect,
   type ErrorComponentProps,
 } from '@tanstack/react-router'
 
 import { AppShell } from './components/AppShell'
 import { Button, Doorway, Problem } from './components/ui'
+import { ImportTemplatePage } from './pages/ImportTemplatePage'
 import { LoginPage } from './pages/LoginPage'
 import { ServersPage } from './pages/ServersPage'
 import { SetupPage } from './pages/SetupPage'
+import { TemplatePage } from './pages/TemplatePage'
+import { TemplatesPage } from './pages/TemplatesPage'
 import { sessionQuery } from './session'
+import { templateIdFrom, templateQuery, templatesQuery } from './templates'
 
 interface Context {
   queryClient: QueryClient
@@ -60,7 +65,13 @@ const loginRoute = createRoute({
 const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: 'shell',
-  beforeLoad: async ({ context }) => {
+  beforeLoad: async ({ context, matches }) => {
+    // What the page itself reads sets off now, beside the session check and not behind it,
+    // unless that check has been answered already and the answer is that nobody is signed in.
+    const known = context.queryClient.getQueryData(sessionQuery.queryKey)
+    if (!known || known.user) {
+      for (const match of matches) match.staticData.reads?.(context.queryClient, match.params)
+    }
     const to = await home(context)
     if (to !== '/') throw redirect({ to })
   },
@@ -73,7 +84,43 @@ const serversRoute = createRoute({
   component: ServersPage,
 })
 
-const routeTree = rootRoute.addChildren([setupRoute, loginRoute, shellRoute.addChildren([serversRoute])])
+const templatesRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/templates',
+  staticData: { reads: (queryClient) => void queryClient.prefetchQuery(templatesQuery) },
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(templatesQuery)
+  },
+  component: TemplatesPage,
+})
+
+const importTemplateRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/templates/import',
+  component: ImportTemplatePage,
+})
+
+const templateRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/templates/$templateId',
+  staticData: {
+    reads: (queryClient, params) => {
+      const id = templateIdFrom(params.templateId)
+      if (id !== undefined) void queryClient.prefetchQuery(templateQuery(id))
+    },
+  },
+  loader: async ({ context, params }) => {
+    const id = templateIdFrom(params.templateId)
+    if (id === undefined || !(await context.queryClient.ensureQueryData(templateQuery(id)))) throw notFound()
+  },
+  component: TemplatePage,
+})
+
+const routeTree = rootRoute.addChildren([
+  setupRoute,
+  loginRoute,
+  shellRoute.addChildren([serversRoute, templatesRoute, importTemplateRoute, templateRoute]),
+])
 
 export function createAppRouter(queryClient: QueryClient) {
   return createRouter({ routeTree, context: { queryClient } })
@@ -82,6 +129,15 @@ export function createAppRouter(queryClient: QueryClient) {
 declare module '@tanstack/react-router' {
   interface Register {
     router: ReturnType<typeof createAppRouter>
+  }
+
+  interface StaticDataRouteOption {
+    /**
+     * Starts the requests a page cannot paint without. The shell calls it while
+     * the session is still being checked; the page's loader then waits for the
+     * same requests, which are already on their way.
+     */
+    reads?: (queryClient: QueryClient, params: Record<string, string | undefined>) => void
   }
 }
 

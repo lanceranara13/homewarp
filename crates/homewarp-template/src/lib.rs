@@ -10,10 +10,13 @@
 mod egg;
 pub mod properties;
 
+use serde::{Deserialize, Serialize};
+
 pub use egg::{ImportError, import};
 
-/// How to install and run one game or app.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How to install and run one game or app. Core keeps a template as this, in
+/// JSON, so a field added later needs a default that old documents can take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
     pub name: String,
     pub description: String,
@@ -30,14 +33,15 @@ pub struct Template {
     pub features: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub label: String,
     pub image: String,
 }
 
 /// How to ask a server to shut down.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Stop {
     /// Type this into the console.
     Command(String),
@@ -46,7 +50,7 @@ pub enum Stop {
 }
 
 /// A file in the server directory to patch before each start.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigFile {
     pub path: String,
     pub parser: Parser,
@@ -54,7 +58,8 @@ pub struct ConfigFile {
     pub find: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Parser {
     Properties,
     Yaml,
@@ -64,14 +69,14 @@ pub enum Parser {
     File,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Install {
     pub image: String,
     pub entrypoint: String,
     pub script: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Variable {
     pub name: String,
     pub description: String,

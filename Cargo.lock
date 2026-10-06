@@ -744,6 +744,7 @@ dependencies = [
  "argon2",
  "axum",
  "getrandom",
+ "homewarp-template",
  "rust-embed",
  "serde",
  "serde_json",
@@ -779,6 +780,7 @@ dependencies = [
 name = "homewarp-template"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "serde-saphyr",
  "serde_json",
  "thiserror",

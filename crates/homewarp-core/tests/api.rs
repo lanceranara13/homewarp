@@ -15,6 +15,43 @@ use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
 
+/// A small egg in the shape Pelican exports.
+const EGG: &str = r#"
+meta:
+  version: PLCN_v3
+name: ' Example '
+description: 'An example server.'
+docker_images:
+  'Java 21': 'example.invalid/java:21'
+  'Java 17': 'example.invalid/java:17'
+startup_commands:
+  Default: 'java -jar {{SERVER_JARFILE}}'
+config:
+  files:
+    server.properties:
+      parser: properties
+      find:
+        server-port: '{{server.allocations.default.port}}'
+  startup:
+    done: 'Done'
+  stop: stop
+scripts:
+  installation:
+    script: 'echo hi'
+    container: 'example.invalid/installer:alpine'
+    entrypoint: ash
+variables:
+  -
+    name: 'Server Jar File'
+    description: 'The jar to run.'
+    env_variable: SERVER_JARFILE
+    default_value: server.jar
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+"#;
+
 struct Panel {
     app: Router,
     setup_code: String,
@@ -82,6 +119,11 @@ impl Panel {
             .header(COOKIE, cookie.unwrap_or_default());
         self.send(request.body(Body::from(body.to_string())).unwrap())
             .await
+    }
+
+    async fn delete(&self, path: &str, cookie: Option<&str>) -> Answer {
+        let request = Request::delete(path).header(COOKIE, cookie.unwrap_or_default());
+        self.send(request.body(Body::empty()).unwrap()).await
     }
 
     /// Finishes setup as `lance` and returns the session cookie.
@@ -248,6 +290,128 @@ async fn paths_outside_the_api_belong_to_the_web_interface() {
     assert!(
         page == StatusCode::OK || page == StatusCode::SERVICE_UNAVAILABLE,
         "{page}"
+    );
+}
+
+#[tokio::test]
+async fn templates_are_for_someone_signed_in() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let import = json!({ "egg": EGG });
+    let created = panel
+        .post("/api/v1/templates", import.clone(), Some(&cookie))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    for answer in [
+        panel.get("/api/v1/templates", None).await,
+        panel.get("/api/v1/templates/1", None).await,
+        panel.post("/api/v1/templates", import, None).await,
+        panel.delete("/api/v1/templates/1", None).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(answer.body["error"], "Sign in first.");
+    }
+    let still_there = panel.get("/api/v1/templates", Some(&cookie)).await;
+    assert_eq!(still_there.body.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_egg_becomes_a_template_once() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let empty = panel.get("/api/v1/templates", Some(&cookie)).await;
+    assert_eq!((empty.status, &empty.body), (StatusCode::OK, &json!([])));
+
+    let import = json!({ "egg": EGG });
+    let created = panel
+        .post("/api/v1/templates", import.clone(), Some(&cookie))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let template = &created.body;
+    assert_eq!(template["name"], "Example");
+    assert_eq!(template["images"][1]["image"], "example.invalid/java:17");
+    assert_eq!(template["startup"], "java -jar {{SERVER_JARFILE}}");
+    assert_eq!(template["done"], json!(["Done"]));
+    assert_eq!(
+        template["stop"],
+        json!({ "by": "command", "value": "stop" })
+    );
+    assert_eq!(template["config_files"], json!(["server.properties"]));
+    assert_eq!(template["install"]["entrypoint"], "ash");
+    assert_eq!(template["variables"][0]["env"], "SERVER_JARFILE");
+    assert_eq!(template["variables"][0]["rules"], json!(["required"]));
+
+    let id = template["id"].as_i64().unwrap();
+    let listed = panel.get("/api/v1/templates", Some(&cookie)).await.body;
+    assert_eq!(
+        listed,
+        json!([{
+            "id": id,
+            "name": "Example",
+            "description": "An example server.",
+            "image": "example.invalid/java:21",
+        }])
+    );
+    let fetched = panel
+        .get(&format!("/api/v1/templates/{id}"), Some(&cookie))
+        .await;
+    assert_eq!((fetched.status, &fetched.body), (StatusCode::OK, template));
+
+    // The name is the same whatever its case.
+    let again = json!({ "egg": EGG.replace("' Example '", "EXAMPLE") });
+    let twice = panel.post("/api/v1/templates", again, Some(&cookie)).await;
+    assert_eq!(twice.status, StatusCode::CONFLICT);
+    assert!(twice.body["error"].as_str().unwrap().contains("EXAMPLE"));
+}
+
+#[tokio::test]
+async fn a_removed_template_is_gone() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let created = panel
+        .post("/api/v1/templates", json!({ "egg": EGG }), Some(&cookie))
+        .await;
+    let path = format!("/api/v1/templates/{}", created.body["id"]);
+
+    assert_eq!(
+        panel.delete(&path, Some(&cookie)).await.status,
+        StatusCode::NO_CONTENT
+    );
+    for answer in [
+        panel.get(&path, Some(&cookie)).await,
+        panel.delete(&path, Some(&cookie)).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND);
+        assert_eq!(answer.body["error"], "There is no such template.");
+    }
+    assert_eq!(
+        panel.get("/api/v1/templates", Some(&cookie)).await.body,
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn what_is_not_an_egg_is_refused_in_words() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let attempt =
+        |egg: String| panel.post("/api/v1/templates", json!({ "egg": egg }), Some(&cookie));
+
+    for (egg, reason) in [
+        ("hello".to_owned(), "`meta.version` is missing"),
+        (EGG.replace("PLCN_v3", "PLCN_v9"), "unsupported egg format"),
+        (EGG.replace("' Example '", "'  '"), "1 to 100 characters"),
+        (format!("{EGG}#{}", "x".repeat(1 << 20)), "at most 1 MB"),
+    ] {
+        let refused = attempt(egg).await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let said = refused.body["error"].as_str().unwrap();
+        assert!(said.contains(reason), "{reason} in {said}");
+    }
+    assert_eq!(
+        panel.get("/api/v1/templates", Some(&cookie)).await.body,
+        json!([])
     );
 }
 

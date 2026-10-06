@@ -11,9 +11,10 @@ import { Button, Mark } from './ui'
  * The five destinations of DESIGN.md. One without `to` is not built yet: it is
  * shown, so the shape of the panel is there from the start, but it leads nowhere.
  */
-const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' }[] = [
-  { label: 'Servers', icon: LayoutGrid, to: '/' },
-  { label: 'Templates', icon: Blocks },
+const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates'; exact?: boolean }[] = [
+  // Every address begins the way this one does, so it is the current page only when it is the whole address.
+  { label: 'Servers', icon: LayoutGrid, to: '/', exact: true },
+  { label: 'Templates', icon: Blocks, to: '/templates' },
   { label: 'Network', icon: Waypoints },
   { label: 'Activity', icon: ScrollText },
   { label: 'Settings', icon: Settings },
@@ -39,9 +40,9 @@ export function AppShell() {
           <span className="sr-only text-section wide:not-sr-only">Homewarp</span>
         </div>
         <nav aria-label="Main" className="mt-4 flex flex-col gap-1">
-          {DESTINATIONS.map(({ label, icon: Icon, to }) =>
+          {DESTINATIONS.map(({ label, icon: Icon, to, exact }) =>
             to ? (
-              <Link key={label} to={to} className={ROW_LIVE} activeProps={{ className: 'bg-accent-soft text-ink' }}>
+              <Link key={label} to={to} activeOptions={{ exact }} className={ROW_LIVE} activeProps={{ className: 'bg-accent-soft text-ink' }}>
                 <Icon aria-hidden className="w-5 shrink-0" size={16} />
                 <span className="sr-only wide:not-sr-only">{label}</span>
               </Link>
@@ -71,7 +72,8 @@ export function AppShell() {
 function AccountMenu({ username }: { username: string }) {
   const signOut = useSignOut()
   return (
-    <DropdownMenu.Root>
+    // Not modal: a modal menu locks scrolling with a style element, which the content policy refuses.
+    <DropdownMenu.Root modal={false}>
       <DropdownMenu.Trigger className={ROW_LIVE}>
         <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-surface-3 text-caption text-ink uppercase">
           {username.slice(0, 1)}
@@ -100,9 +102,9 @@ function BottomBar({ username }: { username: string }) {
 
   return (
     <nav aria-label="Main" className={`${FLOATING} fixed inset-x-3 bottom-3 flex h-14 items-center justify-around md:hidden`}>
-      {DESTINATIONS.slice(0, 3).map(({ label, icon: Icon, to }) =>
+      {DESTINATIONS.slice(0, 3).map(({ label, icon: Icon, to, exact }) =>
         to ? (
-          <Link key={label} to={to} className={`${tab} text-ink-muted`} activeProps={{ className: 'text-ink' }}>
+          <Link key={label} to={to} activeOptions={{ exact }} className={`${tab} text-ink-muted`} activeProps={{ className: 'text-ink' }}>
             <Icon aria-hidden size={18} />
             {label}
           </Link>

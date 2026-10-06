@@ -5,6 +5,8 @@ import createClient from 'openapi-fetch'
 import type { components, paths } from './schema'
 
 export type Session = components['schemas']['Session']
+export type TemplateSummary = components['schemas']['TemplateSummary']
+export type Template = components['schemas']['Template']
 type SetupRequest = components['schemas']['SetupRequest']
 type LoginRequest = components['schemas']['LoginRequest']
 
@@ -45,5 +47,42 @@ export async function signIn(body: LoginRequest): Promise<Session> {
 
 export async function signOut(): Promise<void> {
   const { error, response } = await reach(() => api.POST('/api/v1/logout'))
+  if (!response.ok) fail(error)
+}
+
+/** A session that ended while its page was open: it ran out, or was signed out in another tab. */
+export class SignedOut extends Error {
+  constructor() {
+    super('Your session has ended. Sign in again.')
+  }
+}
+
+/** For the endpoints that answer only someone signed in. */
+async function signedIn<T extends { response: Response }>(request: () => Promise<T>): Promise<T> {
+  const answer = await reach(request)
+  if (answer.response.status === 401) throw new SignedOut()
+  return answer
+}
+
+export async function listTemplates(): Promise<TemplateSummary[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/templates'))
+  return data ?? fail(error)
+}
+
+/** Null where there is no template with that id. */
+export async function getTemplate(id: number): Promise<Template | null> {
+  const { data, error, response } = await signedIn(() => api.GET('/api/v1/templates/{id}', { params: { path: { id } } }))
+  if (response.status === 404) return null
+  return data ?? fail(error)
+}
+
+/** Sends an egg's text; the answer is the template Homewarp made of it. */
+export async function importTemplate(egg: string): Promise<Template> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/templates', { body: { egg } }))
+  return data ?? fail(error)
+}
+
+export async function removeTemplate(id: number): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/templates/{id}', { params: { path: { id } } }))
   if (!response.ok) fail(error)
 }

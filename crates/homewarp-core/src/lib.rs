@@ -3,6 +3,7 @@
 mod api;
 mod auth;
 mod db;
+mod templates;
 mod ui;
 
 pub use api::{AppState, app, openapi};

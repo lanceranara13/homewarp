@@ -142,6 +142,179 @@
           }
         }
       }
+    },
+    "/api/v1/templates": {
+      "get": {
+        "summary": "Every template, by name. The one request the Templates page needs.",
+        "operationId": "list_templates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Reads an egg and keeps it as a template.",
+        "operationId": "import_template",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Template"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There is a template of that name already.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "This is not an egg Homewarp can read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/templates/{id}": {
+      "get": {
+        "operationId": "get_template",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The template's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Template"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such template.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "remove_template",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The template's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The template is gone."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such template.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -158,6 +331,18 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "ImportRequest": {
+        "type": "object",
+        "required": [
+          "egg"
+        ],
+        "properties": {
+          "egg": {
+            "type": "string",
+            "description": "The egg as a panel exports it: JSON or YAML."
           }
         }
       },
@@ -234,6 +419,215 @@
           },
           "username": {
             "type": "string"
+          }
+        }
+      },
+      "StopBy": {
+        "type": "string",
+        "enum": [
+          "command",
+          "signal"
+        ]
+      },
+      "Template": {
+        "type": "object",
+        "description": "A template in full: everything Homewarp will do on its word.",
+        "required": [
+          "id",
+          "created_at",
+          "name",
+          "description",
+          "images",
+          "startup",
+          "done",
+          "stop",
+          "config_files",
+          "variables",
+          "features"
+        ],
+        "properties": {
+          "config_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The files patched in a server's directory before every start."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was imported, in Unix seconds."
+          },
+          "description": {
+            "type": "string"
+          },
+          "done": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A server has started once its console prints any of these."
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateImage"
+            },
+            "description": "The first is the one a new server runs in unless another is picked."
+          },
+          "install": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TemplateInstall",
+                "description": "What runs once, before a server's first start. Not every template has it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "startup": {
+            "type": "string",
+            "description": "The command that starts a server, with `{{NAME}}` where a variable goes."
+          },
+          "stop": {
+            "$ref": "#/components/schemas/TemplateStop"
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateVariable"
+            }
+          }
+        }
+      },
+      "TemplateImage": {
+        "type": "object",
+        "required": [
+          "label",
+          "image"
+        ],
+        "properties": {
+          "image": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "TemplateInstall": {
+        "type": "object",
+        "required": [
+          "image",
+          "entrypoint",
+          "script"
+        ],
+        "properties": {
+          "entrypoint": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string"
+          }
+        }
+      },
+      "TemplateStop": {
+        "type": "object",
+        "description": "How a server is asked to shut down.",
+        "required": [
+          "by",
+          "value"
+        ],
+        "properties": {
+          "by": {
+            "$ref": "#/components/schemas/StopBy"
+          },
+          "value": {
+            "type": "string",
+            "description": "The command typed into the console, or the name of the signal sent."
+          }
+        }
+      },
+      "TemplateSummary": {
+        "type": "object",
+        "description": "A template as the gallery shows it.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "image"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "image": {
+            "type": "string",
+            "description": "The image a new server runs in unless another is picked."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TemplateVariable": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "env",
+          "default",
+          "rules",
+          "user_viewable",
+          "user_editable"
+        ],
+        "properties": {
+          "default": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "env": {
+            "type": "string",
+            "description": "The environment variable the server sees."
+          },
+          "name": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Laravel-style validation rules, one per entry."
+          },
+          "user_editable": {
+            "type": "boolean"
+          },
+          "user_viewable": {
+            "type": "boolean"
           }
         }
       },

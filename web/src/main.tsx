@@ -3,15 +3,36 @@ import '@fontsource-variable/inter'
 import '@fontsource-variable/jetbrains-mono'
 import './styles.css'
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
+import { SignedOut } from './api/client'
 import { createAppRouter } from './router'
+import { sessionQuery } from './session'
+
+/**
+ * A request has found that the session this page was opened with is over.
+ * Saying so in the cached session is enough: the route guards, asked again,
+ * lead to the sign-in page.
+ */
+function sessionEnded(error: Error) {
+  if (!(error instanceof SignedOut) || !queryClient.getQueryData(sessionQuery.queryKey)?.user) return
+  queryClient.setQueryData(sessionQuery.queryKey, (session) => session && { ...session, user: null })
+  void router.invalidate()
+}
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
+  queryCache: new QueryCache({ onError: sessionEnded }),
+  mutationCache: new MutationCache({ onError: sessionEnded }),
+  defaultOptions: {
+    queries: {
+      // Asking again does not bring a session back.
+      retry: (failures, error) => failures < 1 && !(error instanceof SignedOut),
+      refetchOnWindowFocus: false,
+    },
+  },
 })
 const router = createAppRouter(queryClient)
 

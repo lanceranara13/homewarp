@@ -31,7 +31,10 @@
   --color-accent: #8f7cff;
   --color-accent-soft: rgb(143 124 255 / 0.12);
   --color-danger: #ff6369;
+  --color-danger-solid: #d93d42;
+  --color-on-danger: #ffffff;
   --color-heart: #f0559a;
+  --color-overlay: rgb(0 0 0 / 0.6);
 
   --text-title: 24px;
   --text-title--line-height: 32px;

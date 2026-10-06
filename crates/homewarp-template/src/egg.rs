@@ -32,7 +32,13 @@ pub fn import(text: &str) -> Result<Template, ImportError> {
     let root: Value = if text.trim_start().starts_with('{') {
         serde_json::from_str(text)?
     } else {
-        serde_saphyr::from_str(text).map_err(|error| ImportError::Yaml(error.to_string()))?
+        serde_saphyr::from_str(text).map_err(|error| {
+            // The parser draws the lines around the fault under its message, which
+            // is for a terminal. The first line says where and what.
+            let said = error.to_string();
+            let said = said.lines().next().unwrap_or_default();
+            ImportError::Yaml(said.strip_prefix("error: ").unwrap_or(said).to_owned())
+        })?
     };
 
     let version = required(&root, &["meta", "version"])?;
@@ -104,8 +110,11 @@ fn images(root: &Value) -> Result<Vec<Image>, ImportError> {
 
 fn stop(raw: &str) -> Stop {
     match raw.strip_prefix('^') {
-        // `^C` is how eggs spell an interrupt.
-        Some(signal) if signal.eq_ignore_ascii_case("c") => Stop::Signal("SIGINT".to_owned()),
+        // `^C` is how eggs spell an interrupt. Some spell it `^^C`, which Wings
+        // does not know and answers with SIGKILL; the interrupt is what was meant.
+        Some(signal) if signal.trim_start_matches('^').eq_ignore_ascii_case("c") => {
+            Stop::Signal("SIGINT".to_owned())
+        }
         Some(signal) => Stop::Signal(signal.to_ascii_uppercase()),
         None if raw.is_empty() => Stop::Signal("SIGTERM".to_owned()),
         None => Stop::Command(raw.to_owned()),
@@ -181,15 +190,13 @@ fn variables(root: &Value) -> Result<Vec<Variable>, ImportError> {
         if !named_well {
             return Err(ImportError::Shape(what("env_variable")));
         }
-        let rules = match item.get("rules") {
+        let mut rules: Vec<String> = match item.get("rules") {
             // Older eggs join the rules with `|`, as Laravel accepts.
-            Some(Value::String(joined)) => joined
-                .split('|')
-                .filter(|rule| !rule.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            Some(Value::String(joined)) => joined.split('|').map(str::to_owned).collect(),
             other => list(other, &what("rules"))?,
         };
+        // A `|` at the end, or an empty entry in the list, is not a rule.
+        rules.retain(|rule| !rule.is_empty());
         let sort = item.get("sort").and_then(Value::as_i64).unwrap_or(i64::MAX);
         variables.push((
             sort,
@@ -335,6 +342,7 @@ variables:
     user_editable: true
     rules:
       - required
+      - ''
       - 'regex:/^([\w\d._-]+)(\.jar)$/'
   -
     sort: 1
@@ -457,6 +465,27 @@ variables:
     }
 
     #[test]
+    fn reads_the_ways_eggs_say_stop() {
+        let interrupt = Stop::Signal("SIGINT".to_owned());
+        for spelled in ["^C", "^c", "^^C"] {
+            assert_eq!(stop(spelled), interrupt, "{spelled}");
+        }
+        assert_eq!(stop("^sigterm"), Stop::Signal("SIGTERM".to_owned()));
+        assert_eq!(stop(""), Stop::Signal("SIGTERM".to_owned()));
+        assert_eq!(stop("end"), Stop::Command("end".to_owned()));
+    }
+
+    /// Core keeps a template as JSON and reads it back for every server it runs.
+    #[test]
+    fn a_template_survives_being_stored() {
+        for egg in [PELICAN, PTERODACTYL] {
+            let template = import(egg).unwrap();
+            let stored = serde_json::to_string(&template).unwrap();
+            assert_eq!(serde_json::from_str::<Template>(&stored).unwrap(), template);
+        }
+    }
+
+    #[test]
     fn refuses_what_it_cannot_run() {
         let unknown = PELICAN.replace("PLCN_v3", "PLCN_v9");
         assert!(
@@ -473,6 +502,10 @@ variables:
         assert!(
             matches!(import(&hostile), Err(ImportError::Shape(what)) if what == "variables[0].env_variable")
         );
+
+        let said = import("name: one\nname: two").unwrap_err().to_string();
+        assert!(said.starts_with("not valid YAML: line 2 "), "{said}");
+        assert!(!said.contains('\n'), "{said}");
 
         let by_pattern = PELICAN.replace("server-ip: ''", "server-ip: { 'regex:^127': '0.0.0.0' }");
         assert!(matches!(

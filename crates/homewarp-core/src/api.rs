@@ -1,14 +1,18 @@
 //! The HTTP API under `/api/v1` (PLAN.md §5.8). The OpenAPI document is built
 //! from the handlers here, and the web client's types are generated from it.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    borrow::Cow,
+    sync::{Arc, OnceLock},
+};
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{FromRequestParts, Request, State},
     http::{
         HeaderMap, Method, StatusCode,
         header::{HOST, ORIGIN, SET_COOKIE},
+        request::Parts,
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,14 +22,14 @@ use sqlx::SqlitePool;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::{auth, ui};
+use crate::{auth, templates, ui};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What every request handler can reach.
 #[derive(Clone)]
 pub struct AppState {
-    db: SqlitePool,
+    pub(crate) db: SqlitePool,
     setup_code: Option<Arc<str>>,
 }
 
@@ -62,6 +66,7 @@ fn api() -> OpenApiRouter<AppState> {
         .routes(routes!(setup))
         .routes(routes!(login))
         .routes(routes!(logout))
+        .merge(templates::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.
@@ -144,21 +149,23 @@ struct LoginRequest {
 
 /// The body of every error response.
 #[derive(Serialize, ToSchema)]
-struct ProblemBody {
+pub(crate) struct ProblemBody {
     /// A sentence fit to show to the person using the panel.
     error: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-enum Problem {
+pub(crate) enum Problem {
     #[error("{0}")]
-    Invalid(&'static str),
+    Invalid(Cow<'static, str>),
     #[error("{0}")]
     Unauthorized(&'static str),
     #[error("{0}")]
     Forbidden(&'static str),
     #[error("{0}")]
-    Conflict(&'static str),
+    NotFound(&'static str),
+    #[error("{0}")]
+    Conflict(Cow<'static, str>),
     #[error("Something went wrong on the server. Its log has the details.")]
     Internal(#[from] anyhow::Error),
 }
@@ -175,6 +182,7 @@ impl IntoResponse for Problem {
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(error) => {
                 tracing::error!("{error:#}");
@@ -232,8 +240,9 @@ async fn setup(
     State(state): State<AppState>,
     Json(request): Json<SetupRequest>,
 ) -> Result<Response, Problem> {
-    const DONE: Problem =
-        Problem::Conflict("This Homewarp already has its account. Sign in instead.");
+    const DONE: Problem = Problem::Conflict(Cow::Borrowed(
+        "This Homewarp already has its account. Sign in instead.",
+    ));
     // Asked first, so that a finished setup says so whatever code is sent.
     let (false, Some(code)) = (has_users(&state.db).await?, state.setup_code()) else {
         return Err(DONE);
@@ -371,6 +380,20 @@ async fn current_user(db: &SqlitePool, headers: &HeaderMap) -> Result<Option<Use
     Ok(found.map(|(id, username)| User { id, username }))
 }
 
+/// A request from someone signed in. An endpoint is private by asking for this.
+pub(crate) struct SignedIn;
+
+impl FromRequestParts<AppState> for SignedIn {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        match current_user(&state.db, &parts.headers).await? {
+            Some(_) => Ok(Self),
+            None => Err(Problem::Unauthorized("Sign in first.")),
+        }
+    }
+}
+
 /// Runs slow, CPU-bound work (password hashing) off the async threads.
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
@@ -385,7 +408,7 @@ fn valid_username(typed: &str) -> Result<&str, Problem> {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     if name.is_empty() || name.len() > 32 || !name.chars().all(allowed) {
         return Err(Problem::Invalid(
-            "A username is 1 to 32 letters, digits, dots, dashes or underscores.",
+            "A username is 1 to 32 letters, digits, dots, dashes or underscores.".into(),
         ));
     }
     Ok(name)
@@ -394,6 +417,8 @@ fn valid_username(typed: &str) -> Result<&str, Problem> {
 fn valid_password(password: &str) -> Result<(), Problem> {
     match password.chars().count() {
         10..=256 => Ok(()),
-        _ => Err(Problem::Invalid("A password is 10 to 256 characters.")),
+        _ => Err(Problem::Invalid(
+            "A password is 10 to 256 characters.".into(),
+        )),
     }
 }
