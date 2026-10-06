@@ -47,6 +47,7 @@ use crate::{
     audit, auth, panel,
     runtime::Runtime,
     servers::{self, PortProtocol},
+    settings,
 };
 
 /// The two ends' addresses inside the tunnel (PLAN.md §5.3, Addressing).
@@ -670,8 +671,12 @@ impl Tunnel {
                 protocol: Protocol::Tcp,
             });
         }
+        let rate = Some(settings::new_connections(&self.db).await?);
         let told = lock(&self.told).clone();
-        if let Some(told) = told.filter(|told| told.forwards == forwards && told.mode == mode) {
+        let same = |told: &Desired| {
+            told.forwards == forwards && told.mode == mode && told.new_per_second == rate
+        };
+        if let Some(told) = told.filter(same) {
             let heard: (Status, _) =
                 ask::<_, ()>(gate, &gate.keys, "GET", "/v1/status", None).await?;
             // A Gate that has forgotten what it was told, a new VPS say, is told again.
@@ -683,6 +688,7 @@ impl Tunnel {
             generation: auth::now().unsigned_abs(),
             mode,
             forwards,
+            new_per_second: rate,
         };
         let heard = ask(gate, &gate.keys, "PUT", "/v1/state", Some(&desired)).await?;
         *lock(&self.told) = Some(desired);

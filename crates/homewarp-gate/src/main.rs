@@ -50,6 +50,9 @@ use tokio::signal::unix::{SignalKind, signal};
 const DIR: &str = "/var/lib/homewarp-gate";
 /// More than any home will ask for, and few enough to refuse a mistake.
 const MOST_FORWARDS: usize = 1024;
+/// The most new connections a second from one address that a Gate will be
+/// told to let through: past this there is no limit to speak of.
+const MOST_NEW_PER_SECOND: u32 = 100_000;
 /// How often the kernel is looked at, in case something else has undone the setup.
 const LOOK: Duration = Duration::from_secs(30);
 /// How long after agreeing to change keys the change is made: long enough for
@@ -412,6 +415,12 @@ fn carry_out(gate: &Gate, wanted: &Desired) -> anyhow::Result<()> {
         "{} forwards is more than a Gate takes",
         wanted.forwards.len()
     );
+    if let Some(rate) = wanted.new_per_second {
+        ensure!(
+            (1..=MOST_NEW_PER_SECOND).contains(&rate),
+            "{rate} new connections a second is not a limit a Gate keeps"
+        );
+    }
     let listen_port = lock(&gate.config).listen_port;
     for forward in &wanted.forwards {
         // Forwarded, the tunnel's own port would send the tunnel into itself.

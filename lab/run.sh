@@ -304,6 +304,30 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   done
   if [ "$(counted)" -gt "$before" ]; then ok "home has added it to the hour: $(counted) bytes in the last day"; else fail "home added nothing to the $before bytes it had"; fi
 
+  echo "== the limit on new connections: how many one address may open in a second"
+  # How many of twenty connections opened at the same moment are answered.
+  burst() {
+    dc exec -T client sh -c "for _ in \$(seq 20); do socat -u TCP:$GATE_IP:$PORT,connect-timeout=2 - 2>/dev/null & done; wait" | grep -c '^tcp ' || true
+  }
+  limit_is() {  # waits for the Gate's rules to carry a limit
+    for _ in $(seq 15); do
+      dc exec -T gate nft list table inet homewarp | grep -q "limit rate over $1/second burst $(($1 * 2)) packets" && return 0
+      sleep 1
+    done
+    return 1
+  }
+  got=$(burst)
+  if [ "$got" -ge 18 ]; then ok "control: at thirty a second, twenty at once get through ($got)"; else fail "control: of twenty at once, only $got got through"; fi
+  core PUT /settings '{"new_connections":2}' >/dev/null
+  if limit_is 2; then ok "the Gate is told the limit the owner set: 2 a second"; else fail "the Gate's rules do not carry the limit that was set"; fi
+  got=$(burst)
+  if [ "$got" -ge 1 ] && [ "$got" -le 12 ]; then ok "of twenty at once, $got get through and the rest are dropped at the Gate"; else fail "of twenty at once, $got got through with two a second allowed"; fi
+  check "the Gate counted what it dropped" "$(dc exec -T gate nft list chain inet homewarp to_home | grep -c 'limit rate over.*counter packets [1-9]')" "1"
+  core PUT /settings '{"new_connections":30}' >/dev/null
+  if limit_is 30; then ok "and thirty a second again"; else fail "the limit was not set back"; fi
+  got=$(burst)
+  if [ "$got" -ge 18 ]; then ok "with which twenty at once get through as before ($got)"; else fail "of twenty at once, only $got got through after the limit was set back"; fi
+
   echo "== control: without the reply mark nothing comes back, so the return path is what carries it"
   dc exec -T home nft flush chain inet homewarp mark_in
   dc exec -T home nft add rule inet homewarp mark_in iifname homewarp0 ct state new ct mark set 0x4857

@@ -35,6 +35,7 @@ export function SettingsPage() {
         <Passkeys />
         {session.user?.owner && <Accounts />}
         {session.user?.owner && <Resolvers />}
+        {session.user?.owner && <NewConnections />}
       </main>
     </>
   )
@@ -201,7 +202,6 @@ function TwoSteps() {
   )
 }
 
-/** Where servers look names up: what a server asks when it fetches a plugin, or checks a player's account. */
 /**
  * The passkeys of the account signed in here. Nothing on the page waits for
  * them: the section comes when its answer does.
@@ -289,6 +289,7 @@ function Passkeys() {
   )
 }
 
+/** Where servers look names up: what a server asks when it fetches a plugin, or checks a player's account. */
 function Resolvers() {
   const queryClient = useQueryClient()
   const { data: settings } = useSuspenseQuery(settingsQuery)
@@ -326,6 +327,56 @@ function Resolvers() {
         {changing.isSuccess && (
           <p role="status" className="text-small text-ink-muted">
             Kept. Servers ask there from their next start.
+          </p>
+        )}
+        <div>
+          <Button type="submit" busy={changing.isPending}>
+            Save
+          </Button>
+        </div>
+      </form>
+    </Section>
+  )
+}
+
+/** How many new connections a second a connected VPS lets one address open to the servers. */
+function NewConnections() {
+  const queryClient = useQueryClient()
+  const { data: settings } = useSuspenseQuery(settingsQuery)
+  const changing = useMutation({
+    mutationFn: changeSettings,
+    onSuccess: (kept) => queryClient.setQueryData(settingsQuery.queryKey, kept),
+  })
+
+  return (
+    <Section
+      title="New connections"
+      lead="A connected VPS lets each address on the internet open this many new connections a second to your servers, and twice as many at once. More are dropped at the VPS, so that one address cannot crowd the others out. Players who are already connected are not counted."
+    >
+      <form
+        // What was kept is what the field starts from again.
+        key={settings.new_connections}
+        className="flex max-w-80 flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault()
+          changing.mutate({ new_connections: Number(new FormData(event.currentTarget).get('new_connections')) })
+        }}
+      >
+        <Field
+          label="A second, from one address"
+          name="new_connections"
+          type="number"
+          mono
+          required
+          min={1}
+          max={10000}
+          defaultValue={settings.new_connections}
+          hint="30 unless you say otherwise."
+        />
+        {changing.error && <Problem>{changing.error.message}</Problem>}
+        {changing.isSuccess && (
+          <p role="status" className="text-small text-ink-muted">
+            Kept. A connected VPS is told at once.
           </p>
         )}
         <div>

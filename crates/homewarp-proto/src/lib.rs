@@ -34,6 +34,11 @@ pub enum Mode {
     Nat,
 }
 
+/// How many new connections a second the Gate lets one address open through
+/// the forwarded ports, unless it is told another number. More are dropped
+/// there, before they are sent home.
+pub const NEW_PER_SECOND: u32 = 30;
+
 /// All that the Gate is to do. Core sends the whole of it every time, so the
 /// Gate never has to work out what changed, and keeps the last one it was
 /// sent so that it comes back from a reboot doing the same.
@@ -45,6 +50,12 @@ pub struct Desired {
     pub mode: Mode,
     #[serde(default)]
     pub forwards: Vec<Forward>,
+    /// How many new connections a second one address may open through the
+    /// forwarded ports, with twice as many at once. Nothing leaves it at
+    /// [`NEW_PER_SECOND`], which is also what a Core that knows of no such
+    /// number gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_per_second: Option<u32>,
 }
 
 /// How the Gate is doing.

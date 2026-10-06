@@ -33,6 +33,7 @@ export type ScheduleSettings = components['schemas']['ScheduleSettings']
 export type Task = components['schemas']['Task']
 export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
+type SettingsChange = components['schemas']['SettingsChange']
 export type Panel = components['schemas']['PanelView']
 export type Passkeys = components['schemas']['Passkeys']
 export type MakeOptions = components['schemas']['MakeOptions']
@@ -425,8 +426,8 @@ export async function getSettings(): Promise<Settings> {
   return data ?? fail(error)
 }
 
-/** Changes what is set. The answer is the settings as they are kept. */
-export async function changeSettings(body: Settings): Promise<Settings> {
+/** Changes what is named, and leaves the rest. The answer is the settings as they are kept. */
+export async function changeSettings(body: SettingsChange): Promise<Settings> {
   const { data, error } = await signedIn(() => api.PUT('/api/v1/settings', { body }))
   return data ?? fail(error)
 }

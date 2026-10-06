@@ -3222,13 +3222,13 @@
         }
       },
       "put": {
-        "summary": "Changes what is set. Where servers look names up counts from each\nserver's next start: one that is running goes on asking where it asked.",
+        "summary": "Changes what is set, and leaves what is not named as it is. Where servers\nlook names up counts from each server's next start: one that is running\ngoes on asking where it asked. The limit on new connections counts as soon\nas the Gate is told, which is at once.",
         "operationId": "change_settings",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Settings"
+                "$ref": "#/components/schemas/SettingsChange"
               }
             }
           },
@@ -3265,7 +3265,7 @@
             }
           },
           "422": {
-            "description": "A resolver is not an address servers can reach.",
+            "description": "A resolver is not an address servers can reach, or the limit is not one that can be set.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5331,15 +5331,45 @@
       "Settings": {
         "type": "object",
         "required": [
-          "resolvers"
+          "resolvers",
+          "new_connections"
         ],
         "properties": {
+          "new_connections": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many new connections a second a connected VPS lets one address on\nthe internet open to the servers, with twice as many at once. More\nare dropped at the VPS, so that one address cannot crowd the rest out.",
+            "minimum": 0
+          },
           "resolvers": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "Where servers look names up: one to three IPv4 addresses on the\ninternet. A change counts from each server's next start."
+          }
+        }
+      },
+      "SettingsChange": {
+        "type": "object",
+        "description": "What is to be changed. What is not named is left as it is.",
+        "properties": {
+          "new_connections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "resolvers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

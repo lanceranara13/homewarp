@@ -1591,12 +1591,15 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
     let settings = "/api/v1/settings";
 
     let first = panel.get(settings, cookie).await;
-    assert_eq!(first.body, json!({ "resolvers": ["1.1.1.1", "1.0.0.1"] }));
+    assert_eq!(
+        first.body,
+        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30 })
+    );
     // Kept each once, as addresses are written.
     let quad9 = json!({ "resolvers": ["9.9.9.9", " 9.9.9.9 ", "149.112.112.112"] });
     let changed = panel.put(settings, quad9, cookie).await;
     assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
-    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"] });
+    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30 });
     assert_eq!(changed.body, kept);
 
     for (wrong, said) in [
@@ -1621,6 +1624,25 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
         assert_eq!(answer.body["error"], said);
     }
     assert_eq!(panel.get(settings, cookie).await.body, kept);
+
+    // The limit on new connections is set by itself, and the resolvers stay.
+    let limited = panel
+        .put(settings, json!({ "new_connections": 5 }), cookie)
+        .await;
+    assert_eq!(limited.status, StatusCode::OK, "{}", limited.body);
+    assert_eq!(limited.body["new_connections"], 5);
+    assert_eq!(limited.body["resolvers"], kept["resolvers"]);
+    for wrong in [json!(0), json!(10_001), json!(-1), json!("many")] {
+        let answer = panel
+            .put(settings, json!({ "new_connections": wrong }), cookie)
+            .await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{wrong}");
+    }
+    // Nothing named, nothing changed.
+    let same = panel.put(settings, json!({}), cookie).await;
+    assert_eq!(same.body["new_connections"], 5);
+    assert_eq!(same.body["resolvers"], kept["resolvers"]);
+
     assert_eq!(
         panel.get(settings, None).await.status,
         StatusCode::UNAUTHORIZED

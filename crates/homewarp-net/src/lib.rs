@@ -18,7 +18,7 @@ use defguard_wireguard_rs::{
     InterfaceConfiguration, Kernel, WGApi, WireguardInterfaceApi, key::Key, net::IpAddrMask,
     peer::Peer,
 };
-use homewarp_proto::{Desired, Mode, Protocol, Through};
+use homewarp_proto::{Desired, Mode, NEW_PER_SECOND, Protocol, Through};
 
 /// What both ends call the tunnel's interface.
 pub const INTERFACE: &str = "homewarp0";
@@ -144,6 +144,9 @@ fn gate_rules(
             false => format!(" elements = {{ {} }}", ports.join(", ")),
         }
     };
+    // Twice as many at once as in a second: a player who joins opens a few.
+    let rate = desired.new_per_second.unwrap_or(NEW_PER_SECOND).max(1);
+    let burst = rate.saturating_mul(2);
     let masquerade = match desired.mode {
         Mode::Transparent => "",
         Mode::Nat => "\n    oifname \"homewarp0\" masquerade",
@@ -176,7 +179,7 @@ table inet homewarp {{
     iifname "homewarp0" ct state new counter drop{from_home}
   }}
   chain to_home {{
-    ct state new add @newconn {{ ip saddr limit rate over 30/second burst 60 packets }} counter drop
+    ct state new add @newconn {{ ip saddr limit rate over {rate}/second burst {burst} packets }} counter drop
     tcp flags syn tcp option maxseg size set rt mtu{to_home}
   }}
 }}"#,
@@ -631,7 +634,28 @@ mod tests {
                 .iter()
                 .map(|&(port, protocol)| Forward { port, protocol })
                 .collect(),
+            new_per_second: None,
         }
+    }
+
+    #[test]
+    fn the_limit_on_new_connections_is_the_one_asked_for_or_thirty_a_second() {
+        let limit = |asked: Option<u32>| {
+            let mut desired = desired(Mode::Transparent, &[(25565, Protocol::Tcp)]);
+            desired.new_per_second = asked;
+            let rules = gate_ruleset("eth0", HOME, &desired, None).unwrap();
+            let (_, after) = rules.split_once("limit rate over ").unwrap();
+            after.split(" }").next().unwrap().to_owned()
+        };
+        assert_eq!(limit(None), "30/second burst 60 packets");
+        assert_eq!(limit(Some(5)), "5/second burst 10 packets");
+        assert_eq!(limit(Some(2000)), "2000/second burst 4000 packets");
+        // None at all would be no server at all, and is not what is written.
+        assert_eq!(limit(Some(0)), "1/second burst 2 packets");
+        assert_eq!(
+            limit(Some(u32::MAX)),
+            format!("{0}/second burst {0} packets", u32::MAX)
+        );
     }
 
     #[test]
