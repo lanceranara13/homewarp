@@ -246,6 +246,19 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   check "and not for tcp" "$(dc exec -T gate nft list map inet homewarp fwd_tcp | grep -c "$VOICE : " || true)" "0"
   check "as Docker publishes it at home" "$(dc exec -T home docker ps --format '{{.Ports}}' --filter publish=$VOICE/udp | grep -o "$VOICE->$VOICE/[a-z]*" | sort -u | tr '\n' ' ')" "$VOICE->$VOICE/udp "
 
+  echo "== traffic: what goes through a port, as the Gate counts it and home adds it up"
+  counted() { core GET /gate | python3 -c 'import json, sys; print(sum(port["traffic_bytes"] for port in json.load(sys.stdin)["ports"]))'; }
+  check "the Gate has counted through the ports just used" \
+    "$(gate_says | python3 -c 'import json, sys; print(sum(1 for port in json.load(sys.stdin)["traffic"] if port["bytes"] > 0) >= 2)')" "True"
+  before=$(counted)
+  # Home hears of it the next time it asks the Gate, which is every few seconds.
+  for _ in $(seq 25); do
+    seen tcp >/dev/null
+    [ "$(counted)" -gt "$before" ] && break
+    sleep 1
+  done
+  if [ "$(counted)" -gt "$before" ]; then ok "home has added it to the hour: $(counted) bytes in the last day"; else fail "home added nothing to the $before bytes it had"; fi
+
   echo "== control: without the reply mark nothing comes back, so the return path is what carries it"
   dc exec -T home nft flush chain inet homewarp mark_in
   dc exec -T home nft add rule inet homewarp mark_in iifname homewarp0 ct state new ct mark set 0x4857

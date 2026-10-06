@@ -33,7 +33,8 @@ use axum::{
     routing::{get, post, put},
 };
 use homewarp_net::{
-    Link, ProbeForward, apply, bring_up, gate_ruleset, has_table, heard, new_keypair,
+    Link, ProbeForward, apply, bring_up, counted, gate_ruleset, gate_ruleset_uncounted, has_table,
+    heard, new_keypair,
 };
 use homewarp_proto::{Desired, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status};
 use serde::{Deserialize, Serialize};
@@ -124,21 +125,30 @@ fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Gate {
     /// The table for `desired`, with the port of a probe in it if there is one.
-    fn rules(&self, desired: &Desired) -> anyhow::Result<String> {
+    fn rules(&self, desired: &Desired, counted: bool) -> anyhow::Result<String> {
         let config = lock(&self.config);
         let probe = lock(&self.probe).as_ref().map(|probe| probe.forward);
-        Ok(gate_ruleset(
-            &config.wan,
-            config.home_address,
-            desired,
-            probe,
-        )?)
+        let rules = match counted {
+            true => gate_ruleset,
+            false => gate_ruleset_uncounted,
+        };
+        Ok(rules(&config.wan, config.home_address, desired, probe)?)
+    }
+
+    /// Puts the table for `desired` in the kernel: with a count of what goes
+    /// through each port, or without, where this machine's nft is too old to
+    /// keep one and refuses the table that asks for it.
+    fn put(&self, desired: &Desired) -> anyhow::Result<()> {
+        match apply(&self.rules(desired, true)?) {
+            Err(homewarp_net::Error::Refused(_)) => Ok(apply(&self.rules(desired, false)?)?),
+            done => Ok(done?),
+        }
     }
 
     /// Puts the table in the kernel again, as it should be now.
     fn apply_again(&self) -> anyhow::Result<()> {
         let desired = lock(&self.desired).clone();
-        Ok(apply(&self.rules(&desired)?)?)
+        self.put(&desired)
     }
 }
 
@@ -390,7 +400,7 @@ fn carry_out(gate: &Gate, wanted: &Desired) -> anyhow::Result<()> {
             bail!("port {} cannot be forwarded", forward.port);
         }
     }
-    apply(&gate.rules(wanted)?)?;
+    gate.put(wanted)?;
     // Written beside the file and moved over it, so that it is never half there.
     let kept = gate.dir.join("desired.json");
     let beside = gate.dir.join("desired.json.new");
@@ -415,6 +425,7 @@ async fn status(
         home_endpoint: heard.endpoint,
         received_bytes: heard.received_bytes,
         sent_bytes: heard.sent_bytes,
+        traffic: counted(),
     }))
 }
 

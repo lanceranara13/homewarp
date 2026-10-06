@@ -63,6 +63,20 @@ pub struct Status {
     /// Through the tunnel, counted from when its interface was made.
     pub received_bytes: u64,
     pub sent_bytes: u64,
+    /// Through each forwarded port. Nothing from a Gate that does not count,
+    /// or on a VPS whose nft cannot.
+    #[serde(default)]
+    pub traffic: Vec<Through>,
+}
+
+/// What has gone through one forwarded port, both ways together, counted from
+/// when the Gate last set its rules: which it does anew whenever what it is to
+/// forward changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Through {
+    pub port: u16,
+    pub protocol: Protocol,
+    pub bytes: u64,
 }
 
 /// Asks the Gate to make keys of its own, in place of those its join token

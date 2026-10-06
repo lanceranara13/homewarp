@@ -18,7 +18,7 @@ use defguard_wireguard_rs::{
     InterfaceConfiguration, Kernel, WGApi, WireguardInterfaceApi, key::Key, net::IpAddrMask,
     peer::Peer,
 };
-use homewarp_proto::{Desired, Mode, Protocol};
+use homewarp_proto::{Desired, Mode, Protocol, Through};
 
 /// What both ends call the tunnel's interface.
 pub const INTERFACE: &str = "homewarp0";
@@ -74,9 +74,57 @@ pub fn gate_ruleset(
     desired: &Desired,
     probe: Option<ProbeForward>,
 ) -> Result<String, Error> {
+    gate_rules(wan, home, desired, probe, true)
+}
+
+/// As [`gate_ruleset`], without the count of what passes through each port:
+/// for a VPS whose nft is too old to keep one.
+pub fn gate_ruleset_uncounted(
+    wan: &str,
+    home: Ipv4Addr,
+    desired: &Desired,
+    probe: Option<ProbeForward>,
+) -> Result<String, Error> {
+    gate_rules(wan, home, desired, probe, false)
+}
+
+fn gate_rules(
+    wan: &str,
+    home: Ipv4Addr,
+    desired: &Desired,
+    probe: Option<ProbeForward>,
+    counted: bool,
+) -> Result<String, Error> {
     if !named_well(wan) {
         return Err(Error::Interface(wan.to_owned()));
     }
+    // The forwarded ports once more, as a set whose every element keeps a
+    // count of what matched it: what went through each port, either way. The
+    // probe's port is not among them, being no server's.
+    let through = |protocol: Protocol| {
+        let ports: Vec<String> = desired
+            .forwards
+            .iter()
+            .filter(|forward| forward.protocol == protocol)
+            .map(|forward| forward.port.to_string())
+            .collect();
+        match ports.is_empty() {
+            true => String::new(),
+            false => format!(" elements = {{ {} }}", ports.join(", ")),
+        }
+    };
+    let (sets, to_home, from_home) = match counted {
+        true => (
+            format!(
+                "\n  set through_tcp {{ type inet_service; counter;{} }}\n  set through_udp {{ type inet_service; counter;{} }}",
+                through(Protocol::Tcp),
+                through(Protocol::Udp)
+            ),
+            "\n    tcp dport @through_tcp\n    udp dport @through_udp",
+            "\n    iifname \"homewarp0\" tcp sport @through_tcp\n    iifname \"homewarp0\" udp sport @through_udp",
+        ),
+        false => (String::new(), "", ""),
+    };
     let map = |protocol: Protocol| {
         let mut ports: Vec<String> = desired
             .forwards
@@ -111,7 +159,7 @@ delete table inet homewarp
 table inet homewarp {{
   map fwd_tcp {{ type inet_service : ipv4_addr . inet_service;{tcp} }}
   map fwd_udp {{ type inet_service : ipv4_addr . inet_service;{udp} }}
-  set newconn {{ type ipv4_addr; size 65535; flags dynamic,timeout; timeout 1m; }}
+  set newconn {{ type ipv4_addr; size 65535; flags dynamic,timeout; timeout 1m; }}{sets}
 
   chain prerouting {{
     type nat hook prerouting priority dstnat; policy accept;
@@ -125,11 +173,11 @@ table inet homewarp {{
     type filter hook forward priority filter; policy accept;
     oifname "homewarp0" ct status dnat goto to_home
     oifname "homewarp0" counter drop
-    iifname "homewarp0" ct state new counter drop
+    iifname "homewarp0" ct state new counter drop{from_home}
   }}
   chain to_home {{
     ct state new add @newconn {{ ip saddr limit rate over 30/second burst 60 packets }} counter drop
-    tcp flags syn tcp option maxseg size set rt mtu
+    tcp flags syn tcp option maxseg size set rt mtu{to_home}
   }}
 }}"#,
         tcp = map(Protocol::Tcp),
@@ -410,6 +458,55 @@ pub fn probe_packets() -> Result<u64, Error> {
         .ok_or_else(|| Error::Refused(format!("nft said of the counter: {}", said.trim())))
 }
 
+/// What has gone through each forwarded port since the table was last put in
+/// the kernel, as the sets of [`gate_ruleset`] have counted it. Nothing where
+/// the table was made without them.
+pub fn counted() -> Vec<Through> {
+    let mut all = Vec::new();
+    for (set, protocol) in [
+        ("through_tcp", Protocol::Tcp),
+        ("through_udp", Protocol::Udp),
+    ] {
+        let listed = Command::new("nft")
+            .args(["list", "set", "inet", "homewarp", set])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        let Ok(listed) = listed else { continue };
+        if listed.status.success() {
+            let listing = String::from_utf8_lossy(&listed.stdout);
+            all.extend(through(&listing).into_iter().map(|(port, bytes)| Through {
+                port,
+                protocol,
+                bytes,
+            }));
+        }
+    }
+    all
+}
+
+/// Reads the ports and their counts off what nft lists of such a set:
+/// `elements = { 25565 counter packets 12 bytes 3400, 27015 counter packets 0 bytes 0 }`.
+fn through(listing: &str) -> Vec<(u16, u64)> {
+    let Some((_, elements)) = listing.split_once("elements = {") else {
+        return Vec::new();
+    };
+    let elements = elements.split('}').next().unwrap_or_default();
+    elements
+        .split(',')
+        .filter_map(|element| {
+            let mut words = element.split_whitespace();
+            let port = words.next()?.parse().ok()?;
+            let bytes = words
+                .skip_while(|word| *word != "bytes")
+                .nth(1)
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0);
+            Some((port, bytes))
+        })
+        .collect()
+}
+
 /// The interface this machine's default route leaves by: on a VPS, the one
 /// players arrive on. None if there is no default route.
 pub fn default_interface() -> Option<String> {
@@ -468,7 +565,9 @@ mod tests {
 
     use homewarp_proto::{Desired, Forward, Mode, Protocol};
 
-    use super::{Error, ProbeForward, default_route, gate_ruleset};
+    use super::{
+        Error, ProbeForward, default_route, gate_ruleset, gate_ruleset_uncounted, through,
+    };
 
     const HOME: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 2);
 
@@ -504,6 +603,58 @@ mod tests {
         assert!(!rules.contains("masquerade"));
         // The table is replaced whole.
         assert!(rules.starts_with("table inet homewarp\ndelete table inet homewarp\n"));
+    }
+
+    #[test]
+    fn counts_what_goes_through_each_port_where_nft_can() {
+        let asked = [
+            (25565, Protocol::Tcp),
+            (25565, Protocol::Udp),
+            (27015, Protocol::Udp),
+        ];
+        let wanted = desired(Mode::Transparent, &asked);
+        let rules = gate_ruleset("eth0", HOME, &wanted, None).unwrap();
+        assert!(
+            rules.contains("set through_tcp { type inet_service; counter; elements = { 25565 } }")
+        );
+        assert!(rules.contains(
+            "set through_udp { type inet_service; counter; elements = { 25565, 27015 } }"
+        ));
+        // To home once it has been let through, and from home whatever answers.
+        let to_home = rules.find("chain to_home").unwrap();
+        assert!(rules[to_home..].contains("\n    udp dport @through_udp\n"));
+        assert!(rules[..to_home].contains("iifname \"homewarp0\" tcp sport @through_tcp\n"));
+        // With nothing forwarded the sets are there, and empty.
+        let none = gate_ruleset("eth0", HOME, &Desired::default(), None).unwrap();
+        assert!(none.contains("set through_tcp { type inet_service; counter; }"));
+
+        // For an nft that keeps no such counts, the same table without them.
+        let plain = gate_ruleset_uncounted("eth0", HOME, &wanted, None).unwrap();
+        assert!(!plain.contains("through_"));
+        assert!(plain.contains("iifname \"eth0\" dnat ip to tcp dport map @fwd_tcp"));
+        let without: String = rules
+            .lines()
+            .filter(|line| !line.contains("through_"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(plain, without);
+    }
+
+    #[test]
+    fn reads_the_counts_off_what_nft_lists() {
+        let listing = "table inet homewarp {\n\tset through_udp {\n\t\ttype inet_service\n\t\tcounter\n\t\telements = { 25565 counter packets 12 bytes 3400,\n\t\t\t     27015 counter packets 0 bytes 0 }\n\t}\n}\n";
+        assert_eq!(through(listing), [(25565, 3400), (27015, 0)]);
+        // Nothing forwarded, and an nft that listed no counts.
+        assert_eq!(
+            through(
+                "table inet homewarp {\n\tset through_tcp {\n\t\ttype inet_service\n\t\tcounter\n\t}\n}\n"
+            ),
+            []
+        );
+        assert_eq!(
+            through("elements = { 25565, 27015 }"),
+            [(25565, 0), (27015, 0)]
+        );
     }
 
     #[test]
