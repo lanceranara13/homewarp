@@ -54,6 +54,23 @@ pub fn new_token() -> String {
         .collect()
 }
 
+/// A random (version 4) UUID, written the usual way. It names a server's
+/// directory and containers, and is what eggs are given as `P_SERVER_UUID`.
+pub fn new_uuid() -> String {
+    let mut bytes = random::<16>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
 /// What the database holds in place of a token.
 pub fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()

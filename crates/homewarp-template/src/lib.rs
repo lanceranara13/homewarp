@@ -9,6 +9,7 @@
 
 mod egg;
 pub mod properties;
+pub mod rules;
 
 use serde::{Deserialize, Serialize};
 

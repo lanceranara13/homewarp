@@ -35,6 +35,15 @@
   --color-on-danger: #ffffff;
   --color-heart: #f0559a;
   --color-overlay: rgb(0 0 0 / 0.6);
+  /* Colour means state: these appear where a server is, and nowhere else. */
+  --color-state-running: #3dd68c;
+  --color-state-starting: #f5b73d;
+  --color-state-crashed: #ff6369;
+  --color-state-installing: #5eb0ef;
+  --color-state-offline: #8a919e;
+  /* The console is near-black in both themes. */
+  --color-console: #08090a;
+  --color-on-console: #d7dae0;
 
   --text-title: 24px;
   --text-title--line-height: 32px;
@@ -101,6 +110,11 @@
       --color-accent: #5b43e8;
       --color-accent-soft: rgb(91 67 232 / 0.08);
       --color-danger: #cf222e;
+      --color-state-running: #1a7f4b;
+      --color-state-starting: #a35a00;
+      --color-state-crashed: #cf222e;
+      --color-state-installing: #1d6fd1;
+      --color-state-offline: #646b77;
     }
   }
 

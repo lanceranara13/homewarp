@@ -1,6 +1,8 @@
 import { Check, CircleAlert, Copy, LoaderCircle } from 'lucide-react'
 import { useEffect, useId, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 
+import type { ServerState } from '../api/client'
+
 /** The Homewarp mark: a gate, seen from the front. */
 export function Mark({ className = 'size-5' }: { className?: string }) {
   return (
@@ -140,6 +142,36 @@ async function copy(text: string): Promise<boolean> {
   const copied = document.execCommand('copy')
   scratch.remove()
   return copied
+}
+
+const STATES: Record<ServerState, { word: string; tone: string; mark: 'dot' | 'pulse' | 'ring' | 'spinner' | 'alert' }> = {
+  installing: { word: 'Installing', tone: 'bg-state-installing/12 text-state-installing', mark: 'spinner' },
+  install_failed: { word: 'Install failed', tone: 'bg-state-crashed/12 text-state-crashed', mark: 'alert' },
+  offline: { word: 'Offline', tone: 'bg-state-offline/12 text-state-offline', mark: 'ring' },
+  starting: { word: 'Starting', tone: 'bg-state-starting/12 text-state-starting', mark: 'pulse' },
+  running: { word: 'Running', tone: 'bg-state-running/12 text-state-running', mark: 'dot' },
+  stopping: { word: 'Stopping', tone: 'bg-state-starting/12 text-state-starting', mark: 'pulse' },
+  crashed: { word: 'Crashed', tone: 'bg-state-crashed/12 text-state-crashed', mark: 'alert' },
+}
+
+/** What a server is doing: a mark and a word, never colour alone (DESIGN.md, Status pill). */
+export function StatusPill({ state }: { state: ServerState }) {
+  const { word, tone, mark } = STATES[state]
+  return (
+    <span className={`inline-flex h-5.5 shrink-0 items-center gap-1.5 rounded-full pr-2 pl-1.5 text-caption ${tone}`}>
+      {mark === 'spinner' ? (
+        <LoaderCircle aria-hidden className="size-3 animate-spin motion-reduce:animate-none" />
+      ) : mark === 'alert' ? (
+        <CircleAlert aria-hidden className="size-3" />
+      ) : (
+        <span
+          aria-hidden
+          className={`size-2 rounded-full ${mark === 'ring' ? 'border-[1.5px] border-current' : 'bg-current'} ${mark === 'pulse' ? 'animate-pulse motion-reduce:animate-none' : ''}`}
+        />
+      )}
+      {word}
+    </span>
+  )
 }
 
 /**

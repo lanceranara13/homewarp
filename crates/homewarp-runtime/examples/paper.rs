@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
         startup,
         variables: variables.clone(),
         memory_mb,
+        cpu_percent: 0,
         ports: vec![
             Port {
                 host_ip,

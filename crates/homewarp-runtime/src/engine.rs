@@ -72,6 +72,8 @@ pub struct Server {
     /// The template's variables and their values.
     pub variables: Vec<(String, String)>,
     pub memory_mb: u32,
+    /// How much processor it may use, where 100 is one core. 0 is no limit.
+    pub cpu_percent: u32,
     /// The first is the server's default port.
     pub ports: Vec<Port>,
     /// The user the server runs as. Deliberately not a user that exists on the host.
@@ -183,9 +185,14 @@ impl Engine {
         Ok(())
     }
 
+    /// Whether the daemon has `image` already, so that nothing waits for it.
+    pub async fn has_image(&self, image: &str) -> bool {
+        self.docker.inspect_image(image).await.is_ok()
+    }
+
     /// Pulls `image` unless the daemon already has it.
     pub async fn pull(&self, image: &str) -> Result<(), Error> {
-        if self.docker.inspect_image(image).await.is_ok() {
+        if self.has_image(image).await {
             return Ok(());
         }
         // Without a tag the daemon would fetch every tag of the repository.
@@ -322,6 +329,9 @@ impl Engine {
                 network_mode: Some(server.network.clone()),
                 memory: Some(server.memory_limit()),
                 memory_swap: Some(server.memory_limit()),
+                // Docker counts in billionths of a core.
+                nano_cpus: (server.cpu_percent > 0)
+                    .then(|| i64::from(server.cpu_percent) * 10_000_000),
                 pids_limit: Some(PIDS),
                 cap_drop: Some(vec!["ALL".to_owned()]),
                 security_opt: Some(vec!["no-new-privileges".to_owned()]),
@@ -350,6 +360,22 @@ impl Engine {
             .await?)
     }
 
+    /// Whether the server's container is running: one started before this
+    /// process was, perhaps.
+    pub async fn is_running(&self, server: &Server) -> Result<bool, Error> {
+        match self
+            .docker
+            .inspect_container(&server.container(), None)
+            .await
+        {
+            Ok(found) => Ok(found.state.and_then(|state| state.running) == Some(true)),
+            Err(DockerError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(false),
+            Err(other) => Err(other.into()),
+        }
+    }
+
     /// Sends a signal such as `SIGINT` to the server.
     pub async fn signal(&self, server: &Server, signal: &str) -> Result<(), Error> {
         let options = KillContainerOptionsBuilder::new().signal(signal).build();
@@ -367,6 +393,16 @@ impl Engine {
     /// Removes the server's container, running or not. Its files stay.
     pub async fn remove(&self, server: &Server) -> Result<(), Error> {
         self.remove_container(&server.container()).await
+    }
+
+    /// Removes every container the server with this id may have left behind,
+    /// its install's among them. Its files stay.
+    pub async fn forget(&self, id: &str) -> Result<(), Error> {
+        for kind in ["", "-install", "-chown"] {
+            self.remove_container(&format!("homewarp-{id}{kind}"))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn create_container(&self, name: &str, body: ContainerCreateBody) -> Result<(), Error> {
@@ -460,6 +496,7 @@ mod tests {
             startup: "java -jar server.jar".to_owned(),
             variables: vec![("SERVER_JARFILE".to_owned(), "server.jar".to_owned())],
             memory_mb,
+            cpu_percent: 0,
             ports: vec![Port {
                 host_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 port: 25565,

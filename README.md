@@ -7,8 +7,9 @@ home address stays hidden and your router needs no setup.
 
 > **Status: early build, not usable yet.** The tunnel design is proven against a real VPS
 > and a real Docker daemon: player addresses arrive intact, with no added latency. An
-> unmodified Paper egg installs, starts and stops. The panel has accounts, sign-in and a
-> Templates page that imports eggs; it cannot create a server yet. The plan is in
+> unmodified Paper egg installs, starts and stops. The panel imports eggs, makes servers
+> from them, installs, starts and stops them, and shows their console. There is no
+> tunnel in it yet, so they are reached on the home network only. The plan is in
 > [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works

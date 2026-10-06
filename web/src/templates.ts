@@ -24,9 +24,3 @@ export function templateQuery(id: number) {
     staleTime: FRESH_FOR,
   })
 }
-
-/** The id in a template's address, if that is what is there. */
-export function templateIdFrom(text: string | undefined): number | undefined {
-  const id = Number(text)
-  return Number.isSafeInteger(id) && id > 0 ? id : undefined
-}

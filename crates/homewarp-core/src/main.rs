@@ -1,6 +1,6 @@
 use std::{env, io::IsTerminal, net::SocketAddr, path::PathBuf};
 
-use homewarp_core::AppState;
+use homewarp_core::{AppState, Runtime};
 use tokio::signal::unix::{SignalKind, signal};
 
 #[tokio::main]
@@ -21,7 +21,16 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
     std::fs::create_dir_all(&data)?;
 
-    let state = AppState::start(homewarp_core::open(&data.join("homewarp.db")).await?).await?;
+    let db = homewarp_core::open(&data.join("homewarp.db")).await?;
+    // Without Docker the panel still opens. It says so where a server would be made.
+    let runtime = match Runtime::start(&data, db.clone()).await {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            tracing::warn!("Homewarp cannot run servers: {error:#}");
+            None
+        }
+    };
+    let state = AppState::start(db, runtime).await?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(
         "Homewarp {} is listening on http://{listen}",

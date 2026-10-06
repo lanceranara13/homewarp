@@ -22,7 +22,7 @@ use sqlx::SqlitePool;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::{auth, templates, ui};
+use crate::{auth, runtime::Runtime, servers, templates, ui};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -30,19 +30,25 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) db: SqlitePool,
+    /// What runs servers. There is none where Docker cannot be reached.
+    pub(crate) runtime: Option<Arc<Runtime>>,
     setup_code: Option<Arc<str>>,
 }
 
 impl AppState {
     /// Looks for an account and, if there is none yet, makes the code that
     /// creating the first one will ask for.
-    pub async fn start(db: SqlitePool) -> Result<Self, sqlx::Error> {
+    pub async fn start(db: SqlitePool, runtime: Option<Arc<Runtime>>) -> Result<Self, sqlx::Error> {
         let setup_code = if has_users(&db).await? {
             None
         } else {
             Some(auth::new_setup_code().into())
         };
-        Ok(Self { db, setup_code })
+        Ok(Self {
+            db,
+            runtime,
+            setup_code,
+        })
     }
 
     /// The setup code, if this process started without an account. Whoever can
@@ -67,6 +73,7 @@ fn api() -> OpenApiRouter<AppState> {
         .routes(routes!(login))
         .routes(routes!(logout))
         .merge(templates::routes())
+        .merge(servers::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.
@@ -166,6 +173,8 @@ pub(crate) enum Problem {
     NotFound(&'static str),
     #[error("{0}")]
     Conflict(Cow<'static, str>),
+    #[error("{0}")]
+    Unavailable(&'static str),
     #[error("Something went wrong on the server. Its log has the details.")]
     Internal(#[from] anyhow::Error),
 }
@@ -184,6 +193,7 @@ impl IntoResponse for Problem {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(error) => {
                 tracing::error!("{error:#}");
                 StatusCode::INTERNAL_SERVER_ERROR

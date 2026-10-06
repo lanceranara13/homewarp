@@ -197,6 +197,12 @@ fn variables(root: &Value) -> Result<Vec<Variable>, ImportError> {
         };
         // A `|` at the end, or an empty entry in the list, is not a rule.
         rules.retain(|rule| !rule.is_empty());
+        if let Some(reason) = crate::rules::unsupported(&rules) {
+            return Err(ImportError::Unsupported(format!(
+                "{}: {reason}",
+                what("rules")
+            )));
+        }
         let sort = item.get("sort").and_then(Value::as_i64).unwrap_or(i64::MAX);
         variables.push((
             sort,

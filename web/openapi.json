@@ -68,6 +68,274 @@
         }
       }
     },
+    "/api/v1/servers": {
+      "get": {
+        "summary": "Every server, by name. The one request the Servers page needs.",
+        "operationId": "list_servers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ServerSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Makes a server from a template, then installs and starts it. The answer\ncomes at once; the install goes on, and the server's console shows it.",
+        "operationId": "create_server",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewServer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Server"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name or the port belongs to another server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Something asked for will not do.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Homewarp cannot reach Docker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/servers/{id}": {
+      "get": {
+        "summary": "One server, with its state and the end of its console. A page that stays\nopen asks again to follow both.",
+        "operationId": "get_server",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Server"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Removes a server that is not running, with its files.",
+        "operationId": "remove_server",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The server and its files are gone."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The server is running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/servers/{id}/power": {
+      "post": {
+        "summary": "Starts, stops or kills a server, or installs one again whose install failed.\nThe answer comes once the request is on its way, not once it is carried out.",
+        "operationId": "power_server",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PowerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The server has been asked."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state the server is in rules that out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Homewarp cannot reach Docker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/session": {
       "get": {
         "summary": "Who is signed in, and whether setup is still to do. The one request a page\nneeds before it can paint.",
@@ -312,6 +580,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "A server is made from it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
           }
         }
       }
@@ -361,6 +639,86 @@
           }
         }
       },
+      "NewServer": {
+        "type": "object",
+        "required": [
+          "name",
+          "template_id",
+          "memory_mb",
+          "port"
+        ],
+        "properties": {
+          "cpu_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "100 is one core. Nothing, or 0, is no limit.",
+            "minimum": 0
+          },
+          "eula": {
+            "type": "boolean",
+            "description": "Whoever asks agrees to the EULA of the game, for a game that has one."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One of the template's images. Its first, if none is named."
+          },
+          "memory_mb": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Published on the home machine, for TCP and UDP.",
+            "minimum": 0
+          },
+          "template_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "variables": {
+            "type": "object",
+            "description": "Values for the template's variables, by the name the server sees. One\nthat is not given takes the template's default.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Power": {
+        "type": "string",
+        "description": "What a person can ask of a server.",
+        "enum": [
+          "start",
+          "stop",
+          "kill",
+          "install"
+        ]
+      },
+      "PowerRequest": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Power"
+          }
+        }
+      },
       "ProblemBody": {
         "type": "object",
         "description": "The body of every error response.",
@@ -371,6 +729,109 @@
           "error": {
             "type": "string",
             "description": "A sentence fit to show to the person using the panel."
+          }
+        }
+      },
+      "Server": {
+        "type": "object",
+        "description": "A server in full, with the end of its console.",
+        "required": [
+          "id",
+          "created_at",
+          "name",
+          "template_id",
+          "template",
+          "image",
+          "memory_mb",
+          "cpu_percent",
+          "port",
+          "state",
+          "console"
+        ],
+        "properties": {
+          "console": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The last lines of its console: the install first, then what the server prints."
+          },
+          "cpu_percent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "100 is one core. 0 is no limit."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was made, in Unix seconds."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "image": {
+            "type": "string"
+          },
+          "memory_mb": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Where players reach it on the home machine, over TCP and UDP."
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "template": {
+            "type": "string",
+            "description": "The name of the template it was made from."
+          },
+          "template_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ServerSummary": {
+        "type": "object",
+        "description": "A server as the Servers page shows it.",
+        "required": [
+          "id",
+          "name",
+          "template",
+          "state",
+          "port",
+          "memory_mb"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "memory_mb": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Where players reach it on the home machine."
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "template": {
+            "type": "string",
+            "description": "The name of the template it was made from."
           }
         }
       },
@@ -421,6 +882,19 @@
             "type": "string"
           }
         }
+      },
+      "State": {
+        "type": "string",
+        "description": "What a server is doing.",
+        "enum": [
+          "installing",
+          "install_failed",
+          "offline",
+          "starting",
+          "running",
+          "stopping",
+          "crashed"
+        ]
       },
       "StopBy": {
         "type": "string",

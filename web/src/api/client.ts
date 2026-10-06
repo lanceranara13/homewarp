@@ -7,6 +7,11 @@ import type { components, paths } from './schema'
 export type Session = components['schemas']['Session']
 export type TemplateSummary = components['schemas']['TemplateSummary']
 export type Template = components['schemas']['Template']
+export type ServerSummary = components['schemas']['ServerSummary']
+export type Server = components['schemas']['Server']
+export type ServerState = components['schemas']['State']
+export type NewServer = components['schemas']['NewServer']
+export type Power = components['schemas']['Power']
 type SetupRequest = components['schemas']['SetupRequest']
 type LoginRequest = components['schemas']['LoginRequest']
 
@@ -84,5 +89,36 @@ export async function importTemplate(egg: string): Promise<Template> {
 
 export async function removeTemplate(id: number): Promise<void> {
   const { error, response } = await signedIn(() => api.DELETE('/api/v1/templates/{id}', { params: { path: { id } } }))
+  if (!response.ok) fail(error)
+}
+
+export async function listServers(): Promise<ServerSummary[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/servers'))
+  return data ?? fail(error)
+}
+
+/** Null where there is no server with that id. */
+export async function getServer(id: number): Promise<Server | null> {
+  const { data, error, response } = await signedIn(() => api.GET('/api/v1/servers/{id}', { params: { path: { id } } }))
+  if (response.status === 404) return null
+  return data ?? fail(error)
+}
+
+/** Makes a server. The answer comes at once, while it is still being installed. */
+export async function createServer(body: NewServer): Promise<Server> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/servers', { body }))
+  return data ?? fail(error)
+}
+
+/** Asks a server to start, stop and so on. It has been asked, not yet obeyed, when this returns. */
+export async function powerServer(id: number, action: Power): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/power', { params: { path: { id } }, body: { action } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+export async function removeServer(id: number): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/servers/{id}', { params: { path: { id } } }))
   if (!response.ok) fail(error)
 }

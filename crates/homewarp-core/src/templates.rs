@@ -159,7 +159,7 @@ struct ImportRequest {
 
 /// A stored document, read back. One that will not read was written by another
 /// version of Homewarp: a fault here, and nothing the request did.
-fn read(definition: &str) -> Result<homewarp_template::Template, Problem> {
+pub(crate) fn read(definition: &str) -> Result<homewarp_template::Template, Problem> {
     serde_json::from_str(definition).map_err(|error| {
         Problem::Internal(anyhow::Error::new(error).context("reading a stored template"))
     })
@@ -292,6 +292,7 @@ async fn get_template(
         (status = NO_CONTENT, description = "The template is gone."),
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
         (status = NOT_FOUND, body = ProblemBody, description = "There is no such template."),
+        (status = CONFLICT, body = ProblemBody, description = "A server is made from it."),
     )
 )]
 async fn remove_template(
@@ -299,10 +300,19 @@ async fn remove_template(
     _: SignedIn,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Problem> {
-    let removed = sqlx::query("DELETE FROM templates WHERE id = ?")
+    let removed = match sqlx::query("DELETE FROM templates WHERE id = ?")
         .bind(id)
         .execute(&state.db)
-        .await?;
+        .await
+    {
+        Ok(removed) => removed,
+        Err(sqlx::Error::Database(error)) if error.is_foreign_key_violation() => {
+            return Err(Problem::Conflict(
+                "A server is made from this template. Remove the server first.".into(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
     if removed.rows_affected() == 0 {
         return Err(MISSING);
     }

@@ -79,7 +79,8 @@ impl Answer {
 async fn panel() -> Panel {
     let files = tempfile::tempdir().unwrap();
     let db = open(&files.path().join("homewarp.db")).await.unwrap();
-    let state = AppState::start(db).await.unwrap();
+    // No Docker here: what servers do on it is tried on the homelab.
+    let state = AppState::start(db, None).await.unwrap();
     let setup_code = state
         .setup_code()
         .expect("a new database has no account")
@@ -413,6 +414,77 @@ async fn what_is_not_an_egg_is_refused_in_words() {
         panel.get("/api/v1/templates", Some(&cookie)).await.body,
         json!([])
     );
+}
+
+#[tokio::test]
+async fn a_server_is_asked_for_in_full_before_anything_is_made() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let created = panel
+        .post("/api/v1/templates", json!({ "egg": EGG }), Some(&cookie))
+        .await;
+    let template = created.body["id"].as_i64().unwrap();
+    let ask = |change: Value| {
+        let mut server = json!({ "name": "Survival", "template_id": template, "memory_mb": 1024, "port": 25565 });
+        for (key, value) in change.as_object().unwrap() {
+            server[key] = value.clone();
+        }
+        panel.post("/api/v1/servers", server, Some(&cookie))
+    };
+
+    for (change, reason) in [
+        (json!({ "name": "  " }), "1 to 60 characters"),
+        (json!({ "memory_mb": 64 }), "128 MB"),
+        (json!({ "port": 80 }), "1024 to 65535"),
+        (json!({ "template_id": template + 1 }), "no such template"),
+        (
+            json!({ "image": "example.invalid/other:1" }),
+            "no such image",
+        ),
+        (
+            json!({ "variables": { "SERVER_JARFILE": "" } }),
+            "Server Jar File is required.",
+        ),
+        (
+            json!({ "variables": { "NOT_ONE": "1" } }),
+            "no variable called NOT_ONE",
+        ),
+    ] {
+        let refused = ask(change).await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{reason}");
+        let said = refused.body["error"].as_str().unwrap();
+        assert!(said.contains(reason), "{reason} in {said}");
+    }
+
+    // All of it in order, and no Docker to make it with: said, and nothing kept.
+    let unmade = ask(json!({ "image": "example.invalid/java:17" })).await;
+    assert_eq!(unmade.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(unmade.body["error"].as_str().unwrap().contains("Docker"));
+    let listed = panel.get("/api/v1/servers", Some(&cookie)).await;
+    assert_eq!((listed.status, &listed.body), (StatusCode::OK, &json!([])));
+}
+
+#[tokio::test]
+async fn servers_are_for_someone_signed_in() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let power = json!({ "action": "start" });
+    for answer in [
+        panel.get("/api/v1/servers", None).await,
+        panel.get("/api/v1/servers/1", None).await,
+        panel.post("/api/v1/servers", json!({}), None).await,
+        panel.post("/api/v1/servers/1/power", power, None).await,
+        panel.delete("/api/v1/servers/1", None).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+    for answer in [
+        panel.get("/api/v1/servers/1", Some(&cookie)).await,
+        panel.delete("/api/v1/servers/1", Some(&cookie)).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND);
+        assert_eq!(answer.body["error"], "There is no such server.");
+    }
 }
 
 /// The web client's types are generated from `web/openapi.json`. If this fails,

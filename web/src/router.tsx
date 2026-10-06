@@ -14,12 +14,15 @@ import { AppShell } from './components/AppShell'
 import { Button, Doorway, Problem } from './components/ui'
 import { ImportTemplatePage } from './pages/ImportTemplatePage'
 import { LoginPage } from './pages/LoginPage'
+import { ChooseTemplatePage, NewServerPage } from './pages/NewServerPage'
+import { ServerPage } from './pages/ServerPage'
 import { ServersPage } from './pages/ServersPage'
 import { SetupPage } from './pages/SetupPage'
 import { TemplatePage } from './pages/TemplatePage'
 import { TemplatesPage } from './pages/TemplatesPage'
+import { serverQuery, serversQuery } from './servers'
 import { sessionQuery } from './session'
-import { templateIdFrom, templateQuery, templatesQuery } from './templates'
+import { templateQuery, templatesQuery } from './templates'
 
 interface Context {
   queryClient: QueryClient
@@ -34,6 +37,12 @@ async function home({ queryClient }: Context): Promise<'/setup' | '/login' | '/'
   const session = await queryClient.ensureQueryData(sessionQuery)
   if (session.setup_required) return '/setup'
   return session.user ? '/' : '/login'
+}
+
+/** The id in an address such as `/servers/7`, if a number is what is there. */
+function idFrom(text: string | undefined): number | undefined {
+  const id = Number(text)
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined
 }
 
 const rootRoute = createRootRouteWithContext<Context>()({
@@ -81,7 +90,60 @@ const shellRoute = createRoute({
 const serversRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/',
+  staticData: { reads: (queryClient) => void queryClient.prefetchQuery(serversQuery) },
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(serversQuery)
+  },
   component: ServersPage,
+})
+
+const chooseTemplateRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/servers/new',
+  staticData: { reads: (queryClient) => void queryClient.prefetchQuery(templatesQuery) },
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(templatesQuery)
+  },
+  component: ChooseTemplatePage,
+})
+
+const newServerRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/servers/new/$templateId',
+  staticData: {
+    reads: (queryClient, params) => {
+      const id = idFrom(params.templateId)
+      if (id !== undefined) void queryClient.prefetchQuery(templateQuery(id))
+      // For the first port that no server has.
+      void queryClient.prefetchQuery(serversQuery)
+    },
+  },
+  loader: async ({ context: { queryClient }, params }) => {
+    const id = idFrom(params.templateId)
+    if (id === undefined) throw notFound()
+    const [template] = await Promise.all([
+      queryClient.ensureQueryData(templateQuery(id)),
+      queryClient.ensureQueryData(serversQuery),
+    ])
+    if (!template) throw notFound()
+  },
+  component: NewServerPage,
+})
+
+const serverRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/servers/$serverId',
+  staticData: {
+    reads: (queryClient, params) => {
+      const id = idFrom(params.serverId)
+      if (id !== undefined) void queryClient.prefetchQuery(serverQuery(id))
+    },
+  },
+  loader: async ({ context, params }) => {
+    const id = idFrom(params.serverId)
+    if (id === undefined || !(await context.queryClient.ensureQueryData(serverQuery(id)))) throw notFound()
+  },
+  component: ServerPage,
 })
 
 const templatesRoute = createRoute({
@@ -105,12 +167,12 @@ const templateRoute = createRoute({
   path: '/templates/$templateId',
   staticData: {
     reads: (queryClient, params) => {
-      const id = templateIdFrom(params.templateId)
+      const id = idFrom(params.templateId)
       if (id !== undefined) void queryClient.prefetchQuery(templateQuery(id))
     },
   },
   loader: async ({ context, params }) => {
-    const id = templateIdFrom(params.templateId)
+    const id = idFrom(params.templateId)
     if (id === undefined || !(await context.queryClient.ensureQueryData(templateQuery(id)))) throw notFound()
   },
   component: TemplatePage,
@@ -119,7 +181,15 @@ const templateRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
-  shellRoute.addChildren([serversRoute, templatesRoute, importTemplateRoute, templateRoute]),
+  shellRoute.addChildren([
+    serversRoute,
+    chooseTemplateRoute,
+    newServerRoute,
+    serverRoute,
+    templatesRoute,
+    importTemplateRoute,
+    templateRoute,
+  ]),
 ])
 
 export function createAppRouter(queryClient: QueryClient) {

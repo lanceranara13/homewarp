@@ -2,8 +2,8 @@
 # Dev loop (PLAN.md §10). The workstation only edits files: this syncs the working
 # tree to the homelab and runs every build and test there, inside containers.
 #
-# Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | deploy
-#               | run <cmd...> | lab [cmd] | paper [clean] | du | prune
+# Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | build | deploy
+#               | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
@@ -81,21 +81,49 @@ cmd_npm() {
   home "cd $REMOTE/src/web && tar czf - package.json package-lock.json" | tar xzf - -C "$ROOT/web"
 }
 
-# Builds the web interface, then Core with it inside, and (re)starts the staging
-# deployment at /home/lance/homewarp (deploy/compose.yml), on port 3600.
-cmd_deploy() {
+# Builds the web interface, then Core with it inside, as the image homewarp:dev.
+cmd_build() {
   cmd_sync && builder
   in_node 'npm install --no-save && npm run build'
   in_builder 'cargo build --release -p homewarp-core
               mkdir -p deploy/out && cp /target/release/homewarp deploy/out/'
+  home "docker build -q -t homewarp:dev -f $REMOTE/src/deploy/core.Dockerfile $REMOTE/src/deploy/out >/dev/null"
+}
+
+# Builds, and (re)starts the staging deployment at /home/lance/homewarp
+# (deploy/compose.yml), on port 3600. Servers it is running stay running.
+cmd_deploy() {
+  cmd_build
   home "set -e
     cd $REMOTE/src/deploy
-    docker build -q -t homewarp:dev -f core.Dockerfile out >/dev/null
-    HOMEWARP_USER=\$(id -u):\$(id -g) docker compose up -d
+    HOMEWARP_DATA_DIR=$REMOTE/data docker compose up -d
     for _ in \$(seq 30); do curl -fsS -o /dev/null http://127.0.0.1:3600/api/v1/health 2>/dev/null && break; sleep 1; done
     curl -fsS http://127.0.0.1:3600/api/v1/health; echo
     curl -fsS -o /dev/null -w 'page: %{http_code} %{content_type}, %{size_download} bytes\n' http://127.0.0.1:3600/
     docker logs homewarp 2>&1 | grep 'setup code' | tail -1 || true"
+}
+
+# A throwaway copy of the last build on port 3601, with data of its own, for
+# trying what needs an account without touching staging's. It shares the Docker
+# daemon, so a server made in it is a real container. `scratch down` removes the
+# copy, the containers of its servers and its data.
+cmd_scratch() {
+  local data=$REMOTE/scratch
+  home "docker rm -f homewarp-scratch >/dev/null 2>&1 || true"
+  if [ "${1:-up}" = down ]; then
+    home "for id in \$(ls $data/servers 2>/dev/null); do
+            docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown >/dev/null 2>&1 || true
+          done
+          docker run --rm -v $REMOTE:/homewarp alpine:3.20 rm -rf /homewarp/scratch"
+    return
+  fi
+  home "set -e
+    mkdir -p $data
+    docker run -d --name homewarp-scratch --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
+      --security-opt no-new-privileges:true -e HOMEWARP_DATA=$data -v $data:$data \
+      -v /var/run/docker.sock:/var/run/docker.sock -p 3601:3600 homewarp:dev >/dev/null
+    for _ in \$(seq 30); do curl -fsS -o /dev/null http://127.0.0.1:3601/api/v1/health 2>/dev/null && break; sleep 1; done
+    docker logs homewarp-scratch 2>&1 | grep -E 'setup code|cannot run servers' | tail -2"
 }
 
 cmd_fmt() {
@@ -173,10 +201,12 @@ case "${1:-}" in
   run)   shift; cmd_run "$@" ;;
   gen)   cmd_gen ;;
   npm)   shift; cmd_npm "$@" ;;
+  build) cmd_build ;;
   deploy) cmd_deploy ;;
+  scratch) shift; cmd_scratch "$@" ;;
   lab)   shift; cmd_lab "$@" ;;
   paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | deploy | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | deploy | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
 esac

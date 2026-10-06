@@ -1,5 +1,5 @@
 import { useSuspenseQuery } from '@tanstack/react-query'
-import { Link, Outlet } from '@tanstack/react-router'
+import { Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { Blocks, Ellipsis, LayoutGrid, LogOut, ScrollText, Settings, Waypoints, type LucideIcon } from 'lucide-react'
 import { DropdownMenu, Popover } from 'radix-ui'
 
@@ -11,9 +11,8 @@ import { Button, Mark } from './ui'
  * The five destinations of DESIGN.md. One without `to` is not built yet: it is
  * shown, so the shape of the panel is there from the start, but it leads nowhere.
  */
-const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates'; exact?: boolean }[] = [
-  // Every address begins the way this one does, so it is the current page only when it is the whole address.
-  { label: 'Servers', icon: LayoutGrid, to: '/', exact: true },
+const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates' }[] = [
+  { label: 'Servers', icon: LayoutGrid, to: '/' },
   { label: 'Templates', icon: Blocks, to: '/templates' },
   { label: 'Network', icon: Waypoints },
   { label: 'Activity', icon: ScrollText },
@@ -22,6 +21,16 @@ const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates'; 
 
 const ROW = 'flex h-8 w-full items-center gap-3 rounded-md px-2.5 text-body font-medium'
 const ROW_LIVE = `${ROW} text-ink-muted transition-colors duration-120 ease-out hover:bg-surface-2 hover:text-ink`
+const ROW_HERE = `${ROW} bg-accent-soft text-ink`
+
+/**
+ * Says whether a destination is where the open page belongs. Servers has the
+ * front page and every page of a server; the others have what is under them.
+ */
+function useWithin(): (to: string) => boolean {
+  const here = useRouterState({ select: (state) => state.location.pathname })
+  return (to) => (to === '/' ? here === '/' || here.startsWith('/servers') : here.startsWith(to))
+}
 const FLOATING = 'z-50 rounded-lg border border-hairline-strong bg-surface-3 shadow-float'
 
 /**
@@ -31,6 +40,7 @@ const FLOATING = 'z-50 rounded-lg border border-hairline-strong bg-surface-3 sha
 export function AppShell() {
   const { data: session } = useSuspenseQuery(sessionQuery)
   const username = session.user?.username ?? ''
+  const within = useWithin()
 
   return (
     <div className="flex min-h-dvh">
@@ -40,9 +50,9 @@ export function AppShell() {
           <span className="sr-only text-section wide:not-sr-only">Homewarp</span>
         </div>
         <nav aria-label="Main" className="mt-4 flex flex-col gap-1">
-          {DESTINATIONS.map(({ label, icon: Icon, to, exact }) =>
+          {DESTINATIONS.map(({ label, icon: Icon, to }) =>
             to ? (
-              <Link key={label} to={to} activeOptions={{ exact }} className={ROW_LIVE} activeProps={{ className: 'bg-accent-soft text-ink' }}>
+              <Link key={label} to={to} aria-current={within(to) ? 'page' : undefined} className={within(to) ? ROW_HERE : ROW_LIVE}>
                 <Icon aria-hidden className="w-5 shrink-0" size={16} />
                 <span className="sr-only wide:not-sr-only">{label}</span>
               </Link>
@@ -98,13 +108,14 @@ function AccountMenu({ username }: { username: string }) {
 /** The phone's navigation: the first three destinations, and "More" for the rest of the sidebar. */
 function BottomBar({ username }: { username: string }) {
   const signOut = useSignOut()
-  const tab = 'flex h-11 min-w-16 flex-col items-center justify-center gap-0.5 rounded-md px-2 text-caption'
+  const within = useWithin()
+  const tab ='flex h-11 min-w-16 flex-col items-center justify-center gap-0.5 rounded-md px-2 text-caption'
 
   return (
     <nav aria-label="Main" className={`${FLOATING} fixed inset-x-3 bottom-3 flex h-14 items-center justify-around md:hidden`}>
-      {DESTINATIONS.slice(0, 3).map(({ label, icon: Icon, to, exact }) =>
+      {DESTINATIONS.slice(0, 3).map(({ label, icon: Icon, to }) =>
         to ? (
-          <Link key={label} to={to} activeOptions={{ exact }} className={`${tab} text-ink-muted`} activeProps={{ className: 'text-ink' }}>
+          <Link key={label} to={to} aria-current={within(to) ? 'page' : undefined} className={`${tab} ${within(to) ? 'text-ink' : 'text-ink-muted'}`}>
             <Icon aria-hidden size={18} />
             {label}
           </Link>

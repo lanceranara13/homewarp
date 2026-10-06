@@ -1,9 +1,11 @@
 # Core, staged on the homelab (PLAN.md §10). `scripts/dev.sh deploy` builds the
 # image and starts this; the panel is then at http://<homelab>:3600.
 #
-# What Core does so far needs nothing from the host, so it runs as an ordinary
-# user with a read-only root and no capabilities. The Docker socket and the
-# tunnel arrive with the phases that use them.
+# Core runs each server as a container of its own, so it is given the Docker
+# socket (the owner's go-ahead: PLAN.md §13). Whoever holds that socket can do
+# anything on the machine, so what the rest of this file withholds is modest: a
+# read-only root, and of root's powers only the two it takes to keep the files of
+# servers, which belong to a user of their own.
 name: homewarp
 
 services:
@@ -11,9 +13,15 @@ services:
     image: homewarp:dev
     container_name: homewarp
     restart: unless-stopped
-    user: "${HOMEWARP_USER:-1000:1000}"
     read_only: true
     cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
     ports: ["3600:3600"]
-    volumes: ["../../data:/data"]
+    environment:
+      HOMEWARP_DATA: "${HOMEWARP_DATA_DIR:?the data directory, as a path on this machine}"
+    volumes:
+      # The same path inside as outside: Core gives Docker the paths of servers'
+      # files, and Docker reads paths on the host.
+      - "${HOMEWARP_DATA_DIR}:${HOMEWARP_DATA_DIR}"
+      - "/var/run/docker.sock:/var/run/docker.sock"
