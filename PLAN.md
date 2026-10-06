@@ -1313,8 +1313,66 @@ Each phase ends with something that works on the homelab.
     page asks for the code once the password is found right. Over SFTP the code is typed
     straight after the password. *Not yet looked at in a browser*, and the secret is
     shown as text and a link, with no picture of it to scan.
-- *Still to do:* the cookie's `Secure` flag, TLS and its certificates, and passkeys, all
-  three of which wait on §13 item 5; servers kept from the home network before a VPS is
+- *The panel online (§13 item 5).* The owner, 2026-10-06, asked which domain or whether
+  the home network only: "continue with phase 5 the vps is on ssh server1 ip". Read as:
+  through the VPS, at its address and no domain. That is the last row of §5.9, and what
+  it takes on this VPS, looked at that day and not touched (45.38.42.214, Ubuntu 22.04,
+  nginx 1.18 on 80 and 443 for four sites of `apixels.net`, no stream module, no Gate):
+  - the panel on a port of its own there, 8443, which the Gate forwards as it forwards
+    a server's and nginx never sees; home's end is one more door, and Core ends TLS;
+  - a certificate for the address from Let's Encrypt, which proves an address over
+    port 80 or 443 and no other. Both are nginx's. So one location on nginx's port 80,
+    `/.well-known/acme-challenge/`, is passed through the tunnel to Core. That is a
+    change to the VPS that stays, and is the owner's to allow; nothing else of nginx's
+    is touched, and nginx sees the challenge and never the panel;
+  - such certificates last six days, so Core renews by itself, and says on the Network
+    page when it last did;
+  - passkeys are bound to a name and not to an address, so there are none without a
+    domain. Two-step sign-in is what stands in their place.
+  - *Later the same day* the owner added: "maybe ill create homewarp.apixels.net and
+    point it on server1 IP". With a name the certificate is an ordinary one of ninety
+    days, and passkeys can be had. What does not change is that nginx has ports 80 and
+    443 there, which leaves two ways, and the choice is the owner's:
+    - *nginx ends TLS*, as it does for the four sites beside it, and passes the panel
+      home through the tunnel. The address is `https://homewarp.apixels.net`, and the
+      VPS reads everything: passwords, sessions, files. The first row of §6 stops being
+      true.
+    - *Core ends TLS at home*, and the Gate forwards a port of the panel's own, 8443.
+      The address is `https://homewarp.apixels.net:8443`, nginx gets one small server
+      block that passes the certificate's challenge through the tunnel and sends the
+      rest to that address, and the VPS never sees the panel. This is the one §5.9 and
+      §6 were written for, and the one recommended.
+  - **Decided by the owner, 2026-10-06: Core ends TLS at home**, with the nginx server
+    block that goes with it allowed. The name was made that day and answers with the
+    VPS's address. How it is to be built, nothing of which is built yet:
+    - *The challenge without a way in.* A taken-over VPS must not reach the panel
+      through the tunnel (§6, and the lab checks it), so nginx cannot pass the
+      certificate's challenge home. Instead Core, which runs the ACME client and keeps
+      every key, asks the Gate over the control channel to put the challenge's answer in
+      a file, and nginx serves that file: `server_name homewarp.apixels.net` on port 80,
+      `/.well-known/acme-challenge/` from a directory of the Gate's, everything else
+      sent to `https://$host:8443`. The answer is no secret. The Gate gains two
+      requests, to put such a file and to take it away, and takes only names made of
+      the letters a token is made of.
+    - *The port.* 8443 is forwarded by the Gate as a server's port is, to a third door
+      at home, which passes to a socket where Core ends TLS (rustls) and then serves
+      the same panel. Each handshake is done off the accept loop.
+    - *The certificate.* Asked of Let's Encrypt's staging first, then of the real one;
+      kept beside the database; renewed a month before it ends; swapped in without a
+      restart. The Network page says what it is for and when it ends.
+    - *With it:* the cookie's `Secure` flag and HSTS on what came in over TLS; the
+      panel's own address in Settings, public or not; then passkeys, which the name
+      makes possible.
+  - *A way back in.* `homewarp two-steps-off <username>`, run on the machine itself
+    (`docker exec homewarp homewarp two-steps-off <username>`), for an account that has
+    lost both its app and its recovery codes. Whoever can run it can read the database,
+    so it asks for nothing, and it is written down under Homewarp's own name.
+  - *Kept from home with or without a VPS.* What keeps a server from the machine it
+    runs on and the networks behind it was part of the tunnel's table, and so was there
+    only while a VPS was connected. It is a table of its own now, `homewarp_keep`, put
+    in place whenever Core runs servers and put back each round if a firewall's restart
+    takes it. The lab asks for it after the VPS is disconnected.
+- *Still to do:* all of that, and the cookie's `Secure` flag with it; servers kept from the home network before a VPS is
   connected, and not only after; the Gate's limit on new connections as a setting;
   "harden this VPS" with commit-confirm, built and tried in the lab only; fuzzing the
   parsers; the review of §6 against what was built. And a way back in for an owner who
