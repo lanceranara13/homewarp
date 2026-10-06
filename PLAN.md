@@ -1,10 +1,13 @@
 # Homewarp — project plan
 
-> Name decided 2026-10-05 (see §2). Status: Phases 0 to 4 are done (§11), each but for
+> Name decided 2026-10-05 (see §2). Status: Phases 0 to 5 are done (§11), each but for
 > what is said beside it. The tunnel is proven on a real VPS and against a real Docker
 > daemon, eggs install and run from the panel, a VPS is connected with one command, and a
 > server's files, backups, schedules and further accounts are in the panel, which is
-> staged on the homelab at port 3600. How the panel is reached is being reconsidered (§13).
+> staged on the homelab at port 3600. The panel can be given a name and reached from
+> anywhere over TLS that is ended at home (tried on the owner's VPS with
+> `homewarp.apixels.net`); sign-ins are limited and take a second step or a passkey; the
+> VPS itself can be hardened on trial. §6 has the security model held against the code.
 
 ## 1. What it is
 
@@ -1494,8 +1497,41 @@ Each phase ends with something that works on the homelab.
   - *The Gate's limit on new connections is a setting* (Settings, New connections):
     one number, sent with everything else the Gate is told, thirty a second where
     nothing is set.
-- *Still to do:* "harden this VPS" with commit-confirm; the review of §6 against what
-  was built.
+  - *"Harden this VPS"* (Network, The VPS itself). What arrives at the VPS itself from
+    the internet is dropped, but for what was listening there when the owner asked, and
+    new SSH connections from one address are held to twelve a minute. Only what arrives
+    on the public interface for the machine itself is looked at: what is forwarded to
+    servers never comes that way, nor what arrives by the tunnel or by an interface of
+    something else's (Tailscale, Docker). It is one chain in the Gate's own table, and
+    no rule of anyone else's is touched.
+    - *On trial.* It is put in place for a minute, and the Gate undoes it by itself
+      unless it is told within that minute, through the tunnel, to keep it. The panel
+      shows the seconds, and says what to do with them: open a new SSH session. Kept, it
+      is written down on the VPS (`guard.json`) and comes back after a restart.
+    - *What is open* is what was listening, as the kernel's own tables of sockets have
+      it, and the tunnel's port whatever was asked. What begins to listen afterwards is
+      shut until the VPS is hardened again, and the panel names those ports. While the
+      Gate answers a certificate authority's question itself, port 80 is open for that
+      and shut again after.
+    - *The lab* runs a service on its VPS, hardens it, starts another, lets the minute
+      run out, hardens again and keeps it, restarts the Gate, asks a certificate's
+      question of it, and takes the guard off: 26 checks.
+    - *On the owner's VPS* (2026-10-07, from the throwaway copy, and taken off again
+      afterwards). What the Gate found listening was what `ss` lists there: SSH, nginx
+      on 80 and 443, Tailscale's ports, the address-asking client, the tunnel; nothing
+      of what listens for the machine alone. Hardened on trial: a new SSH session got
+      in, the websites answered, the panel answered through the VPS, and 21 packets
+      from the internet had been dropped within ten seconds. Not kept: undone by the
+      Gate sixty seconds to the second after it was put in place, with nothing written
+      down. Hardened again and kept: written down, back after the Gate was restarted,
+      SSH and the sites as before. Then from the page in a browser: the seconds
+      counting down, kept, undone. (A port nothing listens on is dropped there with or
+      without the guard: the VPS has a firewall of its own.)
+  - *The review of §6* is in §6, under "Held against what was built". Four things were
+    changed because of it.
+- *Left of Phase 5:* nothing that was planned. What it showed and did not do is in §6:
+  no limit on a flood from many addresses, none on what a server writes to disk, and
+  servers' own traffic still leaves by the home's line.
 
 **Phase 6 — Packaging and onboarding**
 - One-line installers, signed releases, self-update, ARM64 builds of Core, docs.
