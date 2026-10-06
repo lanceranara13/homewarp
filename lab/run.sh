@@ -14,6 +14,8 @@
 # home is docker-in-docker. A real Docker daemon publishes the game container's
 # ports there, which is the part real-vps-spike.sh had to fake with a namespace.
 #
+# The simulated VPS runs the Gate program itself, built by `scripts/dev.sh lab`.
+#
 # Usage: run.sh all | up | test | bench | down | clean
 #        HOME_FW=nftables run.sh all     # Docker's nftables firewall backend at home
 set -euo pipefail
@@ -24,6 +26,7 @@ GATE_IP=203.0.113.10 HOME_IP=203.0.113.20 CLIENT_IP=203.0.113.50
 HOME_LAN_IP=192.168.50.20 NAS_IP=192.168.50.30
 GATE_TUN=10.213.77.1 HOME_TUN=10.213.77.2 GAME_IP=10.213.80.2
 WG_PORT=51820
+API_PORT=4857   # where the Gate answers home, on its tunnel address only
 PORT=25565      # the game's port, tcp + udp, published by Docker
 IPERF=25566     # iperf3 in the game container, published by Docker
 CLOSED=25567    # open in the game container, not published
@@ -33,8 +36,21 @@ dc()   { docker compose -p homewarp-lab --progress quiet "$@"; }
 in_()  { dc exec -T "$1" sh -s; }
 vars() { local v; for v in "$@"; do printf "%s='%s'\n" "$v" "${!v}"; done; }
 
+# What home says to the Gate, through the tunnel: all that it is to forward, and how.
+push() {  # transparent | nat
+  local token
+  token=$(dc exec -T gate cat /run/hw/token)
+  dc exec -T home curl -fsS -m 5 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "{\"generation\":$(date +%s),\"mode\":\"$1\",\"forwards\":[{\"port\":$PORT,\"protocol\":\"tcp\"},{\"port\":$PORT,\"protocol\":\"udp\"},{\"port\":$IPERF,\"protocol\":\"tcp\"},{\"port\":$IPERF,\"protocol\":\"udp\"}]}" \
+    "http://$GATE_TUN:$API_PORT/v1/state" | sed 's/^/   the gate answers: /'
+  echo
+}
+
+# Starts the Gate program on the simulated VPS, as its service would.
+start_gate() { dc exec -d gate sh -c 'homewarp-gate /run/hw >>/run/hw/log 2>&1'; }
+
 cmd_up() {
-  local HOME_PUB GATE_PUB
+  local HOME_PUB GATE_PUB TOKEN
 
   echo "== containers"
   dc build
@@ -61,46 +77,26 @@ wg pubkey < /run/hw/key
 EOF
 )
 
-  echo "== gate: tunnel endpoint and forwards"
-  { vars HOME_PUB WG_PORT HOME_TUN GATE_TUN PORT IPERF; cat <<'EOF'; } | in_ gate
+  echo "== gate: the Gate program, told who it is and who its home is"
+  TOKEN=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+  { vars HOME_PUB WG_PORT HOME_TUN GATE_TUN API_PORT TOKEN; cat <<'EOF'; } | in_ gate
 set -eu
+umask 077
+pkill homewarp-gate 2>/dev/null || true
 ip link del homewarp0 2>/dev/null || true
-ip link add homewarp0 type wireguard
-wg set homewarp0 listen-port "$WG_PORT" private-key /run/hw/key \
-  peer "$HOME_PUB" preshared-key /run/hw/psk allowed-ips "$HOME_TUN/32"
-ip addr add "$GATE_TUN/30" dev homewarp0
-ip link set homewarp0 mtu 1380 up
-
-nft -f - <<NFT
-table inet homewarp
-delete table inet homewarp
-table inet homewarp {
-  map fwd_tcp { type inet_service : ipv4_addr . inet_service; elements = { $PORT : $HOME_TUN . $PORT, $IPERF : $HOME_TUN . $IPERF } }
-  map fwd_udp { type inet_service : ipv4_addr . inet_service; elements = { $PORT : $HOME_TUN . $PORT, $IPERF : $HOME_TUN . $IPERF } }
-  set newconn { type ipv4_addr; size 65535; flags dynamic,timeout; timeout 1m; }
-
-  chain prerouting {
-    type nat hook prerouting priority dstnat; policy accept;
-    iifname "eth0" dnat ip to tcp dport map @fwd_tcp
-    iifname "eth0" dnat ip to udp dport map @fwd_udp
-  }
-  # Empty in transparent mode; NAT mode adds one masquerade rule here.
-  chain nat_mode {
-    type nat hook postrouting priority srcnat; policy accept;
-  }
-  chain forward {
-    type filter hook forward priority filter; policy accept;
-    oifname "homewarp0" ct status dnat goto to_home
-    oifname "homewarp0" counter drop                 # only forwarded ports enter the tunnel
-    iifname "homewarp0" ct state new counter drop    # home does not use the gate as an exit
-  }
-  chain to_home {
-    ct state new add @newconn { ip saddr limit rate over 30/second burst 60 packets } counter drop
-    tcp flags syn tcp option maxseg size set rt mtu
-  }
-}
-NFT
+printf '%s' "$TOKEN" > /run/hw/token
+rm -f /run/hw/desired.json /run/hw/log
+cat > /run/hw/config.json <<JSON
+{ "private_key": "$(cat /run/hw/key)", "listen_port": $WG_PORT,
+  "address": "$GATE_TUN", "home_address": "$HOME_TUN",
+  "home_public_key": "$HOME_PUB", "preshared_key": "$(cat /run/hw/psk)",
+  "token": "$TOKEN", "wan": "eth0", "api_port": $API_PORT }
+JSON
 EOF
+  dc cp ../deploy/out/homewarp-gate gate:/usr/local/bin/homewarp-gate
+  start_gate
+  for _ in $(seq 20); do dc exec -T gate test -e /sys/class/net/homewarp0 && break; sleep 0.5; done
+  dc exec -T gate sh -c 'cat /run/hw/log' | sed 's/^/   /'
 
   echo "== home: game container behind a published port, tunnel, return path"
   { vars GATE_PUB GATE_IP GATE_TUN WG_PORT HOME_TUN GAME_IP PORT IPERF CLOSED SVC; cat <<'EOF'; } | in_ home
@@ -162,6 +158,9 @@ NFT
 
 ping -c 2 -W 2 -q "$GATE_TUN" | tail -2
 EOF
+
+  echo "== home tells the gate what to forward"
+  push transparent
 }
 
 FAILED=0
@@ -170,15 +169,20 @@ fail()  { echo "FAIL  $1"; FAILED=1; }
 check() { if [ "$2" = "$3" ]; then ok "$1: ${2:-nothing}"; else fail "$1: got '$2', want '$3'"; fi; }
 
 # The address the game server says a player connecting through the gate came from.
+#
+# Over TCP the lab's clients only listen. The stand-in servers answer and hang
+# up without reading, so anything sent to them comes back as a reset, and about
+# one time in a hundred that reset overtook the answer: a failure of this
+# harness, measured, that looked like one of the tunnel.
 seen() {  # tcp | udp
-  local addr="TCP:$GATE_IP:$PORT,connect-timeout=4"
-  [ "$1" = udp ] && addr="UDP:$GATE_IP:$PORT"
-  dc exec -T client sh -c "echo hi | socat -t 3 - $addr 2>/dev/null || true" | awk -v p="$1" '$1 == p { print $2 }'
+  local cmd="socat -u TCP:$GATE_IP:$PORT,connect-timeout=4 -"
+  [ "$1" = udp ] && cmd="echo hi | socat -t 3 - UDP:$GATE_IP:$PORT"
+  dc exec -T client sh -c "$cmd 2>/dev/null || true" | awk -v p="$1" '$1 == p { print $2 }'
 }
 
 # What answers when $1 connects to $2:$3; empty when nothing does.
 reach() {
-  local cmd="echo | socat -t 2 - TCP:$2:$3,connect-timeout=3 2>/dev/null || true"
+  local cmd="socat -u TCP:$2:$3,connect-timeout=3 - 2>/dev/null || true"
   if [ "$1" = game ]; then dc exec -T home docker exec game sh -c "$cmd"; else dc exec -T "$1" sh -c "$cmd"; fi
 }
 blocked() {  # label, from, address, port
@@ -186,7 +190,7 @@ blocked() {  # label, from, address, port
 }
 
 cmd_test() {
-  local HOME_PUB
+  local HOME_PUB token rss
   echo "home: $(dc exec -T home sh -c 'docker version --format "Docker {{.Server.Version}}"; iptables --version' | tr '\n' ' ') firewall backend $HOME_FW"
 
   echo "== transparent mode: the address the game server sees (want $CLIENT_IP)"
@@ -200,11 +204,12 @@ cmd_test() {
   dc exec -T home nft add rule inet homewarp mark_in iifname != homewarp0 ct mark 0x4857 meta mark set ct mark
   check "tcp with it restored" "$(seen tcp)" "$CLIENT_IP"
 
-  echo "== NAT mode: with masquerade on the gate the server sees the gate (want $GATE_TUN)"
-  dc exec -T gate nft add rule inet homewarp nat_mode oifname homewarp0 masquerade
+  echo "== NAT mode: asked for by home, and the server sees the gate (want $GATE_TUN)"
+  push nat
   check "tcp source" "$(seen tcp)" "$GATE_TUN"
   check "udp source" "$(seen udp)" "$GATE_TUN"
-  dc exec -T gate nft flush chain inet homewarp nat_mode
+  push transparent
+  check "and the player's own again in transparent mode" "$(seen tcp)" "$CLIENT_IP"
 
   echo "== containment: a taken-over gate, its allowed-ips widened and home's networks routed into the tunnel"
   HOME_PUB=$(dc exec -T home wg show homewarp0 public-key)
@@ -232,6 +237,33 @@ EOF
   blocked "game cannot reach the NAS" game "$NAS_IP" "$SVC"
   blocked "game cannot reach a service on the home host by its bridge address" game 10.213.80.1 "$SVC"
   blocked "game cannot reach a service on the home host by its LAN address" game "$HOME_LAN_IP" "$SVC"
+
+  echo "== the Gate program"
+  token=$(dc exec -T gate cat /run/hw/token)
+  check "it answers nobody without its token" "$(dc exec -T home curl -s -m 5 -o /dev/null -w '%{http_code}' "http://$GATE_TUN:$API_PORT/v1/status")" "401"
+  check "and answers home, which has it" "$(dc exec -T home curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "http://$GATE_TUN:$API_PORT/v1/status")" "200"
+  blocked "it does not answer on the public address" client "$GATE_IP" "$API_PORT"
+  rss=$(dc exec -T gate sh -c 'awk "/VmRSS/ { print \$2 }" /proc/$(pidof homewarp-gate)/status')
+  if [ "$rss" -le 20480 ]; then ok "it holds $((rss / 1024)) MB of memory, within the 20 MB of PLAN.md §7.1"; else fail "it holds $rss kB of memory, over its 20 MB"; fi
+  check "control: a player gets through before it is stopped" "$(seen tcp)" "$CLIENT_IP"
+  dc exec -T gate pkill homewarp-gate
+  sleep 1
+  check "players still get through while it is not running" "$(seen tcp)" "$CLIENT_IP"
+  start_gate
+  sleep 2
+  check "and when it is started again over the tunnel it left" "$(seen tcp)" "$CLIENT_IP"
+  dc exec -T gate pkill homewarp-gate
+  dc exec -T gate sh -c 'ip link del homewarp0; nft delete table inet homewarp'
+  check "control: with the tunnel gone from the kernel, nobody gets through" "$(seen tcp)" ""
+  start_gate
+  # As after a reboot of the VPS. Home notices when something it sent goes
+  # unanswered, which Core's asking after the Gate will see to. Here a ping does.
+  for _ in $(seq 20); do
+    dc exec -T home ping -c 1 -W 1 -q "$GATE_TUN" >/dev/null 2>&1 || true
+    [ -n "$(seen tcp)" ] && break
+    sleep 2
+  done
+  check "started as after a reboot, it is back to what it was last told" "$(seen tcp)" "$CLIENT_IP"
 
   echo "-- drop counters at home"
   dc exec -T home nft list table inet homewarp | grep 'counter packets' | sed 's/^[[:space:]]*/   /'

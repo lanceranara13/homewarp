@@ -1,0 +1,14 @@
+[package]
+name = "homewarp-net"
+description = "The tunnel: kernel WireGuard and the nftables rules on both of its ends."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+defguard_wireguard_rs.workspace = true
+homewarp-proto = { path = "../homewarp-proto" }
+thiserror.workspace = true

@@ -2,7 +2,7 @@
 # Dev loop (PLAN.md §10). The workstation only edits files: this syncs the working
 # tree to the homelab and runs every build and test there, inside containers.
 #
-# Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | build | deploy
+# Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | build | gate | deploy
 #               | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
@@ -146,10 +146,18 @@ cmd_gen() {
   mv "$ROOT/web/openapi.json.new" "$ROOT/web/openapi.json"
 }
 
-# The simulated VPS, internet and home (lab/run.sh). HOME_FW=nftables switches
+# Builds the Gate as a VPS will run it: one static binary that needs nothing installed.
+cmd_gate() {
+  cmd_sync && builder
+  in_builder 'cargo build --release -p homewarp-gate --target x86_64-unknown-linux-musl
+              mkdir -p deploy/out && cp /target/x86_64-unknown-linux-musl/release/homewarp-gate deploy/out/
+              ls -l deploy/out/homewarp-gate | cut -d" " -f5- '
+}
+
+# The simulated VPS, internet and home (lab/run.sh), with the Gate just built. HOME_FW=nftables switches
 # the home side to Docker's nftables firewall backend.
 cmd_lab() {
-  cmd_sync
+  cmd_gate
   home "cd $REMOTE/src/lab && HOME_FW=${HOME_FW:-iptables} bash run.sh ${*:-all}"
 }
 
@@ -202,11 +210,12 @@ case "${1:-}" in
   gen)   cmd_gen ;;
   npm)   shift; cmd_npm "$@" ;;
   build) cmd_build ;;
+  gate)  cmd_gate ;;
   deploy) cmd_deploy ;;
   scratch) shift; cmd_scratch "$@" ;;
   lab)   shift; cmd_lab "$@" ;;
   paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | deploy | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | gate | deploy | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
 esac

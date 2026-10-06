@@ -1,0 +1,12 @@
+[package]
+name = "homewarp-proto"
+description = "What Core and the Gate say to each other: desired state and status. Types only."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true

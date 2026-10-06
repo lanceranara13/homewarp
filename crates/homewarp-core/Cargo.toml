@@ -15,7 +15,8 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true
-axum.workspace = true
+# `ws` for the socket a server's page follows it by. Not asked for by the Gate.
+axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
 getrandom.workspace = true
 homewarp-runtime = { path = "../homewarp-runtime" }

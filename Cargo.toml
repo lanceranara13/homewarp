@@ -13,11 +13,12 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 anyhow = "1"
 argon2 = "0.6"
-# `ws` for the socket a server's page follows it by.
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 # Only the local socket: no HTTP or TLS transport to a remote daemon.
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 cap-std = "4"
+# Kernel WireGuard over netlink: a VPS has the module, and often not the `wg` tool.
+defguard_wireguard_rs = "0.12"
 futures-util = "0.3"
 getrandom = "0.4"
 # Patterns in an egg's rules are PHP's, where `\w` is ASCII unless asked otherwise: as here.
