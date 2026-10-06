@@ -1587,6 +1587,13 @@ Each phase ends with something that works on the homelab.
     - Both scripts are one function called on their last line, so that one cut off on
       the way does nothing at all.
   - *Docs:* `docs/installing.md` and `docs/releasing.md`.
+  - *The first server, from a panel with nothing in it.* "New server" on a new panel
+    used to stop at an empty list. It says what an egg is now and leads to the
+    catalogue; the import page, come to that way, goes on to the server's form once the
+    egg is in, and the list of games has a way to more beneath it. Walked in a browser
+    on a throwaway copy: setup code, account, "Find a game", the list fetched, Valheim
+    picked and imported, and the form for the server, in nine seconds of a script's
+    clicking.
 - *The five-minute target, by the parts a machine does:* the home line seven seconds
   (a first time adds fetching Alpine); a VPS from its line to "connected" about ten;
   Paper fetched from the catalogue and installed in eight, and at its first start
@@ -1604,7 +1611,6 @@ Each phase ends with something that works on the homelab.
     worth shipping.
   - *A home machine with a firewall of its own and no Docker.* Homewarp needs Docker
     to run servers at all; the doors are how its ports are published.
-  - *First-run wizard polish.*
 
 **Phase 7 — Later**
 - Minecraft hostname routing (many servers on one `:25565`), sleep + wake-on-connect,
