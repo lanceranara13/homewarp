@@ -627,7 +627,9 @@ What this does and does not show:
 | `npm …` | npm in `web/`, in a Node container; `package.json` and its lock come back |
 | `lab` | full end-to-end suite in the simulated network below |
 | `paper` | the Phase 0 runtime spike: the Paper egg end to end on the homelab's Docker |
-| `deploy` | build the web interface, then Core with it inside, then the image; `docker compose up -d`; check `:3600` answers |
+| `build` | build the web interface, then Core with it inside, then the image `homewarp:dev` |
+| `deploy` | `build`, then `docker compose up -d`; check `:3600` answers. Servers it runs stay running |
+| `scratch` | a throwaway copy of the last build on `:3601`, with data of its own and the same Docker daemon, for trying what needs an account without touching staging's. `scratch down` removes it, its servers' containers and its data |
 
 The tree goes to `/home/lance/homewarp/src`, replaced whole on every sync; `data/` beside
 it belongs to the server. The builder runs as the homelab user, capped at 1.5 CPUs, and
@@ -811,7 +813,7 @@ Each phase ends with something that works on the homelab.
 - The donation popover has no links yet, and says so. The four destinations besides
   Servers are shown dimmed and lead nowhere.
 
-**Phase 2 — Servers** — *templates done 2026-10-06; the rest to do*
+**Phase 2 — Servers** — *templates, and a server's first life, done 2026-10-06; the rest to do*
 - Template import (all egg formats), validation rules, config-file parsers.
 - Install flow, lifecycle state machine, console WebSocket, stats, limits, crash recovery.
 - UI: template gallery, create-server wizard, server page with console.
@@ -834,11 +836,43 @@ Each phase ends with something that works on the homelab.
   menu had been doing so since Phase 1, unnoticed. The menu is no longer modal and the
   one dialog is the browser's own `<dialog>`. The policy is as it was.
 - Found by real eggs: *Egg corpus* in §10.
-- **Still to do in this phase:** the validation rules; the config-file parsers other
-  than `properties`, and replacing by pattern; importing from a URL and a catalogue to
-  pick from, both of which need Core to fetch from the internet, which it does not yet
-  do; protocol per port (§5.6); and everything about servers themselves. The `servers`
-  table comes with the create flow, when its columns are known.
+- *Done so far: a server's first life.* A server is made from a template in the panel:
+  a name, memory, a port, the template's variables, a processor limit, and for a game
+  that has one the box that agrees to its EULA. The variables are checked against their
+  rules, all nineteen that the corpus uses (§10); an egg with a rule or a pattern Core
+  cannot follow is refused when it is imported, and none of the 116 is. Core installs
+  the server, starts it and watches its console. It can be stopped, killed when it will
+  not stop, started again, and removed with its files. Each server has a task of its
+  own in Core. Its page follows its state and the last 500 lines of its console by
+  asking every second and a half, until the socket of §5.8 exists.
+- Core holds the Docker socket now (§13). It runs as root inside its container, with a
+  read-only root and two capabilities, CHOWN and DAC_OVERRIDE: what it takes to keep
+  files that belong to the servers' user. It sees its data directory at the path the
+  host has it at, because Docker reads the paths it is handed on the host.
+- Tried on the homelab against the real daemon, through the API and then in a browser,
+  in a throwaway copy (`dev.sh scratch`). A test egg installed and was running in five
+  seconds: as uid 4857, read-only root, no capabilities, its memory and processor
+  limits set, its port published for TCP and UDP. It was stopped by its console
+  command, started, left running while Core was restarted and found running by the new
+  Core, killed, and removed, which left no container and no file. Refused in words:
+  removing a server that runs, removing a template a server is made from, a name or a
+  port another server has, starting what is running.
+- Then the published Paper egg, through the wizard: installed (Paper 26.3), started,
+  `server.properties` patched, and stopped by Paper itself, asking for its EULA. That
+  was not agreed to on the owner's behalf. The page showed Offline, with Paper's own
+  words in the console.
+- Nothing else on the homelab was touched: every other container it runs was still
+  running afterwards. Looked at 390 and 1250 px wide, in the dark theme.
+- **Still to do in this phase:** typing into the console, and the socket that carries
+  it with stats (§5.8); starting again, with back-off, after a crash; the config-file
+  parsers other than `properties`, and replacing by pattern. Until those exist a
+  template that needs one is refused when a server is made from it, not after it has
+  installed: 28 of the 116 eggs (`file` 9, `ini` 7, `json` 6, `yaml` 4, `xml` 1), which
+  leaves 88 that work. Also: importing from a URL and a catalogue to pick from, both of
+  which need Core to fetch from the internet, which it does not yet do; protocol per
+  port (§5.6); changing a server once it is made; free memory and disk shown where one
+  is made; and the phase's exit, which is a SteamCMD game, a non-game template, and
+  Paper past its EULA.
 
 **Phase 3 — Gate and tunnel**
 - `homewarp-gate`, enrollment with key rotation, declarative forwards, self-probe,
