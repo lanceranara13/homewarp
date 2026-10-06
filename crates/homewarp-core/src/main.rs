@@ -30,6 +30,21 @@ async fn main() -> anyhow::Result<()> {
             let port = arguments.next().unwrap_or_default().parse()?;
             return homewarp_core::probe_listen(port).await;
         }
+        // `homewarp two-steps-off <username>`: for an account that has lost its
+        // authenticator app and its recovery codes. Run where the data is, as
+        // `docker exec homewarp homewarp two-steps-off <username>`.
+        Some("two-steps-off") => {
+            let username = arguments
+                .next()
+                .context("usage: homewarp two-steps-off <username>")?;
+            let data = env::var("HOMEWARP_DATA").unwrap_or_else(|_| "data".to_owned());
+            let db = homewarp_core::open(&Path::new(&data).join("homewarp.db")).await?;
+            match homewarp_core::two_steps_off(&db, &username).await? {
+                true => println!("{username} signs in with a password alone now."),
+                false => println!("There is no account called {username}."),
+            }
+            return Ok(());
+        }
         // `homewarp door <address> <socket>`: the panel's door (deploy/compose.yml).
         Some("door") => {
             let usage = "usage: homewarp door <address> <socket>";

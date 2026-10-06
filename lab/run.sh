@@ -372,6 +372,12 @@ EOF
   check "nobody gets through" "$(seen tcp)" ""
   check "and the Gate was told to forward nothing more" "$(dc exec -T gate cat /run/hw/desired.json | field forwards)" "[]"
 
+  echo "== with no VPS, a server is kept from the home network all the same"
+  check "the table that does it is there" "$(dc exec -T home sh -c 'nft list table inet homewarp_keep >/dev/null 2>&1 && echo there')" "there"
+  blocked "game cannot reach the NAS" game "$NAS_IP" "$SVC"
+  blocked "game cannot reach a service on the home host by its LAN address" game "$HOME_LAN_IP" "$SVC"
+  check "and still reaches the internet" "$(reach game "$CLIENT_IP" "$SVC")" "reached $HOME_IP"
+
   echo "-- drop counters at the gate"
   dc exec -T gate nft list table inet homewarp | grep 'counter packets' | sed 's/^[[:space:]]*/   /'
   return $FAILED

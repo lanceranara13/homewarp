@@ -24,8 +24,8 @@ use std::{
 use anyhow::{Context, bail};
 use axum::{Json, extract::State, http::StatusCode};
 use homewarp_net::{
-    INTERFACE, Link, apply, bring_up, has_table, home_ruleset, new_keypair, new_preshared_key,
-    probe_packets, route_replies, take_down,
+    INTERFACE, Link, apply, bring_up, has_keep_table, has_table, home_ruleset, keep_ruleset,
+    new_keypair, new_preshared_key, probe_packets, route_replies, take_down,
 };
 use homewarp_proto::{
     Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status,
@@ -177,6 +177,8 @@ pub(crate) struct Tunnel {
     check_due: AtomicBool,
     /// What the Gate had counted through each port when it was last heard from.
     counted: Mutex<BTreeMap<(u16, Protocol), u64>>,
+    /// Set once it has been said that servers could not be kept from the home network.
+    keep_failed: AtomicBool,
 }
 
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -211,6 +213,7 @@ impl Tunnel {
             told: Mutex::default(),
             check_due: AtomicBool::new(false),
             counted: Mutex::default(),
+            keep_failed: AtomicBool::new(false),
         })
     }
 
@@ -247,6 +250,21 @@ impl Tunnel {
     /// One round. True while a VPS that was handed a join token is awaited.
     async fn round(&self) -> bool {
         let _busy = self.busy.lock().await;
+        // Servers are kept from the home network whether or not there is a
+        // VPS. Looked at every round: a firewall that restarts takes the
+        // table with it, as it takes the tunnel's.
+        if self.runtime.is_some() {
+            let kept = tokio::task::spawn_blocking(|| match has_keep_table() {
+                true => Ok(()),
+                false => apply(&keep_ruleset(BRIDGE)?),
+            });
+            if !matches!(kept.await, Ok(Ok(()))) && !self.keep_failed.swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    "servers could not be kept from the home network: nft refused the rules that do it"
+                );
+            }
+        }
         let gate = match self.gate().await {
             Ok(Some(gate)) => gate,
             Ok(None) => {

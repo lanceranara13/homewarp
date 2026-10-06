@@ -691,6 +691,23 @@ async fn without_two_steps(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
+/// Turns an account's second step off by its name: the way back in for whoever
+/// has lost both their app and their recovery codes, run on the machine itself
+/// (`homewarp two-steps-off <username>`). Whoever can run that can read the
+/// database, so it asks for nothing. False if there is no such account.
+pub async fn two_steps_off(db: &SqlitePool, username: &str) -> anyhow::Result<bool> {
+    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(db)
+        .await?;
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    without_two_steps(db, id).await?;
+    audit::record_by_homewarp(db, None, "account.two_steps_off", username).await;
+    Ok(true)
+}
+
 /// Turns the second step of the account that asks off, given its password.
 #[utoipa::path(
     post,

@@ -436,6 +436,46 @@ pub fn has_table() -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// What keeps servers from the home they run in, whether or not there is a
+/// tunnel: a table of its own, so that it is there before a VPS is connected
+/// and stays when one is disconnected. A server reaches neither this machine
+/// nor the networks behind it; what Docker published is reached as before.
+///
+/// [`home_ruleset`] says the same of `bridge` while the tunnel is up. The two
+/// agree, and either alone is enough.
+pub fn keep_ruleset(bridge: &str) -> Result<String, Error> {
+    if !named_well(bridge) {
+        return Err(Error::Interface(bridge.to_owned()));
+    }
+    Ok(format!(
+        r#"table inet homewarp_keep
+delete table inet homewarp_keep
+table inet homewarp_keep {{
+  chain input {{
+    type filter hook input priority filter; policy accept;
+    iifname "{bridge}" ct state established,related accept
+    iifname "{bridge}" counter drop
+  }}
+  chain forward {{
+    type filter hook forward priority filter - 1; policy accept;
+    iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
+  }}
+}}
+"#
+    ))
+}
+
+/// Whether the table of [`keep_ruleset`] is in the kernel.
+pub fn has_keep_table() -> bool {
+    Command::new("nft")
+        .args(["list", "table", "inet", "homewarp_keep"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// How many packets have arrived from the tunnel for the port of the probe
 /// that [`home_ruleset`] was last given.
 pub fn probe_packets() -> Result<u64, Error> {
@@ -737,6 +777,20 @@ mod tests {
             eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n";
         assert_eq!(default_route(routes).as_deref(), Some("eth0"));
         assert_eq!(default_route("Iface\tDestination\n"), None);
+    }
+
+    #[test]
+    fn servers_are_kept_from_home_with_or_without_a_tunnel() {
+        let rules = super::keep_ruleset("homewarp-br").unwrap();
+        // A table of its own, replaced whole, that says nothing of the tunnel.
+        assert!(rules.starts_with("table inet homewarp_keep\ndelete table inet homewarp_keep\n"));
+        assert!(!rules.contains("homewarp0"));
+        assert!(rules.contains(
+            "iifname \"homewarp-br\" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ct state new counter drop"
+        ));
+        assert!(rules.contains("iifname \"homewarp-br\" ct state established,related accept"));
+        assert!(rules.contains("iifname \"homewarp-br\" counter drop"));
+        assert!(super::keep_ruleset("br0; flush ruleset").is_err());
     }
 
     #[test]

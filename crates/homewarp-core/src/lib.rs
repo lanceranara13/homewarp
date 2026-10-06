@@ -20,6 +20,7 @@ mod totp;
 mod tunnel;
 mod ui;
 
+pub use accounts::two_steps_off;
 pub use api::{AppState, app, openapi};
 pub use db::open;
 pub use door::{Client, Doored, announce};
