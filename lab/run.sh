@@ -7,6 +7,7 @@
 #
 #   client 203.0.113.50  ─┐
 #   gate   203.0.113.10  ─┼─ "internet"
+#   pebble 203.0.113.30  ─┤
 #   router 203.0.113.20  ─┘
 #   router 192.168.50.2  ─┐
 #   home   192.168.50.20 ─┼─ "home LAN"
@@ -22,6 +23,10 @@
 # Both programs are the real ones, built by `scripts/dev.sh lab`: Core in home,
 # and the Gate on the simulated VPS, enrolled with a join token as a VPS is.
 #
+# pebble is a certificate authority of the lab's own. The panel is given the
+# name panel.lab, which leads to the gate as a real name leads to a VPS, and
+# Core asks pebble for the certificate as it would ask Let's Encrypt.
+#
 # Usage: run.sh all | up | test | bench | down | clean
 #        HOME_FW=nftables run.sh all     # Docker's nftables firewall backend at home
 set -euo pipefail
@@ -29,6 +34,9 @@ cd "$(dirname "$0")"
 
 export HOME_FW=${HOME_FW:-iptables}
 GATE_IP=203.0.113.10 HOME_IP=203.0.113.20 HOME_IP_NEXT=203.0.113.21 CLIENT_IP=203.0.113.50
+PEBBLE_IP=203.0.113.30
+NAME=panel.lab  # the panel's name, which leads to the gate
+TLS=8443        # the panel over TLS: its door at home, and the port the gate forwards for it
 ROUTER_LAN_IP=192.168.50.2 HOME_LAN_IP=192.168.50.20 NAS_IP=192.168.50.30
 GATE_TUN=10.213.77.1 HOME_TUN=10.213.77.2 GAME_IP=10.213.80.2
 API_PORT=4857   # where the Gate answers home, on its tunnel address only
@@ -88,12 +96,15 @@ start_gate() { dc exec -d gate sh -c 'homewarp-gate run --dir /run/hw >>/run/hw/
 start_core() {
   # On every address, as the deployment listens: the rules are what keep the Gate from it.
   # And told which image to listen from when it probes the tunnel: here it does not run from one.
-  dc exec -d home sh -c 'HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=0.0.0.0:3600 HOMEWARP_IMAGE=homewarp-lab-core homewarp >>/run/hw/core.log 2>&1'
+  # Over TLS it is served to a door, as the deployment serves it, and its certificate is asked of pebble.
+  dc exec -d home sh -c "HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=0.0.0.0:3600 HOMEWARP_IMAGE=homewarp-lab-core \
+    HOMEWARP_TLS=unix:/run/hw/core/run/tls.sock HOMEWARP_TLS_PORT=$TLS \
+    HOMEWARP_ACME=https://pebble:14000/dir HOMEWARP_ACME_ROOT=/run/hw/pebble.pem homewarp >>/run/hw/core.log 2>&1"
   for _ in $(seq 40); do core GET /health >/dev/null 2>&1 && break; sleep 0.5; done
 }
 
 cmd_up() {
-  local code command token
+  local code command token root
 
   echo "== containers"
   dc build
@@ -126,17 +137,30 @@ EOF
 
   echo "== home: Core itself, which makes the servers and its end of the tunnel"
   dc cp ../deploy/out/homewarp-static home:/usr/local/bin/homewarp
-  { vars SVC ROUTER_LAN_IP; cat <<'EOF'; } | in_ home
+  { vars SVC ROUTER_LAN_IP GATE_IP PEBBLE_IP NAME TLS; cat <<'EOF'; } | in_ home
 set -eu
 ip route replace default via "$ROUTER_LAN_IP"
 pkill homewarp 2>/dev/null || true
 docker ps -aq --filter label=homewarp.server | xargs -r docker rm -f >/dev/null
+docker rm -f panel-door >/dev/null 2>&1 || true
 ip link del homewarp0 2>/dev/null || true
-rm -rf /run/hw && mkdir -p /run/hw/core
+rm -rf /run/hw && mkdir -p /run/hw/core/run
+# The panel's name leads to the VPS, and the authority has a name of its own.
+grep -q " $NAME\$" /etc/hosts || printf '%s %s\n%s pebble\n' "$GATE_IP" "$NAME" "$PEBBLE_IP" >> /etc/hosts
+# The door of the panel over TLS: Core's own program in a container, its port
+# published as the deployment publishes it, and started again if it ends, as
+# the deployment's is: the tests stop every program called homewarp, this too.
+docker run -d --name panel-door --restart always -p "$TLS:$TLS" -v /run/hw/core/run:/run/homewarp homewarp-lab-core \
+  /usr/local/bin/homewarp door "0.0.0.0:$TLS" /run/homewarp/tls.sock >/dev/null
 SVC="$SVC" /lab/listen.sh </dev/null >/dev/null 2>&1 &
 # The worst case for the return path: a host that filters reverse paths strictly.
 sysctl -qw net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.default.rp_filter=1
 EOF
+  # The root that pebble's own address is trusted by, which Core is told of.
+  root=$(mktemp)
+  dc cp pebble:/test/certs/pebble.minica.pem "$root" >/dev/null
+  dc cp "$root" home:/run/hw/pebble.pem >/dev/null
+  rm -f "$root"
   start_core
   code=$(dc exec -T home sh -c "grep -o 'setup code: .*' /run/hw/core.log | cut -d' ' -f3")
   core POST /setup "{\"code\":\"$code\",\"username\":\"lab\",\"password\":\"only-in-the-lab\"}" >/dev/null
@@ -212,8 +236,29 @@ panel() {
   dc exec -T "$1" sh -c "{ printf 'GET /api/v1/health HTTP/1.0\r\n\r\n'; sleep 1; } | socat - TCP:$2:3600,connect-timeout=3 2>/dev/null | head -1 | tr -d '\r'" || true
 }
 
+# What $1 is answered when it asks for a page: the status, or 000 when nothing answers.
+status() {  # party, curl arguments...
+  local party=$1
+  shift
+  dc exec -T "$party" curl -s -m 5 -o /dev/null -w '%{http_code}' "$@" || true
+}
+
+# Asks the Gate through the tunnel, as Core does, and says the status it answered with.
+gate_asked() {  # method, path, [json]
+  status home -X "$1" -H "Authorization: Bearer $(gate_token)" -H 'Content-Type: application/json' \
+    ${3:+-d "$3"} "http://$GATE_TUN:$API_PORT$2"
+}
+
+# The panel as a browser on the internet reaches it: by its name, at the VPS, over TLS,
+# trusting the lab's authority and nobody else.
+browse() {  # curl arguments..., path
+  dc exec -T client curl -sS -m 8 --cacert /tmp/roots.pem --resolve "$NAME:$TLS:$GATE_IP" "${@:1:$#-1}" "https://$NAME:$TLS${!#}"
+}
+
+panel_is() { core GET /panel | field "$1"; }
+
 cmd_test() {
-  local HOME_PUB joined carried rss size wan
+  local HOME_PUB joined carried rss size wan token answer
   echo "home: $(dc exec -T home sh -c 'docker version --format "Docker {{.Server.Version}}"; iptables --version' | tr '\n' ' ') firewall backend $HOME_FW"
 
   echo "== enrolment: the VPS ran one command, and what that command carried no longer counts"
@@ -364,6 +409,48 @@ EOF
   check "and the Gate hears home from its new address" "$(gate_says | field home_endpoint)" "$HOME_IP_NEXT"
   dc exec -T router sh -c "ip addr del $HOME_IP_NEXT/24 dev $wan && ip addr add $HOME_IP/24 dev $wan"
   check "and from the old one, changed back" "$(seen_again 45)" "$CLIENT_IP"
+
+  echo "== a certificate's question: the answer is put on the VPS, and served on port 80 while it is there"
+  token=lab-Token_0123456789 answer=lab-Token_0123456789.a-key_s-mark
+  check "nothing answers on the VPS's port 80" "$(status client "http://$GATE_IP/.well-known/acme-challenge/$token")" "000"
+  check "the Gate takes an answer from home" "$(gate_asked PUT "/v1/challenge/$token" "{\"answer\":\"$answer\"}")" "200"
+  check "and anyone on the internet is given it" "$(dc exec -T client curl -s -m 5 "http://$GATE_IP/.well-known/acme-challenge/$token")" "$answer"
+  check "and nothing else: not another file" "$(status client --path-as-is "http://$GATE_IP/.well-known/acme-challenge/..%2F..%2Fhw%2Fconfig.json")" "404"
+  check "nor any other page" "$(status client "http://$GATE_IP/")" "404"
+  check "a token that names another directory is refused" "$(gate_asked PUT "/v1/challenge/..%2F..%2Fhw%2Fconfig.json" "{\"answer\":\"$answer\"}")" "422"
+  check "and so is an answer that is not one" "$(gate_asked PUT "/v1/challenge/$token" '{"answer":"<script>"}')" "422"
+  check "nobody without the token puts one there" "$(status home -X PUT -H 'Content-Type: application/json' -d "{\"answer\":\"$answer\"}" "http://$GATE_TUN:$API_PORT/v1/challenge/$token")" "401"
+  check "the Gate takes the answer away" "$(gate_asked DELETE "/v1/challenge/$token")" "204"
+  check "and lets go of port 80" "$(status client "http://$GATE_IP/.well-known/acme-challenge/$token")" "000"
+
+  echo "== the panel online: a name that leads to the VPS, and TLS ended at home"
+  check "control: the panel's port is not forwarded before it has a name" "$(status client -k --resolve "$NAME:$TLS:$GATE_IP" "https://$NAME:$TLS/api/v1/health")" "000"
+  check "the name is not taken without the authority's terms agreed to" "$(dc exec -T home curl -s -o /dev/null -w '%{http_code}' -b /run/hw/jar -X PUT -H 'Content-Type: application/json' -d "{\"name\":\"$NAME\"}" http://127.0.0.1:3600/api/v1/panel)" "422"
+  core PUT /panel "{\"name\":\"$NAME\",\"agreed\":true}" >/dev/null
+  for _ in $(seq 60); do [ "$(panel_is state)" = on ] && break; sleep 1; done
+  check "Core has a certificate for the name" "$(panel_is state) $(core GET /panel | python3 -c 'import json, sys; print(json.load(sys.stdin)["certificate"]["name"])')" "on $NAME"
+  [ "$(panel_is state)" = on ] || echo "   core says: $(panel_is problem)"
+  check "and says where the panel is" "$(panel_is address)" "https://$NAME:$TLS"
+  check "the answers are gone from the VPS again" "$(dc exec -T gate sh -c 'ls /run/homewarp-gate/challenges | wc -l')" "0"
+  for _ in $(seq 15); do [ "$(gate_says | field forwards)" = 6 ] && break; sleep 1; done
+  check "the Gate forwards the panel's port as one more" "$(gate_says | field forwards)" "6"
+  # What pebble signs with is made anew each time it starts: the lab asks it for the root.
+  dc exec -T home curl -sk "https://pebble:15000/roots/0" | dc exec -T client sh -c 'cat > /tmp/roots.pem'
+  check "a browser on the internet reaches the panel by its name, and trusts its certificate" "$(browse /api/v1/health | field status)" "ok"
+  check "the certificate is for that name and no other" "$(status client --cacert /tmp/roots.pem --resolve "other.lab:$TLS:$GATE_IP" "https://other.lab:$TLS/api/v1/health")" "000"
+  # As a browser sends it: over HTTP/2, and saying which page asked.
+  check "signed in there by the panel's own page, the cookie is one for TLS only" "$(browse -D - -o /dev/null -X POST -H "Origin: https://$NAME:$TLS" -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' /api/v1/login | grep -ci '^set-cookie:.*; Secure')" "1"
+  check "and a page of another site's is refused there" "$(browse -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://elsewhere.example' -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' /api/v1/login)" "403"
+  check "and on the home network it is as it was" "$(dc exec -T home curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' http://127.0.0.1:3600/api/v1/login | grep -ci '^set-cookie:.*; Secure' || true)" "0"
+  check "Core knows the browser by its own address" "$(core GET '/activity' | python3 -c 'import json, sys; print(next(entry["detail"] for entry in json.load(sys.stdin) if entry["action"] == "account.sign_in" and "203.0.113" in entry["detail"]))' | grep -o "$CLIENT_IP")" "$CLIENT_IP"
+  check "the VPS still cannot reach the panel's other port" "$(panel gate "$HOME_TUN")" ""
+  blocked "nor a service on home's tunnel address" gate "$HOME_TUN" "$SVC"
+  check "a server cannot be given the panel's port" "$(dc exec -T home curl -s -o /dev/null -w '%{http_code}' -b /run/hw/jar -X POST -H 'Content-Type: application/json' -d "{\"name\":\"clash\",\"template_id\":1,\"memory_mb\":256,\"port\":$TLS}" http://127.0.0.1:3600/api/v1/servers)" "422"
+  core PUT /panel '{"name":null}' >/dev/null
+  for _ in $(seq 15); do [ "$(gate_says | field forwards)" = 5 ] && break; sleep 1; done
+  check "with its name taken away, the Gate forwards the port no more" "$(gate_says | field forwards)" "5"
+  check "and nobody reaches the panel from the internet" "$(status client -k --resolve "$NAME:$TLS:$GATE_IP" "https://$NAME:$TLS/api/v1/health")" "000"
+  check "players get through as before" "$(seen tcp)" "$CLIENT_IP"
 
   echo "== a VPS is disconnected"
   core DELETE /gate

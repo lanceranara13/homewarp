@@ -23,9 +23,12 @@ homewarp-net = { path = "../homewarp-net" }
 homewarp-proto = { path = "../homewarp-proto" }
 homewarp-runtime = { path = "../homewarp-runtime" }
 homewarp-template = { path = "../homewarp-template" }
+hyper-util.workspace = true
+instant-acme.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true
 rust-embed.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
@@ -33,11 +36,13 @@ sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 tempfile.workspace = true
-tower.workspace = true

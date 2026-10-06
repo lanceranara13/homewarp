@@ -27,6 +27,23 @@ services:
     command: ["sh", "-c", "/lab/listen.sh & exec sleep infinity"]
     networks: { inet: { ipv4_address: 203.0.113.50 } }
 
+  # A certificate authority of the lab's own: Pebble, the small one Let's Encrypt
+  # publishes for trying clients against. It asks its questions on port 80, as
+  # the real one does, and knows the panel's name as the VPS's address.
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    depends_on: [gate]
+    command: ["-config", "/lab/pebble.json"]
+    environment:
+      # Neither a pause before it asks nor a nonce refused now and then: both
+      # are there to try a client's patience, which is not what is tried here.
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    extra_hosts: ["panel.lab:203.0.113.10"]
+    volumes: ["./pebble.json:/lab/pebble.json:ro"]
+    stop_grace_period: 1s
+    networks: { inet: { ipv4_address: 203.0.113.30 } }
+
   # Something on the home LAN that neither the gate nor a game server may touch.
   nas:
     <<: *node

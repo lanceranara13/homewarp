@@ -16,7 +16,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -28,8 +28,8 @@ use homewarp_net::{
     new_keypair, new_preshared_key, probe_packets, route_replies, take_down,
 };
 use homewarp_proto::{
-    Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status,
-    Through,
+    Answer, Answering, Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Protocol, Rotate,
+    Rotated, Status, Through,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::SqlitePool;
@@ -44,13 +44,13 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::{AppState, Owner, Problem, ProblemBody, SignedIn},
-    audit, auth,
+    audit, auth, panel,
     runtime::Runtime,
     servers::{self, PortProtocol},
 };
 
 /// The two ends' addresses inside the tunnel (PLAN.md §5.3, Addressing).
-const GATE: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 1);
+pub(crate) const GATE: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 1);
 const HOME: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 2);
 /// The bridge servers sit on, which `runtime` makes.
 const BRIDGE: &str = "homewarp-br";
@@ -179,6 +179,9 @@ pub(crate) struct Tunnel {
     counted: Mutex<BTreeMap<(u16, Protocol), u64>>,
     /// Set once it has been said that servers could not be kept from the home network.
     keep_failed: AtomicBool,
+    /// The port the panel is served on over TLS, here and on the VPS alike.
+    /// None, written 0, where this Core has no door for it.
+    panel_port: AtomicU16,
 }
 
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -214,7 +217,56 @@ impl Tunnel {
             check_due: AtomicBool::new(false),
             counted: Mutex::default(),
             keep_failed: AtomicBool::new(false),
+            panel_port: AtomicU16::new(0),
         })
+    }
+
+    /// Says which port the panel is served on over TLS, if it is.
+    pub(crate) fn panel_at(&self, port: Option<u16>) {
+        self.panel_port.store(port.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// The port a Gate forwards for the panel: the one it is served on over
+    /// TLS, once it has been given a name to be reached by.
+    async fn panel(&self) -> anyhow::Result<Option<u16>> {
+        let port = self.panel_port.load(Ordering::Relaxed);
+        if port == 0 {
+            return Ok(None);
+        }
+        Ok(panel::name(&self.db).await?.map(|_| port))
+    }
+
+    /// The Gate, where one is connected and has keys of its own.
+    async fn connected(&self) -> anyhow::Result<Gate> {
+        self.gate()
+            .await?
+            .filter(|gate| gate.join.is_none())
+            .context("No VPS is connected, and the panel's name leads to one. Connect a VPS first")
+    }
+
+    /// Has the Gate put the answer to a certificate authority's question
+    /// where the VPS's port 80 serves it.
+    pub(crate) async fn answer(&self, token: &str, answer: &str) -> anyhow::Result<Answering> {
+        let gate = self.connected().await?;
+        let asked = Answer {
+            answer: answer.to_owned(),
+        };
+        let path = format!("/v1/challenge/{token}");
+        match ask(&gate, &gate.keys, "PUT", &path, Some(&asked)).await {
+            Ok((answering, _)) => Ok(answering),
+            Err(Unanswered::Refused(404 | 405, _)) => bail!(
+                "The Gate on the VPS is older than this Homewarp and cannot answer for a certificate. Put the new one there"
+            ),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Has the Gate take such an answer away again.
+    pub(crate) async fn unanswer(&self, token: &str) -> anyhow::Result<()> {
+        let gate = self.connected().await?;
+        let path = format!("/v1/challenge/{token}");
+        ask::<(), ()>(&gate, &gate.keys, "DELETE", &path, None).await?;
+        Ok(())
     }
 
     /// Has the next round begin now: a server's ports have changed, or a VPS
@@ -493,7 +545,10 @@ impl Tunnel {
             peer_allowed: (Ipv4Addr::UNSPECIFIED, 0),
             peer_endpoint: Some(endpoint),
         };
-        let which = format!("{endpoint} {}", keys.gate_public_key);
+        // The rules differ by whether the panel has a name: its port is let
+        // in from the tunnel only then.
+        let panel = self.panel().await?;
+        let which = format!("{endpoint} {} {panel:?}", keys.gate_public_key);
         let again = lock(&self.up_for).as_deref() == Some(which.as_str());
         blocking(move || {
             bring_up(&link)?;
@@ -501,7 +556,7 @@ impl Tunnel {
             // Replaced once for each Gate, so that a newer Core's rules take
             // the place of an older one's, and put back if they have gone.
             if !again || !has_table() {
-                apply(&home_ruleset(BRIDGE, None)?)?;
+                apply(&home_ruleset(BRIDGE, None, panel)?)?;
             }
             Ok(())
         })
@@ -608,6 +663,13 @@ impl Tunnel {
                 });
             }
         }
+        // And the panel's own, as one more: where its door is, at home.
+        if let Some(port) = self.panel().await? {
+            forwards.push(Forward {
+                port,
+                protocol: Protocol::Tcp,
+            });
+        }
         let told = lock(&self.told).clone();
         if let Some(told) = told.filter(|told| told.forwards == forwards && told.mode == mode) {
             let heard: (Status, _) =
@@ -702,7 +764,8 @@ impl Tunnel {
         let port = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?
             .local_addr()?
             .port();
-        blocking(move || apply(&home_ruleset(BRIDGE, Some(port))?)).await?;
+        let panel = self.panel().await?;
+        blocking(move || apply(&home_ruleset(BRIDGE, Some(port), panel)?)).await?;
         let (said, mut lines) = mpsc::unbounded_channel::<String>();
         let listening = runtime.listen_once(port, move |line| {
             // An error here says that nobody is waiting for it any more.
@@ -737,7 +800,7 @@ impl Tunnel {
         let (listened, arrived) = tokio::join!(listening, dialling);
         // Counted before the rules that count it are replaced by the usual ones.
         let packets = blocking(probe_packets).await;
-        blocking(|| apply(&home_ruleset(BRIDGE, None)?)).await?;
+        blocking(move || apply(&home_ruleset(BRIDGE, None, panel)?)).await?;
         listened?;
         Ok(match (arrived?, packets?) {
             (Some(from), _) => Seen::From(from),

@@ -1,6 +1,6 @@
 import { queryOptions, useQuery } from '@tanstack/react-query'
 
-import { getGate, type Gate } from './api/client'
+import { getGate, getPanel, type Gate } from './api/client'
 
 /**
  * How often an open page asks after the Gate, in milliseconds: as often as
@@ -13,6 +13,13 @@ export const EVERY_GATE = { steady: 10_000, changing: 2_000 }
 export const gateQuery = queryOptions({
   queryKey: ['gate'],
   queryFn: getGate,
+  staleTime: 2_000,
+})
+
+/** The name the panel is reached by from the internet, and its certificate. Only the owner's page asks. */
+export const panelQuery = queryOptions({
+  queryKey: ['panel'],
+  queryFn: getPanel,
   staleTime: 2_000,
 })
 

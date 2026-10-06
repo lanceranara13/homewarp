@@ -35,6 +35,11 @@ services:
       # The port is the one that door publishes, which the panel tells people.
       HOMEWARP_SFTP: "unix:${HOMEWARP_DATA_DIR}/run/sftp.sock"
       HOMEWARP_SFTP_PORT: "2022"
+      # The panel over TLS, behind a third door: for when it is given a name
+      # to be reached by from the internet (Network, in the panel). The port
+      # is the one a connected VPS then forwards, there and here alike.
+      HOMEWARP_TLS: "unix:${HOMEWARP_DATA_DIR}/run/tls.sock"
+      HOMEWARP_TLS_PORT: "8443"
     volumes:
       # The same path inside as outside: Core gives Docker the paths of servers'
       # files, and Docker reads paths on the host.
@@ -70,5 +75,21 @@ services:
     security_opt: ["no-new-privileges:true"]
     command: ["door", "0.0.0.0:2022", "/run/homewarp/sftp.sock"]
     ports: ["2022:2022"]
+    volumes:
+      - "${HOMEWARP_DATA_DIR}/run:/run/homewarp"
+
+  # The door of the panel over TLS: the same once more. What comes through it
+  # is encrypted between a browser and Core, and until the panel has a name
+  # and a certificate for it nothing that knocks here is let in.
+  tls-door:
+    image: homewarp:dev
+    container_name: homewarp-tls-door
+    depends_on: [homewarp]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["door", "0.0.0.0:8443", "/run/homewarp/tls.sock"]
+    ports: ["8443:8443"]
     volumes:
       - "${HOMEWARP_DATA_DIR}/run:/run/homewarp"

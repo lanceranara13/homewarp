@@ -7,6 +7,8 @@ import { checkGate, connectGate, disconnectGate, type Gate, type PortProtocol } 
 import { Button, Confirm, CopyChip, Field, PageBar, Pill, Problem, Steps, buttonClass, type Tone } from '../components/ui'
 import { bytes } from '../format'
 import { EVERY_GATE, addressOf, gateLook, gateQuery, isChanging } from '../gate'
+import { useOwner } from '../session'
+import { PanelAddress } from './PanelAddress'
 
 const PROTOCOLS: Record<PortProtocol, string> = { tcp: 'TCP', udp: 'UDP', both: 'TCP and UDP' }
 
@@ -54,6 +56,7 @@ function amount(bytes: number): string {
 /** The tunnel, how it is doing, and every port players reach a server by. */
 export function NetworkPage() {
   const gate = useGateHere()
+  const owner = useOwner()
   const connected = gate.state === 'connected'
 
   return (
@@ -93,6 +96,7 @@ export function NetworkPage() {
           </section>
         )}
         <Ports gate={gate} />
+        {owner && <PanelAddress gate={gate} />}
         {connected && <Disconnect address={gate.address ?? ''} />}
       </main>
     </>

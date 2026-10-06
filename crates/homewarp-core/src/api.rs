@@ -13,7 +13,7 @@ use axum::{
     extract::{FromRequestParts, Request, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
-        header::{HOST, ORIGIN, RETRY_AFTER, SET_COOKIE},
+        header::{HOST, ORIGIN, RETRY_AFTER, SET_COOKIE, STRICT_TRANSPORT_SECURITY},
         request::Parts,
     },
     middleware::{self, Next},
@@ -25,8 +25,17 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    accounts, audit, auth, backups, door::Client, files, limits::Limiter, runtime::Runtime,
-    schedules, servers, settings, templates, totp, tunnel, tunnel::Tunnel, ui,
+    accounts, audit, auth, backups,
+    door::Client,
+    files,
+    limits::Limiter,
+    panel::{self, Authority, Panel},
+    runtime::Runtime,
+    schedules, servers, settings, templates,
+    tls::{Secured, Shown},
+    totp, tunnel,
+    tunnel::Tunnel,
+    ui,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -45,6 +54,13 @@ pub struct AppState {
     sftp_port: Option<u16>,
     /// How often a sign-in has failed, from where and at which account.
     pub(crate) limits: Arc<Limiter>,
+    /// The port the panel is served on over TLS, where it is.
+    pub(crate) tls_port: Option<u16>,
+    /// The certificate it is served with there.
+    pub(crate) shown: Arc<Shown>,
+    /// Who that certificate is asked of, and how the asking stands.
+    pub(crate) authority: Arc<Authority>,
+    pub(crate) panel: Arc<Panel>,
 }
 
 impl AppState {
@@ -71,6 +87,10 @@ impl AppState {
             setup_code,
             sftp_port: None,
             limits: Arc::default(),
+            tls_port: None,
+            shown: Arc::default(),
+            authority: Arc::default(),
+            panel: Arc::default(),
         })
     }
 
@@ -91,6 +111,23 @@ impl AppState {
     pub fn sftp_at(mut self, port: Option<u16>) -> Self {
         self.sftp_port = port;
         self
+    }
+
+    /// Says which port the panel is served on over TLS, here and on a VPS
+    /// alike, and who its certificate is asked of. Nothing, where it is not
+    /// served so: the panel can then be given no name.
+    pub fn tls_at(mut self, port: Option<u16>, authority: Authority) -> Self {
+        self.tls_port = port;
+        self.authority = Arc::new(authority);
+        self.tunnel.panel_at(port);
+        self
+    }
+
+    /// Starts keeping the panel's certificate: asking for one when the panel
+    /// is given a name, and for a newer one when it is due. Left to the
+    /// caller, as the tunnel is: it talks to the internet.
+    pub fn keep_certificate(&self) {
+        tokio::spawn(panel::keep_certificate(self.clone()));
     }
 
     /// The setup code, if this process started without an account. Whoever can
@@ -128,6 +165,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(backups::routes())
         .merge(schedules::routes())
         .merge(settings::routes())
+        .merge(panel::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.
@@ -135,7 +173,46 @@ pub fn app(state: AppState) -> Router {
     let (api, _) = api().split_for_parts();
     api.layer(middleware::from_fn(same_origin))
         .fallback(ui::serve)
+        .layer(middleware::from_fn_with_state(state.clone(), over_tls))
         .with_state(state)
+}
+
+/// What came in over TLS is answered as such: its cookie is one a browser
+/// sends back over TLS only. A cookie knows a name and no port, so without
+/// that it would go to whatever else answers at the panel's name, and on a
+/// VPS with a web server something does.
+///
+/// And where the panel has the port a browser takes for granted, the browser
+/// is told to come back over TLS from then on. On a port of its own it is
+/// not: that would be said of the whole name, and send the browser to a port
+/// of the VPS's that is not the panel's.
+async fn over_tls(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let secured = request.extensions().get::<Secured>().is_some();
+    let mut response = next.run(request).await;
+    if !secured {
+        return response;
+    }
+    let headers = response.headers_mut();
+    let cookies: Vec<HeaderValue> = headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|cookie| {
+            HeaderValue::from_bytes(&[cookie.as_bytes(), b"; Secure"].concat()).ok()
+        })
+        .collect();
+    if !cookies.is_empty() {
+        headers.remove(SET_COOKIE);
+        for cookie in cookies {
+            headers.append(SET_COOKIE, cookie);
+        }
+    }
+    if state.tls_port == Some(443) {
+        headers.insert(
+            STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000"),
+        );
+    }
+    response
 }
 
 /// The OpenAPI document for the API.
@@ -323,14 +400,18 @@ const TRIES_AT_AN_ACCOUNT: u32 = 20;
 /// Who is trying to sign in, as the limits know them: the address they come
 /// from and the account they name.
 pub(crate) struct Trying {
-    from: String,
+    /// None for the Gate's own address in the tunnel. Where the Gate stands in
+    /// for whoever comes through it, that is everybody on the internet at
+    /// once, and a count kept of it would let anyone shut the rest out.
+    from: Option<String>,
     account: String,
 }
 
 impl Trying {
     pub(crate) fn new(client: Client, account: &str) -> Self {
+        let one = client.0 != std::net::IpAddr::V4(tunnel::GATE);
         Self {
-            from: format!("from {}", client.0),
+            from: one.then(|| format!("from {}", client.0)),
             account: format!("account {}", account.trim().to_lowercase()),
         }
     }
@@ -339,7 +420,9 @@ impl Trying {
     /// looked up or worked out for it.
     pub(crate) fn may(&self, limits: &Limiter) -> Result<(), Problem> {
         let waits = [
-            limits.wait(&self.from, TRIES_FROM_AN_ADDRESS),
+            self.from
+                .as_ref()
+                .and_then(|from| limits.wait(from, TRIES_FROM_AN_ADDRESS)),
             limits.wait(&self.account, TRIES_AT_AN_ACCOUNT),
         ];
         match waits.into_iter().flatten().max() {
@@ -349,14 +432,18 @@ impl Trying {
     }
 
     pub(crate) fn failed(&self, limits: &Limiter) {
-        limits.failed(&self.from);
+        if let Some(from) = &self.from {
+            limits.failed(from);
+        }
         limits.failed(&self.account);
     }
 
     /// The address has got it right, and starts afresh. What the account has
     /// been failed at by others still counts.
     pub(crate) fn passed(&self, limits: &Limiter) {
-        limits.passed(&self.from);
+        if let Some(from) = &self.from {
+            limits.passed(from);
+        }
     }
 }
 

@@ -111,11 +111,19 @@ cmd_deploy() {
 # connected in it is a real tunnel. There is one tunnel on a machine: connect a VPS here only while
 # staging has none. `scratch down` removes the copy, the containers of its
 # servers, its data and, if it had a VPS, its end of the tunnel.
+#
+# It is served over TLS as well, behind a third door, on SCRATCH_TLS_PORT (8444):
+# the port a VPS connected to it forwards once the panel is given a name. The
+# certificate for that name is asked of SCRATCH_ACME, which is the staging
+# authority of Lets Encrypt unless another is named: a throwaway copy has no
+# business using up what the real one allows a name in a week.
+SCRATCH_TLS_PORT=${SCRATCH_TLS_PORT:-8444}
+SCRATCH_ACME=${SCRATCH_ACME:-https://acme-staging-v02.api.letsencrypt.org/directory}
 cmd_scratch() {
-  local data=$REMOTE/scratch
+  local data=$REMOTE/scratch tls=$SCRATCH_TLS_PORT
   if [ "${1:-up}" = down ]; then
     home "had=\$(docker exec homewarp-scratch sh -c 'test -e /sys/class/net/homewarp0 && echo tunnel' 2>/dev/null || true)
-          docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp >/dev/null 2>&1 || true
+          docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp homewarp-scratch-tls >/dev/null 2>&1 || true
           for id in \$(ls $data/servers 2>/dev/null); do
             docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown >/dev/null 2>&1 || true
           done
@@ -126,18 +134,19 @@ cmd_scratch() {
           docker run --rm -v $REMOTE:/homewarp alpine:3.20 rm -rf /homewarp/scratch"
     return
   fi
-  home "docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp >/dev/null 2>&1 || true"
+  home "docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp homewarp-scratch-tls >/dev/null 2>&1 || true"
   home "set -e
     mkdir -p $data
     docker run -d --name homewarp-scratch --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
       --cap-add NET_ADMIN --security-opt no-new-privileges:true --network host \
       -e HOMEWARP_DATA=$data -e HOMEWARP_LISTEN=unix:$data/run/panel.sock \
-      -e HOMEWARP_SFTP=unix:$data/run/sftp.sock -e HOMEWARP_SFTP_PORT=2023 -v $data:$data \
+      -e HOMEWARP_SFTP=unix:$data/run/sftp.sock -e HOMEWARP_SFTP_PORT=2023       -e HOMEWARP_TLS=unix:$data/run/tls.sock -e HOMEWARP_TLS_PORT=$tls -e HOMEWARP_ACME=$SCRATCH_ACME -v $data:$data \
       -v /var/run/docker.sock:/var/run/docker.sock homewarp:dev >/dev/null
     docker run -d --name homewarp-scratch-door --read-only --cap-drop ALL --security-opt no-new-privileges:true \
       -v $data/run:/run/homewarp -p 3601:3600 homewarp:dev door 0.0.0.0:3600 /run/homewarp/panel.sock >/dev/null
     docker run -d --name homewarp-scratch-sftp --read-only --cap-drop ALL --security-opt no-new-privileges:true \
       -v $data/run:/run/homewarp -p 2023:2022 homewarp:dev door 0.0.0.0:2022 /run/homewarp/sftp.sock >/dev/null
+    docker run -d --name homewarp-scratch-tls --read-only --cap-drop ALL --security-opt no-new-privileges:true       -v $data/run:/run/homewarp -p $tls:$tls homewarp:dev door 0.0.0.0:$tls /run/homewarp/tls.sock >/dev/null
     for _ in \$(seq 30); do curl -fsS -o /dev/null http://127.0.0.1:3601/api/v1/health 2>/dev/null && break; sleep 1; done
     docker logs homewarp-scratch 2>&1 | grep -E 'setup code|cannot run servers' | tail -2"
 }

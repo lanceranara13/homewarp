@@ -442,8 +442,17 @@ See `DESIGN.md` for the interface.
 |---|---|---|
 | LAN only | `http://<home-ip>:3600` | Yes — owner's choice, 2026-10-05 |
 | Tailscale | Panel bound to the tailnet (or published with `tailscale serve`). Reachable from the owner's devices anywhere, invisible to the internet. | Opt-in |
-| Public via Gate, with domain | Gate forwards 443 raw; **Core terminates TLS** (ACME TLS-ALPN-01). The VPS never sees plaintext. | Opt-in |
-| Public via Gate, no domain | Same, using a Let's Encrypt IP-address certificate (GA since January 2026, 160-hour lifetime, auto-renewed). | Opt-in |
+| Public via Gate, with domain | Gate forwards the panel's port raw; **Core terminates TLS**. The VPS never sees plaintext. | Opt-in |
+| Public via Gate, no domain | Same, using a Let's Encrypt IP-address certificate (GA since January 2026, 160-hour lifetime, auto-renewed). | Not built |
+
+*As built (Phase 5), with a domain:* the panel's port is one of its own, 8443 unless the
+deployment says otherwise, the same number on the VPS and at home. 443 was the plan, and on
+a VPS with a web server 443 is that server's; so is 80, which is why the certificate is
+asked for over HTTP-01 and not TLS-ALPN-01: Core has the answer to the authority's
+question, the Gate puts it in a file on the VPS, and whatever has port 80 there serves the
+file (the Gate itself, for as long as the asking takes, where nothing else has it). The
+answer is no secret, and it is all the VPS is handed. At home the port is a third door's,
+and the tunnel is let in to that door and to nothing else of the panel.
 
 ### 5.10 Tailscale (explored 2026-10-05)
 
@@ -486,6 +495,7 @@ the owner's to grant.
 | Threat | Mitigation |
 |---|---|
 | VPS is compromised | It holds no data or panel credentials. Home firewall lets tunnel traffic reach **only** published game ports on the game bridge — never the host, never the LAN. Worst case equals what the internet could already reach. |
+| VPS is compromised, and the panel has a name that leads to it | Whoever reads the VPS's traffic reads ciphertext: TLS is ended at home, and the key never leaves it. Whoever *has* the VPS has the address the name leads to, and so could ask an authority for a certificate of their own for that name and stand between a browser and the panel. Two things are in the way. The session cookie is marked `Secure`, so it is not sent to the VPS's own web server over plain HTTP. And a **CAA record** for the name, which the Network page writes out with this Homewarp's account at the authority in it, has the authority refuse everybody else; that record is the owner's to add at their DNS host, and until it is there this row is only half true. A certificate got that way would also show in the public logs of certificates. |
 | Game server is exploited (plugin RCE, Log4Shell-class bug) | Unprivileged, capability-less container; read-only rootfs; resource limits; blocked from RFC1918 ranges, so it cannot pivot into the home network. |
 | Malicious template / install script | Runs only inside the install container under the same limits; never on the host. Import shows the script and images before confirming. |
 | Panel account takeover | Argon2id, rate-limited login, TOTP (then passkeys), `HttpOnly`+`SameSite=Strict` sessions, CSRF protection, hashed API keys, audit log. Panel is LAN-only unless the user opts in. |
@@ -1344,7 +1354,8 @@ Each phase ends with something that works on the homelab.
       §6 were written for, and the one recommended.
   - **Decided by the owner, 2026-10-06: Core ends TLS at home**, with the nginx server
     block that goes with it allowed. The name was made that day and answers with the
-    VPS's address. How it is to be built, nothing of which is built yet:
+    VPS's address. How it was to be built (it is built now: see "The panel online,
+    built" further down):
     - *The challenge without a way in.* A taken-over VPS must not reach the panel
       through the tunnel (§6, and the lab checks it), so nginx cannot pass the
       certificate's challenge home. Instead Core, which runs the ACME client and keeps
@@ -1372,11 +1383,50 @@ Each phase ends with something that works on the homelab.
     only while a VPS was connected. It is a table of its own now, `homewarp_keep`, put
     in place whenever Core runs servers and put back each round if a firewall's restart
     takes it. The lab asks for it after the VPS is disconnected.
-- *Still to do:* all of that, and the cookie's `Secure` flag with it; servers kept from the home network before a VPS is
-  connected, and not only after; the Gate's limit on new connections as a setting;
-  "harden this VPS" with commit-confirm, built and tried in the lab only; fuzzing the
-  parsers; the review of §6 against what was built. And a way back in for an owner who
-  has lost both app and recovery codes, from the machine itself.
+  - *The panel online, built (2026-10-07).* The Network page has "Panel address": the
+    owner gives the panel a name that leads to the VPS, agrees to the authority's terms,
+    and Core asks for a certificate at once and keeps it renewed (a look every hour, a
+    new one with a third of the old one's time left). What was built for it:
+    - *Gate:* two requests, to put the answer to an authority's question in
+      `/run/homewarp-gate/challenges` and to take it away. Names are held to the letters
+      a token is made of. Where nothing on the VPS has port 80 the Gate serves the
+      answers there itself, for as long as there are any, and lets go of the port after;
+      where a web server has it, the reply says so and the panel prints what that
+      server is to be told. The service may take port 80, and has a directory under
+      `/run` that is gone when it stops.
+    - *Core:* TLS ended by rustls on a socket behind a third door (`HOMEWARP_TLS`,
+      `HOMEWARP_TLS_PORT`); each handshake in a task of its own, 256 at once at the
+      most; HTTP/2 and HTTP/1.1. The certificate is asked for with `instant-acme` over
+      HTTP-01, of Let's Encrypt unless `HOMEWARP_ACME` names another, and kept with its
+      key and the account in three rows of `settings`. Before the authority is told to
+      ask, Core asks the VPS's port 80 itself and stops with words if the wrong thing
+      comes back: an authority counts failures. A certificate's dates are read off it
+      by a few lines of DER, tested against a certificate made on the spot.
+    - *The tunnel:* with a name, the Gate forwards the panel's port as one more, and
+      home's rules let the tunnel in to that door alone: a connection that was to that
+      port and that Docker passed on. Without a name neither is so. A server cannot be
+      given the port.
+    - *What a browser gets over TLS:* a cookie marked `Secure`. Not HSTS, unless the
+      port is 443: it would be said of the whole name, and on a VPS with a web server
+      the name's port 443 is not the panel. And a request over HTTP/2 names its site in
+      its address and carries no `Host` header, which the same-site check reads; the
+      header is filled in from the address. That was found by reading, before any
+      browser met it: every change a browser made there would have been refused. The
+      lab now sends what a browser sends.
+    - *Sign-in limits where the Gate stands in:* in NAT mode everybody on the internet
+      arrives from the Gate's one address, so that address is not counted, or anyone
+      could shut the rest out. The count by account still is.
+    - *The lab* has an authority of its own (Pebble) and the name `panel.lab`: from
+      "nothing answers on the VPS's port 80" through a certificate, a browser on the
+      internet that trusts it, the cookie, the browser's own address in Activity, to
+      the port closed again with the name taken away.
+    - *Not done here:* SFTP is not forwarded, and a page opened by the name says so in
+      place of an address that would not work. A VPS with a firewall and no web server
+      needs port 80 opened by hand (Phase 6). No certificate for an address alone.
+- *Still to do:* passkeys, which the name makes possible; the Gate's limit on new
+  connections as a setting; "harden this VPS" with commit-confirm; fuzzing the parsers;
+  a path-traversal suite; the review of §6 against what was built; two-step sign-in
+  looked at in a browser.
 
 **Phase 6 — Packaging and onboarding**
 - One-line installers, signed releases, self-update, ARM64 builds of Core, docs.

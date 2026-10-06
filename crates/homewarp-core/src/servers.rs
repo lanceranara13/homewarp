@@ -240,6 +240,17 @@ struct Checked {
 }
 
 impl Checked {
+    /// Refuses a port that is Homewarp's own: the one the panel is served on
+    /// over TLS, which a VPS forwards as it forwards a server's.
+    fn apart(self, state: &AppState) -> Result<Self, Problem> {
+        match state.tls_port.filter(|port| self.numbers().contains(port)) {
+            Some(port) => Err(Problem::Invalid(
+                format!("Port {port} is the panel's own.").into(),
+            )),
+            None => Ok(self),
+        }
+    }
+
     /// Every port number asked for, the first one first.
     fn numbers(&self) -> Vec<u16> {
         std::iter::once(self.port)
@@ -527,7 +538,7 @@ async fn create_server(
         return Err(Problem::Invalid("There is no such template.".into()));
     };
     let template = templates::read(&definition)?;
-    let checked = check(&template, new.settings)?;
+    let checked = check(&template, new.settings)?.apart(&state)?;
 
     let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
     checked.free(&state.db, None).await?;
@@ -616,7 +627,7 @@ async fn change_server(
     .await?;
     let (uuid, definition, installed) = found.ok_or(MISSING)?;
     let template = templates::read(&definition)?;
-    let checked = check(&template, settings)?;
+    let checked = check(&template, settings)?.apart(&state)?;
     // A running server was started as it was. Changed under itself, it would
     // no longer be what is written down for it.
     if state

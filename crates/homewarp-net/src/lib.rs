@@ -331,10 +331,22 @@ pub fn heard() -> Result<Heard, Error> {
 /// it comes in as a player's connection does. What arrives for it from the
 /// tunnel is counted, before anything on this machine can drop it, so that
 /// "it never got here" can be told from "it got here, and no reply got back".
-pub fn home_ruleset(bridge: &str, probe: Option<u16>) -> Result<String, Error> {
+///
+/// `panel` is the TCP port the panel is reached on over TLS, once it has been
+/// given a name. Its door is a container that is no server and sits on no
+/// bridge of Homewarp's, so it is let in by what it came for: a connection
+/// from the tunnel that was to that port and that Docker passed on. The panel's
+/// other port, the one without TLS, stays shut to the tunnel.
+pub fn home_ruleset(bridge: &str, probe: Option<u16>, panel: Option<u16>) -> Result<String, Error> {
     if !named_well(bridge) {
         return Err(Error::Interface(bridge.to_owned()));
     }
+    let panel = match panel {
+        None => String::new(),
+        Some(port) => format!(
+            "\n    iifname \"homewarp0\" meta l4proto tcp ct original proto-dst {port} ct status dnat accept"
+        ),
+    };
     let (counter, counted) = match probe {
         None => Default::default(),
         Some(port) => (
@@ -359,7 +371,7 @@ table inet homewarp {{{counter}
   }}
   chain forward {{
     type filter hook forward priority filter - 1; policy accept;
-    iifname "homewarp0" oifname "{bridge}" ct status dnat accept
+    iifname "homewarp0" oifname "{bridge}" ct status dnat accept{panel}
     iifname "homewarp0" counter drop
     iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
     oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
@@ -734,9 +746,9 @@ mod tests {
 
     #[test]
     fn home_counts_what_arrives_for_a_probe_and_opens_nothing_for_it() {
-        let plain = super::home_ruleset("homewarp-br", None).unwrap();
+        let plain = super::home_ruleset("homewarp-br", None, None).unwrap();
         assert!(!plain.contains("probe"));
-        let probing = super::home_ruleset("homewarp-br", Some(50002)).unwrap();
+        let probing = super::home_ruleset("homewarp-br", Some(50002), None).unwrap();
         assert!(probing.contains("counter probe { packets 0 bytes 0 }"));
         // Counted where it arrives, before anything has had the chance to drop it.
         let counted = probing
@@ -795,7 +807,7 @@ mod tests {
 
     #[test]
     fn home_marks_what_comes_from_the_gate_and_lets_in_only_what_docker_published() {
-        let rules = super::home_ruleset("homewarp-br", None).unwrap();
+        let rules = super::home_ruleset("homewarp-br", None, None).unwrap();
         // The mark goes on a connection as it arrives, and onto its replies only.
         assert!(rules.contains("iifname \"homewarp0\" ct state new ct mark set 0x4857"));
         assert!(rules.contains("iifname != \"homewarp0\" ct mark 0x4857 meta mark set ct mark"));
@@ -806,9 +818,33 @@ mod tests {
             "iifname { \"homewarp0\", \"homewarp-br\" } ct state established,related accept"
         ));
         assert!(matches!(
-            super::home_ruleset("br\" accept; #", None),
+            super::home_ruleset("br\" accept; #", None, None),
             Err(Error::Interface(_))
         ));
+    }
+
+    #[test]
+    fn home_lets_the_tunnel_in_to_the_panels_tls_port_once_it_has_a_name_and_to_no_other() {
+        let named = super::home_ruleset("homewarp-br", None, Some(8443)).unwrap();
+        // Among what passes through this machine, ahead of the rule that drops
+        // whatever else comes from the tunnel. What comes to the machine itself
+        // is dropped as before.
+        let (to_here, through) = named.split_once("chain forward").unwrap();
+        let let_in = through
+            .find("iifname \"homewarp0\" meta l4proto tcp ct original proto-dst 8443 ct status dnat accept")
+            .unwrap();
+        assert!(let_in < through.find("iifname \"homewarp0\" counter drop").unwrap());
+        assert!(!to_here.contains("8443"));
+        // And that is the only difference a name makes.
+        let without: String = named
+            .lines()
+            .filter(|line| !line.contains("proto-dst"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(
+            without,
+            super::home_ruleset("homewarp-br", None, None).unwrap()
+        );
     }
 
     #[test]

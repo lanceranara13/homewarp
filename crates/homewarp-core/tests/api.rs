@@ -14,7 +14,7 @@ use axum::{
         },
     },
 };
-use homewarp_core::{AppState, app, open, openapi};
+use homewarp_core::{AppState, Authority, app, open, openapi};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tower::ServiceExt;
@@ -85,12 +85,19 @@ impl Answer {
 }
 
 async fn panel() -> Panel {
+    panel_at(None).await
+}
+
+/// A panel that is served over TLS on this port as well, as one behind a door
+/// for it is. Nothing here listens, and no certificate is asked for.
+async fn panel_at(tls: Option<u16>) -> Panel {
     let files = tempfile::tempdir().unwrap();
     let db = open(&files.path().join("homewarp.db")).await.unwrap();
     // No Docker here: what servers do on it is tried on the homelab.
     let state = AppState::start(db.clone(), files.path(), None)
         .await
-        .unwrap();
+        .unwrap()
+        .tls_at(tls, Authority::default());
     let setup_code = state
         .setup_code()
         .expect("a new database has no account")
@@ -1616,6 +1623,107 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
     assert_eq!(panel.get(settings, cookie).await.body, kept);
     assert_eq!(
         panel.get(settings, None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn the_panel_is_given_a_name_by_its_owner_where_it_has_a_door_for_tls() {
+    let at = "/api/v1/panel";
+    let named = json!({ "name": "panel.example.com", "agreed": true });
+
+    // Without a door for TLS there is nothing for a name to lead to.
+    let plain = panel().await;
+    let cookie = plain.set_up().await;
+    let view = plain.get(at, Some(&cookie)).await;
+    assert_eq!(view.status, StatusCode::OK, "{}", view.body);
+    assert_eq!(view.body["available"], false);
+    assert_eq!(view.body["state"], "off");
+    let refused = plain.put(at, named.clone(), Some(&cookie)).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+
+    let panel = panel_at(Some(8443)).await;
+    let cookie = panel.set_up().await;
+    let cookie = Some(cookie.as_str());
+    let view = panel.get(at, cookie).await;
+    assert_eq!(view.body["available"], true);
+    assert_eq!(view.body["port"], 8443);
+    assert_eq!(view.body["name"], Value::Null);
+    assert_eq!(view.body["authority"], "acme-v02.api.letsencrypt.org");
+
+    for (wrong, said) in [
+        (
+            json!({ "name": "192.168.1.250", "agreed": true }),
+            "A name is like panel.example.com",
+        ),
+        (
+            json!({ "name": "panel.example.com:8443", "agreed": true }),
+            "A name is like panel.example.com",
+        ),
+        (
+            json!({ "name": "panel.example.com" }),
+            "whose terms have to be agreed to first",
+        ),
+    ] {
+        let answer = panel.put(at, wrong, cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{said}");
+        let error = answer.body["error"].as_str().unwrap();
+        assert!(error.contains(said), "{error}");
+    }
+    assert_eq!(panel.get(at, cookie).await.body["name"], Value::Null);
+
+    // Kept as names are written, and a certificate is asked for at once.
+    let spelt = json!({ "name": " Panel.Example.com. ", "agreed": true });
+    let given = panel.put(at, spelt, cookie).await;
+    assert_eq!(given.status, StatusCode::OK, "{}", given.body);
+    assert_eq!(given.body["name"], "panel.example.com");
+    assert_eq!(given.body["state"], "asking");
+    // There is no address to give out until there is a certificate for it.
+    assert_eq!(given.body["address"], Value::Null);
+    assert_eq!(given.body["certificate"], Value::Null);
+    let again = panel
+        .post("/api/v1/panel/certificate", json!({}), cookie)
+        .await;
+    assert_eq!(again.status, StatusCode::ACCEPTED, "{}", again.body);
+
+    // The port is the panel's own now, and no server's.
+    let template = panel
+        .post("/api/v1/templates", json!({ "egg": EGG }), cookie)
+        .await
+        .body["id"]
+        .as_i64()
+        .unwrap();
+    let server =
+        json!({ "name": "Survival", "template_id": template, "memory_mb": 1024, "port": 8443 });
+    let clash = panel.post("/api/v1/servers", server, cookie).await;
+    assert_eq!(clash.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(clash.body["error"], "Port 8443 is the panel's own.");
+
+    // Taken away again, there is nothing to ask a certificate for.
+    let off = panel.put(at, json!({ "name": null }), cookie).await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    assert_eq!(off.body["state"], "off");
+    assert_eq!(off.body["name"], Value::Null);
+    let nothing = panel
+        .post("/api/v1/panel/certificate", json!({}), cookie)
+        .await;
+    assert_eq!(nothing.status, StatusCode::CONFLICT);
+
+    // Written down, both times.
+    let activity = panel.get("/api/v1/activity", cookie).await;
+    let named: Vec<&str> = activity
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["action"] == "panel.name")
+        .map(|entry| entry["detail"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, ["no name", "panel.example.com"]);
+
+    assert_eq!(panel.get(at, None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        panel.put(at, json!({ "name": null }), None).await.status,
         StatusCode::UNAUTHORIZED
     );
 }

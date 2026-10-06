@@ -19,6 +19,16 @@ pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+/// The other way about: the day counted from 1970-01-01 that a year, month and
+/// day name, by the same author's `days_from_civil`.
+pub(crate) fn days(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let (era, year) = (year.div_euclid(400), year.rem_euclid(400));
+    let month = if month > 2 { month - 3 } else { month + 9 };
+    let day = (153 * month + 2) / 5 + day - 1;
+    era * 146_097 + year * 365 + year / 4 - year / 100 + day - 719_468
+}
+
 /// Times that come round, as cron writes them: five fields, for the minute,
 /// the hour, the day of the month, the month and the day of the week. Each is
 /// `*`, a number, a range `a-b`, any of those with a step `/n`, or several of

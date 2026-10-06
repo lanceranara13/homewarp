@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use homewarp_core::{AppState, Client, Doored, Runtime, announce};
+use homewarp_core::{AppState, Authority, Client, Doored, Runtime, announce};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, UnixListener, UnixStream},
@@ -80,11 +80,39 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .or_else(|| Some(sftp.as_ref()?.rsplit_once(':')?.1.to_owned()))
         .and_then(|port| port.parse().ok());
+    // The panel over TLS, for when it is given a name to be reached by from
+    // the internet: served where `HOMEWARP_TLS` says, as SFTP is, and
+    // `HOMEWARP_TLS_PORT` is the port its door publishes, which a VPS then
+    // forwards as its own. `HOMEWARP_ACME` is the directory of the authority
+    // its certificate is asked of, where that is not Let's Encrypt, and
+    // `HOMEWARP_ACME_ROOT` a PEM file of the root such an authority's own
+    // address is trusted by.
+    let set = |name: &str| env::var(name).ok().filter(|value| !value.is_empty());
+    let tls = set("HOMEWARP_TLS");
+    let tls_port = set("HOMEWARP_TLS_PORT")
+        .or_else(|| Some(tls.as_ref()?.rsplit_once(':')?.1.to_owned()))
+        .and_then(|port| port.parse().ok());
+    let authority = Authority::at(
+        set("HOMEWARP_ACME"),
+        set("HOMEWARP_ACME_ROOT").map(PathBuf::from),
+    );
+    // Said once for the whole program, which has one such library and no other.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let state = AppState::start(db, &data, runtime)
         .await?
-        .sftp_at(sftp.as_ref().and(sftp_port));
+        .sftp_at(sftp.as_ref().and(sftp_port))
+        .tls_at(tls.as_ref().and(tls_port), authority);
     state.keep_tunnel();
     state.keep_schedules();
+    if let Some(listen) = tls {
+        state.keep_certificate();
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = homewarp_core::serve_tls(state, listen).await {
+                tracing::error!("The panel is not served over TLS: {error:#}");
+            }
+        });
+    }
     if let Some(listen) = sftp {
         let state = state.clone();
         tokio::spawn(async move {

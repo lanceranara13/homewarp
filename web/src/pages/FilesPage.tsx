@@ -625,10 +625,21 @@ function DiskLine({ id }: { id: number }) {
 function SftpLine({ id }: { id: number }) {
   const { data: session } = useSuspenseQuery(sessionQuery)
   if (!session.sftp_port || !session.user) return null
+  const login = `${session.user.username}.${id}`
+  // Opened by the panel's name, this page came through the VPS, and the VPS
+  // passes SFTP on to nobody: the address in the bar is not where it is.
+  if (window.location.protocol === 'https:') {
+    return (
+      <p className="text-small text-ink-subtle">
+        For many files at once there is SFTP, from your home network only: port {session.sftp_port} of this machine there, as{' '}
+        <code className="font-mono text-ink">{login}</code> with this account&rsquo;s password.
+      </p>
+    )
+  }
   return (
     <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-small text-ink-subtle">
       For many files at once, SFTP
-      <CopyChip text={`sftp://${session.user.username}.${id}@${window.location.hostname}:${session.sftp_port}`} />
+      <CopyChip text={`sftp://${login}@${window.location.hostname}:${session.sftp_port}`} />
       with this account&rsquo;s password.
     </p>
   )

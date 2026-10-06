@@ -33,7 +33,9 @@ export type ScheduleSettings = components['schemas']['ScheduleSettings']
 export type Task = components['schemas']['Task']
 export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
+export type Panel = components['schemas']['PanelView']
 type NewGate = components['schemas']['NewGate']
+type PanelChange = components['schemas']['PanelChange']
 type SetupRequest = components['schemas']['SetupRequest']
 type LoginRequest = components['schemas']['LoginRequest']
 
@@ -466,4 +468,22 @@ export async function checkGate(): Promise<Gate> {
 export async function disconnectGate(): Promise<void> {
   const { error, response } = await signedIn(() => api.DELETE('/api/v1/gate'))
   if (!response.ok) fail(error)
+}
+
+/** The name the panel is reached by from the internet, and the certificate for it. Only the owner may ask. */
+export async function getPanel(): Promise<Panel> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/panel'))
+  return data ?? fail(error)
+}
+
+/** Gives the panel a name, or with none takes it off the internet again. */
+export async function changePanel(body: PanelChange): Promise<Panel> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/panel', { body }))
+  return data ?? fail(error)
+}
+
+/** Asks for the certificate again now, after an asking that failed. */
+export async function askForCertificate(): Promise<Panel> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/panel/certificate'))
+  return data ?? fail(error)
 }

@@ -490,6 +490,156 @@
         }
       }
     },
+    "/api/v1/panel": {
+      "get": {
+        "summary": "The panel's way in from the internet: its name, its certificate, and how\nthe asking for one stands.",
+        "operationId": "get_panel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PanelView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Gives the panel a name, or takes its name away. With a name, a connected\nVPS forwards the panel's port home, and a certificate for the name is\nasked for at once and kept renewed; asking for the panel again shows how\nthat stands. Without one the port is forwarded no more.",
+        "operationId": "change_panel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PanelChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PanelView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This Homewarp has no door for TLS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That is not a name, or the authority's terms were not agreed to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/panel/certificate": {
+      "post": {
+        "summary": "Asks for the certificate again now, without waiting out the hour that\nfollows an asking that failed.",
+        "operationId": "ask_again",
+        "responses": {
+          "202": {
+            "description": "It is being asked for.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PanelView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The panel has no name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/servers": {
       "get": {
         "summary": "Every server, by name. The one request the Servers page needs.",
@@ -3566,6 +3716,39 @@
           }
         }
       },
+      "CertificateView": {
+        "type": "object",
+        "description": "The certificate the panel is served with.",
+        "required": [
+          "name",
+          "issued_at",
+          "expires_at",
+          "renews_at",
+          "authority"
+        ],
+        "properties": {
+          "authority": {
+            "type": "string",
+            "description": "Who issued it: the machine of the authority's directory."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "issued_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was issued, when it ends and when a newer one is asked for, in\nUnix seconds."
+          },
+          "name": {
+            "type": "string"
+          },
+          "renews_at": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "CommandRequest": {
         "type": "object",
         "required": [
@@ -4148,6 +4331,110 @@
           "name": {
             "type": "string",
             "description": "The archive's name, in the folder it was asked for in."
+          }
+        }
+      },
+      "PanelChange": {
+        "type": "object",
+        "description": "What the owner sets.",
+        "properties": {
+          "agreed": {
+            "type": "boolean",
+            "description": "That the owner agrees to the terms of the authority certificates are\nasked of. Asked for with a name."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name the panel is to be reached by, which has to lead to the VPS\nalready. Nothing takes the panel off the internet again."
+          }
+        }
+      },
+      "PanelState": {
+        "type": "string",
+        "description": "Where the panel stands with the internet.",
+        "enum": [
+          "off",
+          "waiting",
+          "asking",
+          "on",
+          "failed"
+        ]
+      },
+      "PanelView": {
+        "type": "object",
+        "description": "The panel's way in from the internet.",
+        "required": [
+          "available",
+          "state",
+          "authority"
+        ],
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the panel is, once it has a certificate for its name."
+          },
+          "answers": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The directory a web server on the VPS has to serve at\n`/.well-known/acme-challenge/` for the name, where the VPS has one on\nport 80. Nothing where the Gate serves the answers itself."
+          },
+          "authority": {
+            "type": "string",
+            "description": "Who certificates are asked of."
+          },
+          "available": {
+            "type": "boolean",
+            "description": "Whether this Homewarp can be reached by a name at all: whether it was\nstarted with a door for TLS."
+          },
+          "caa": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A DNS record for the name, of type CAA, that has the authority give a\ncertificate for it to this Homewarp and to nobody else: not to\nwhoever has the VPS, which is where the name leads. Nothing where the\nauthority is not known to honour such a record."
+          },
+          "certificate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CertificateView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name it has been given."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The port the panel is reached on by its name, on the VPS and at home alike.",
+            "minimum": 0
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last asking for a certificate failed, if it did."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PanelState"
           }
         }
       },
