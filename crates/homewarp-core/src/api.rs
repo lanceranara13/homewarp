@@ -47,7 +47,7 @@ impl AppState {
             Some(auth::new_setup_code().into())
         };
         Ok(Self {
-            tunnel: Tunnel::new(db.clone()),
+            tunnel: Tunnel::new(db.clone(), runtime.clone()),
             db,
             runtime,
             setup_code,

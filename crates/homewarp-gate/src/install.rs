@@ -151,14 +151,28 @@ fn open_firewall(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The same openings, as ufw is asked to take them away: `ufw delete allow ...`,
+/// but `ufw route delete allow ...` for the one that is about routed traffic.
+fn ufw_removals(wg_port: u16, api_port: u16, wan: &str) -> Vec<Vec<String>> {
+    ufw_rules(wg_port, api_port, wan)
+        .into_iter()
+        .map(|mut rule| {
+            let after_route = usize::from(rule.first().is_some_and(|word| word == "route"));
+            rule.insert(after_route, "delete".to_owned());
+            rule
+        })
+        .collect()
+}
+
 fn close_firewall(config: &Config) {
     if !ufw_is_active() {
         return;
     }
-    for rule in ufw_rules(config.listen_port, config.api_port, &config.wan) {
-        let mut words = vec!["delete"];
-        words.extend(rule.iter().map(String::as_str));
-        let _ = must("ufw", &words);
+    for rule in ufw_removals(config.listen_port, config.api_port, &config.wan) {
+        let words: Vec<&str> = rule.iter().map(String::as_str).collect();
+        if let Err(error) = must("ufw", &words) {
+            println!("An opening in ufw was left as it is: {error:#}");
+        }
     }
 }
 
@@ -266,7 +280,7 @@ pub(crate) fn leave(options: &Options) -> anyhow::Result<()> {
 mod tests {
     use std::path::Path;
 
-    use super::{ufw_rules, unit};
+    use super::{ufw_removals, ufw_rules, unit};
 
     #[test]
     fn the_service_runs_from_its_directory_and_may_write_nowhere_else() {
@@ -292,6 +306,19 @@ mod tests {
                 "allow 51820/udp",
                 "allow in on homewarp0 to any port 4857 proto tcp",
                 "route allow in on eth0 out on homewarp0",
+            ]
+        );
+        // Taken away again, each as ufw wants that said.
+        let removals: Vec<String> = ufw_removals(51820, 4857, "eth0")
+            .into_iter()
+            .map(|rule| rule.join(" "))
+            .collect();
+        assert_eq!(
+            removals,
+            [
+                "delete allow 51820/udp",
+                "delete allow in on homewarp0 to any port 4857 proto tcp",
+                "route delete allow in on eth0 out on homewarp0",
             ]
         );
     }

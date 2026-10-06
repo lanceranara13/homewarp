@@ -19,7 +19,7 @@ use std::{
 use anyhow::{Context, ensure};
 use futures_util::StreamExt;
 use homewarp_runtime::{
-    Engine, InstallScript, Network, Port, Protocol, Server as Spec, ServerDir, strip_ansi,
+    Engine, InstallScript, Listener, Network, Port, Protocol, Server as Spec, ServerDir, strip_ansi,
 };
 use homewarp_template::{Replacement, Stop, Template, config, substitute};
 use serde::{Deserialize, Serialize};
@@ -180,6 +180,16 @@ impl Definition {
             }
         }
     }
+}
+
+/// The id of the container this process is in, read off the list of what is
+/// mounted in it: Docker mounts a container's `hostname` and `hosts` from a
+/// directory that is named after it.
+fn container_id(mounts: &str) -> Option<&str> {
+    mounts.split("/containers/").skip(1).find_map(|rest| {
+        let id = rest.get(..64)?;
+        (id.bytes().all(|c| c.is_ascii_hexdigit()) && rest[64..].starts_with('/')).then_some(id)
+    })
 }
 
 /// A console line as a terminal would leave it: without escape codes, and only
@@ -425,6 +435,52 @@ impl Runtime {
             }
         }
         Ok(true)
+    }
+
+    /// Runs this very program once in a container that stands where a server
+    /// stands, on the servers' bridge with `port` published as a server's
+    /// is, to listen there and say where a connection came from
+    /// ([`crate::tunnel::probe_listen`]). Each line it prints goes to `on_line`.
+    pub(crate) async fn listen_once(
+        &self,
+        port: u16,
+        on_line: impl FnMut(&str),
+    ) -> anyhow::Result<()> {
+        let image = self.own_image().await?;
+        let program = std::env::current_exe().context("finding this program")?;
+        let listener = Listener {
+            name: "homewarp-probe",
+            network: NETWORK,
+            image: &image,
+            command: vec![
+                program.to_string_lossy().into_owned(),
+                "probe-listen".to_owned(),
+                port.to_string(),
+            ],
+            port,
+            user: USER,
+        };
+        let code = self.engine.listen(&listener, on_line).await?;
+        ensure!(code == 0, "the listener ended with exit code {code}");
+        Ok(())
+    }
+
+    /// The image this Core runs from: the one image that is sure to be here,
+    /// and to have this program in it.
+    async fn own_image(&self) -> anyhow::Result<String> {
+        if let Ok(image) = std::env::var("HOMEWARP_IMAGE") {
+            return Ok(image);
+        }
+        let mounts = tokio::fs::read_to_string("/proc/self/mountinfo")
+            .await
+            .context("reading what is mounted here")?;
+        let id = container_id(&mounts).context(
+            "Homewarp does not seem to run in a container, and was not told which image it could listen from (HOMEWARP_IMAGE)",
+        )?;
+        self.engine
+            .image_of(id)
+            .await?
+            .context("Docker does not know the container Homewarp runs in")
     }
 
     fn servers(&self) -> MutexGuard<'_, HashMap<i64, Live>> {
@@ -771,5 +827,27 @@ impl Runtime {
             network: NETWORK.to_owned(),
             timezone: "UTC".to_owned(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::container_id;
+
+    #[test]
+    fn finds_its_own_container_among_what_is_mounted() {
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mounts = format!(
+            "1525 1503 0:45 / /proc rw,nosuid - proc proc rw\n\
+             1601 1503 8:2 /var/lib/docker/containers/{id}/hostname /etc/hostname rw,relatime - ext4 /dev/sda2 rw\n\
+             1602 1503 8:2 /var/lib/docker/containers/{id}/hosts /etc/hosts rw,relatime - ext4 /dev/sda2 rw\n"
+        );
+        assert_eq!(container_id(&mounts), Some(id));
+        // A machine that only has Docker on it, and a path that only looks the part.
+        assert_eq!(container_id("36 1 8:2 / / rw - ext4 /dev/sda2 rw\n"), None);
+        assert_eq!(
+            container_id("1 1 8:2 /srv/containers/web/data /data rw - ext4 /dev/sda2 rw\n"),
+            None
+        );
     }
 }

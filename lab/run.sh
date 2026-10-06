@@ -87,7 +87,8 @@ check_again() { core POST /gate/check | field player_addresses; }
 start_gate() { dc exec -d gate sh -c 'homewarp-gate run --dir /run/hw >>/run/hw/log 2>&1'; }
 start_core() {
   # On every address, as the deployment listens: the rules are what keep the Gate from it.
-  dc exec -d home sh -c 'HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=0.0.0.0:3600 homewarp >>/run/hw/core.log 2>&1'
+  # And told which image to listen from when it probes the tunnel: here it does not run from one.
+  dc exec -d home sh -c 'HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=0.0.0.0:3600 HOMEWARP_IMAGE=homewarp-lab-core homewarp >>/run/hw/core.log 2>&1'
   for _ in $(seq 40); do core GET /health >/dev/null 2>&1 && break; sleep 0.5; done
 }
 
@@ -101,6 +102,8 @@ cmd_up() {
   docker save homewarp-lab-node | dc exec -T home docker load -q >/dev/null
   docker build -q -t homewarp-lab-yolk -f yolk.Dockerfile . >/dev/null
   docker save homewarp-lab-yolk | dc exec -T home docker load -q >/dev/null
+  docker build -q -t homewarp-lab-core -f core.Dockerfile ../deploy/out >/dev/null
+  docker save homewarp-lab-core | dc exec -T home docker load -q >/dev/null
 
   echo "== router: the home's line, with the LAN hidden behind its one address"
   { vars HOME_IP HOME_LAN_IP PORT IPERF; cat <<'EOF'; } | in_ router
@@ -264,6 +267,10 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
 
   echo "== containment: a taken-over gate, its allowed-ips widened and home's networks routed into the tunnel"
   HOME_PUB=$(dc exec -T home wg show homewarp0 public-key)
+  # Whoever has taken a VPS over is not running the Gate program, which would find
+  # its interface changed and put it back within half a minute, at the cost of the
+  # session. The kernel goes on forwarding without it.
+  dc exec -T gate pkill homewarp-gate
   { vars HOME_PUB HOME_TUN; cat <<'EOF'; } | in_ gate
 wg set homewarp0 peer "$HOME_PUB" allowed-ips "$HOME_TUN/32,192.168.50.0/24,10.213.80.0/24"
 ip route replace 192.168.50.0/24 dev homewarp0
@@ -285,6 +292,7 @@ ip route del 192.168.50.0/24 dev homewarp0
 ip route del 10.213.80.0/24 dev homewarp0
 wg set homewarp0 peer "$HOME_PUB" allowed-ips "$HOME_TUN/32"
 EOF
+  start_gate
 
   echo "== containment: the game container"
   check "game reaches the internet from the home's own address, not through the gate" "$(reach game "$CLIENT_IP" "$SVC")" "reached $HOME_IP"

@@ -24,12 +24,32 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, NET_ADMIN]
     security_opt: ["no-new-privileges:true"]
-    # The panel is then on the machine's port 3600 without being published.
     network_mode: host
     environment:
       HOMEWARP_DATA: "${HOMEWARP_DATA_DIR:?the data directory, as a path on this machine}"
+      # Not a port: a program in the machine's own network is behind the
+      # machine's own firewall, and one that shuts what it was not told about
+      # (ufw does) would shut the panel. The door below is how it is reached.
+      HOMEWARP_LISTEN: "unix:${HOMEWARP_DATA_DIR}/run/panel.sock"
     volumes:
       # The same path inside as outside: Core gives Docker the paths of servers'
       # files, and Docker reads paths on the host.
       - "${HOMEWARP_DATA_DIR}:${HOMEWARP_DATA_DIR}"
       - "/var/run/docker.sock:/var/run/docker.sock"
+
+  # The panel's door: the same program in a container of the ordinary kind, with
+  # the panel's port published as every other service's is here. It passes each
+  # connection to Core's socket and can do nothing else: it has no part of the
+  # machine's network, no Docker socket, and of the data only that socket.
+  door:
+    image: homewarp:dev
+    container_name: homewarp-door
+    depends_on: [homewarp]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["door", "0.0.0.0:3600", "/run/homewarp/panel.sock"]
+    ports: ["3600:3600"]
+    volumes:
+      - "${HOMEWARP_DATA_DIR}/run:/run/homewarp"

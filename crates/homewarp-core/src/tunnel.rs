@@ -34,7 +34,7 @@ use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::Notify,
+    sync::{Notify, mpsc},
     time::timeout,
 };
 use utoipa::ToSchema;
@@ -43,6 +43,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{
     api::{AppState, Problem, ProblemBody, SignedIn},
     auth,
+    runtime::Runtime,
     servers::{self, PortProtocol},
 };
 
@@ -65,6 +66,11 @@ const GATE_SWITCHES_IN: Duration = Duration::from_millis(900);
 /// How long the Gate keeps a probe's port open, and how long home waits on it.
 const PROBE_SECONDS: u8 = 8;
 const PROBE_WAIT: Duration = Duration::from_secs(4);
+/// How long the probe's listener waits to be connected to: longer than both of those.
+const LISTEN_FOR: Duration = Duration::from_secs(14);
+/// What the probe's listener prints: that it is there, and where a connection came from.
+const LISTENING: &str = "listening";
+const FROM: &str = "from ";
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -152,6 +158,8 @@ enum Seen {
 /// Core's end of the tunnel, and what it last heard from the other.
 pub(crate) struct Tunnel {
     db: SqlitePool,
+    /// What runs servers, and for the probe a listener where a server would be.
+    runtime: Option<Arc<Runtime>>,
     /// One thing at a time is done to the tunnel: a round of keeping it, or
     /// something a page asked for.
     busy: tokio::sync::Mutex<()>,
@@ -188,9 +196,10 @@ async fn find(address: &str, port: u16) -> anyhow::Result<SocketAddr> {
 }
 
 impl Tunnel {
-    pub(crate) fn new(db: SqlitePool) -> Arc<Self> {
+    pub(crate) fn new(db: SqlitePool, runtime: Option<Arc<Runtime>>) -> Arc<Self> {
         Arc::new(Self {
             db,
+            runtime,
             busy: tokio::sync::Mutex::default(),
             wake: Notify::new(),
             heard: Mutex::default(),
@@ -378,8 +387,18 @@ impl Tunnel {
         };
         let mut heard = self.tell(&gate, gate.mode).await?;
         if self.check_due.swap(false, Ordering::Relaxed) {
-            let mode = self.check(&gate).await?;
-            heard = self.tell(&gate, mode).await?;
+            match self.check(&gate).await {
+                Ok(mode) => heard = self.tell(&gate, mode).await?,
+                // The tunnel is up all the same. What could not be found out
+                // is said where its answer would have been, and the page has
+                // a button to try again.
+                Err(error) => {
+                    sqlx::query("UPDATE gate SET note = ?")
+                        .bind(format!("The check could not be made: {error:#}."))
+                        .execute(&self.db)
+                        .await?;
+                }
+            }
         }
         Ok(heard)
     }
@@ -594,17 +613,35 @@ impl Tunnel {
 
     /// One connection through the Gate and back home, and how it arrived.
     ///
-    /// Core listens on a port of the tunnel's address and has the Gate send a
-    /// port of the VPS's public address there for a few seconds. Then it
-    /// connects to that, out through the home's own line as a player would
-    /// come, and sees what address the connection arrives from.
+    /// It has to come the way a player's does, or it says nothing about
+    /// players. So the listener is this program, run once in a container on
+    /// the servers' bridge with a port published as a server's is, and the
+    /// Gate sends a port of the VPS's public address there for a few seconds.
+    /// Core then connects to that, out through the home's own line as a player
+    /// would come, and the listener says what address the connection came from.
     async fn probe(&self, gate: &Gate) -> anyhow::Result<Seen> {
-        let listener = TcpListener::bind((HOME, 0))
-            .await
-            .context("listening on the tunnel's address")?;
-        let port = listener.local_addr()?.port();
+        let runtime = self.runtime.as_ref().context(
+            "Homewarp cannot reach Docker, and the check has to listen where a server would",
+        )?;
+        // A port of this machine that nothing has, let go of at once for Docker to publish.
+        let port = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?
+            .local_addr()?
+            .port();
         blocking(move || apply(&home_ruleset(BRIDGE, Some(port))?)).await?;
-        let arrived = async {
+        let (said, mut lines) = mpsc::unbounded_channel::<String>();
+        let listening = runtime.listen_once(port, move |line| {
+            // An error here says that nobody is waiting for it any more.
+            let _ = said.send(line.trim().to_owned());
+        });
+        let dialling = async {
+            // Not before the listener is there to be found.
+            loop {
+                match lines.recv().await {
+                    Some(line) if line == LISTENING => break,
+                    Some(_) => {}
+                    None => bail!("the listener ended before it had begun"),
+                }
+            }
             let asked = ProbeRequest {
                 home_port: port,
                 seconds: PROBE_SECONDS,
@@ -612,29 +649,38 @@ impl Tunnel {
             let (opened, _): (Probe, _) =
                 ask(gate, &gate.keys, "POST", "/v1/probe", Some(&asked)).await?;
             let public = find(&gate.address, opened.port).await?;
-            // Both are held to the end, so that the connection is still open
-            // when the listener gets to it.
-            let (_dialled, accepted) = tokio::join!(
-                timeout(PROBE_WAIT, TcpStream::connect(public)),
-                timeout(PROBE_WAIT, listener.accept()),
-            );
-            anyhow::Ok(
-                accepted
-                    .ok()
-                    .and_then(Result::ok)
-                    .map(|(_, from)| from.ip()),
-            )
-        }
-        .await;
+            // Held until the listener has spoken, so that the connection is
+            // still open when the listener gets to it.
+            let _dialled = timeout(PROBE_WAIT, TcpStream::connect(public)).await;
+            while let Ok(Some(line)) = timeout(PROBE_WAIT, lines.recv()).await {
+                if let Some(from) = line.strip_prefix(FROM) {
+                    return Ok(from.parse::<IpAddr>().ok());
+                }
+            }
+            anyhow::Ok(None)
+        };
+        let (listened, arrived) = tokio::join!(listening, dialling);
         // Counted before the rules that count it are replaced by the usual ones.
         let packets = blocking(probe_packets).await;
         blocking(|| apply(&home_ruleset(BRIDGE, None)?)).await?;
+        listened?;
         Ok(match (arrived?, packets?) {
             (Some(from), _) => Seen::From(from),
             (None, 0) => Seen::Nothing,
             (None, _) => Seen::NoWayBack,
         })
     }
+}
+
+/// What the probe's container runs (`homewarp probe-listen <port>`): listens
+/// once where a server would, and says where the connection it gets came from.
+pub async fn probe_listen(port: u16) -> anyhow::Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+    println!("{LISTENING}");
+    if let Ok(Ok((_, from))) = timeout(LISTEN_FOR, listener.accept()).await {
+        println!("{FROM}{}", from.ip());
+    }
+    Ok(())
 }
 
 /// One request to the Gate, through the tunnel, and how many milliseconds the

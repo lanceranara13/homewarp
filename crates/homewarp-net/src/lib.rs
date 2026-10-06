@@ -278,23 +278,20 @@ pub fn heard() -> Result<Heard, Error> {
 /// Docker published on `bridge` gets in; a server reaches neither this
 /// machine nor the networks behind it.
 ///
-/// `probe` lets one TCP port of this machine be reached from the tunnel, for
-/// the few seconds in which Core listens there to see how a connection through
-/// the Gate arrives. What arrives for it is counted before anything can drop
-/// it, and its replies are marked on their way out as a server's are on their
-/// way through, so that they take the same way back.
+/// `probe` is a TCP port that Core has published for a moment as a server's is,
+/// to see how a connection through the Gate arrives. Nothing is opened for it:
+/// it comes in as a player's connection does. What arrives for it from the
+/// tunnel is counted, before anything on this machine can drop it, so that
+/// "it never got here" can be told from "it got here, and no reply got back".
 pub fn home_ruleset(bridge: &str, probe: Option<u16>) -> Result<String, Error> {
     if !named_well(bridge) {
         return Err(Error::Interface(bridge.to_owned()));
     }
-    let (counter, counted, let_in, mark_out) = match probe {
+    let (counter, counted) = match probe {
         None => Default::default(),
         Some(port) => (
             "\n  counter probe { packets 0 bytes 0 }".to_owned(),
             format!("\n    iifname \"homewarp0\" tcp dport {port} counter name \"probe\""),
-            format!("\n    iifname \"homewarp0\" tcp dport {port} accept"),
-            "\n  chain mark_out {\n    type route hook output priority mangle; policy accept;\n    ct mark 0x4857 meta mark set ct mark\n  }"
-                .to_owned(),
         ),
     };
     Ok(format!(
@@ -305,10 +302,10 @@ table inet homewarp {{{counter}
     type filter hook prerouting priority mangle; policy accept;{counted}
     iifname "homewarp0" ct state new ct mark set 0x4857
     iifname != "homewarp0" ct mark 0x4857 meta mark set ct mark
-  }}{mark_out}
+  }}
   chain input {{
     type filter hook input priority filter; policy accept;
-    iifname {{ "homewarp0", "{bridge}" }} ct state established,related accept{let_in}
+    iifname {{ "homewarp0", "{bridge}" }} ct state established,related accept
     iifname "homewarp0" counter drop
     iifname "{bridge}" counter drop
   }}
@@ -545,9 +542,9 @@ mod tests {
     }
 
     #[test]
-    fn home_lets_a_probe_in_counts_it_and_marks_its_replies() {
+    fn home_counts_what_arrives_for_a_probe_and_opens_nothing_for_it() {
         let plain = super::home_ruleset("homewarp-br", None).unwrap();
-        assert!(!plain.contains("probe") && !plain.contains("hook output"));
+        assert!(!plain.contains("probe"));
         let probing = super::home_ruleset("homewarp-br", Some(50002)).unwrap();
         assert!(probing.contains("counter probe { packets 0 bytes 0 }"));
         // Counted where it arrives, before anything has had the chance to drop it.
@@ -555,12 +552,13 @@ mod tests {
             .find("iifname \"homewarp0\" tcp dport 50002 counter name \"probe\"")
             .unwrap();
         assert!(counted < probing.find("ct state new ct mark set").unwrap());
-        // Let in ahead of the rule that drops everything else from the tunnel.
-        let let_in = probing
-            .find("iifname \"homewarp0\" tcp dport 50002 accept")
-            .unwrap();
-        assert!(let_in < probing.find("iifname \"homewarp0\" counter drop").unwrap());
-        assert!(probing.contains("type route hook output priority mangle"));
+        // And that is the only difference: a probe comes in as a player does.
+        let without: String = probing
+            .lines()
+            .filter(|line| !line.contains("probe"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(without, plain);
     }
 
     #[test]

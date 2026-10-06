@@ -181,6 +181,24 @@ pub struct InstallScript<'a> {
     pub scratch: &'a Path,
 }
 
+/// A program run once where a server runs: on the servers' bridge, with one
+/// TCP port published as a server's is. Core's probe of the tunnel listens
+/// from one, because that is the way a player's packets come.
+#[derive(Debug, Clone)]
+pub struct Listener<'a> {
+    /// Names its container.
+    pub name: &'a str,
+    pub network: &'a str,
+    pub image: &'a str,
+    /// The program and its arguments, in place of whatever the image starts.
+    pub command: Vec<String>,
+    pub port: u16,
+    pub user: u32,
+}
+
+/// What such a program may use. It is given none of the machine's files.
+const LISTENER_MEMORY: i64 = 64 * 1024 * 1024;
+
 /// The Docker daemon.
 pub struct Engine {
     docker: Docker,
@@ -332,6 +350,62 @@ impl Engine {
         {
             0 => Ok(()),
             code => Err(Error::Ownership(code)),
+        }
+    }
+
+    /// Runs a [`Listener`] to its end and returns its exit code; each line it
+    /// prints goes to `on_line`. Its container is held as a server's is, and
+    /// tighter: no files, little memory, few processes.
+    pub async fn listen(
+        &self,
+        listener: &Listener<'_>,
+        on_line: impl FnMut(&str),
+    ) -> Result<i64, Error> {
+        let key = format!("{}/tcp", listener.port);
+        let binding = PortBinding {
+            host_ip: Some("0.0.0.0".to_owned()),
+            host_port: Some(listener.port.to_string()),
+        };
+        let body = ContainerCreateBody {
+            image: Some(listener.image.to_owned()),
+            entrypoint: Some(listener.command.clone()),
+            cmd: Some(Vec::new()),
+            user: Some(format!("{0}:{0}", listener.user)),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(true),
+            exposed_ports: Some(vec![key.clone()]),
+            labels: Some(HashMap::from([(
+                "homewarp.probe".to_owned(),
+                listener.port.to_string(),
+            )])),
+            host_config: Some(HostConfig {
+                port_bindings: Some(HashMap::from([(key, Some(vec![binding]))])),
+                network_mode: Some(listener.network.to_owned()),
+                memory: Some(LISTENER_MEMORY),
+                memory_swap: Some(LISTENER_MEMORY),
+                pids_limit: Some(32),
+                cap_drop: Some(vec!["ALL".to_owned()]),
+                security_opt: Some(vec!["no-new-privileges".to_owned()]),
+                readonly_rootfs: Some(true),
+                log_config: Some(small_log()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.run_to_end(listener.name, body, on_line).await
+    }
+
+    /// The image the container with this id was made from, by its own id, which
+    /// goes on naming it whatever its tags are moved to. None if the daemon
+    /// knows no such container.
+    pub async fn image_of(&self, container: &str) -> Result<Option<String>, Error> {
+        match self.docker.inspect_container(container, None).await {
+            Ok(found) => Ok(found.image),
+            Err(DockerError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(None),
+            Err(other) => Err(other.into()),
         }
     }
 

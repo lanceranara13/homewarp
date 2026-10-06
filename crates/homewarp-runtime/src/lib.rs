@@ -10,5 +10,5 @@ mod engine;
 mod files;
 
 pub use console::{Console, strip_ansi};
-pub use engine::{Engine, Error, InstallScript, Network, Port, Protocol, Server, Usage};
+pub use engine::{Engine, Error, InstallScript, Listener, Network, Port, Protocol, Server, Usage};
 pub use files::ServerDir;

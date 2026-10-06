@@ -12,3 +12,4 @@ mod ui;
 pub use api::{AppState, app, openapi};
 pub use db::open;
 pub use runtime::Runtime;
+pub use tunnel::probe_listen;
