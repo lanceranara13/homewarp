@@ -1,6 +1,6 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query'
 
-import { getSettings, listAccounts, listActivity, listServerUsers, type Permission } from './api/client'
+import { getSettings, getTwoSteps, listAccounts, listActivity, listServerUsers, type Permission } from './api/client'
 
 /** How many lines of what was done Homewarp answers with at a time. Fewer than that, and there are no older ones. */
 const PAGE = 100
@@ -24,6 +24,13 @@ export function activityQuery(server: number | undefined, user: number | undefin
 export const accountsQuery = queryOptions({
   queryKey: ['accounts'],
   queryFn: listAccounts,
+  staleTime: 5_000,
+})
+
+/** Whether the account signed in here has a second step to its sign-in. */
+export const twoStepsQuery = queryOptions({
+  queryKey: ['two-steps'],
+  queryFn: getTwoSteps,
   staleTime: 5_000,
 })
 

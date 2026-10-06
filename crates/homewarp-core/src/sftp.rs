@@ -29,13 +29,17 @@ use russh_sftp::protocol::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, UnixListener},
+    time::timeout,
 };
 
 use crate::{
     accounts::{self, Permission},
-    api::{AppState, User},
-    audit, auth, files,
+    api::{AppState, Trying, User},
+    audit, auth,
+    door::{self, Client},
+    files,
     runtime::files_at,
+    totp,
 };
 
 /// How long a wrong sign-in is made to take, whatever was wrong with it.
@@ -44,6 +48,8 @@ const REJECTION: Duration = Duration::from_secs(2);
 const TRIES: usize = 3;
 /// A connection that has been silent this long is closed.
 const SILENCE: Duration = Duration::from_secs(600);
+/// A door says at once where a connection came from. What has not been said by now will not be.
+const PATIENCE: Duration = Duration::from_secs(2);
 /// How many files and folders one connection holds open at once.
 const MOST_OPEN: usize = 64;
 /// The most that is read for one request, whatever the client asks for.
@@ -104,27 +110,37 @@ pub async fn serve(state: AppState, listen: String) -> anyhow::Result<()> {
             let listener = UnixListener::bind(socket)?;
             tracing::info!("SFTP is served on {}", socket.display());
             loop {
-                let (stream, _) = listener.accept().await?;
-                tokio::spawn(connection(Arc::clone(&config), stream, state.clone()));
+                let (mut stream, _) = listener.accept().await?;
+                let (config, state) = (Arc::clone(&config), state.clone());
+                tokio::spawn(async move {
+                    // The door says first where the connection came from. One
+                    // that says nothing is no door's, and is dropped.
+                    let said = timeout(PATIENCE, door::announced(&mut stream)).await;
+                    if let Ok(Ok(from)) = said {
+                        connection(config, stream, state, Client(from)).await;
+                    }
+                });
             }
         }
         None => {
             let listener = TcpListener::bind(&listen).await?;
             tracing::info!("SFTP is served on {listen}");
             loop {
-                let (stream, _) = listener.accept().await?;
-                tokio::spawn(connection(Arc::clone(&config), stream, state.clone()));
+                let (stream, from) = listener.accept().await?;
+                let from = Client(from.ip().to_canonical());
+                tokio::spawn(connection(Arc::clone(&config), stream, state.clone(), from));
             }
         }
     }
 }
 
-async fn connection<S>(config: Arc<Config>, stream: S, state: AppState)
+async fn connection<S>(config: Arc<Config>, stream: S, state: AppState, from: Client)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let ssh = Ssh {
         state,
+        from,
         files: None,
         channels: HashMap::new(),
     };
@@ -141,6 +157,8 @@ where
 /// One connection, as SSH sees it.
 struct Ssh {
     state: AppState,
+    /// Where it came from.
+    from: Client,
     /// The files of the server that was signed in to.
     files: Option<Arc<ServerDir>>,
     /// Channels that are open and have not asked for SFTP yet.
@@ -152,10 +170,17 @@ impl Ssh {
     /// to none.
     async fn sign_in(&self, user: &str, password: &str) -> anyhow::Result<Option<Arc<ServerDir>>> {
         // An account's name may have dots in it. A server's id has none.
-        let Some((username, server)) = user.rsplit_once('.') else {
+        let (username, server) = user.rsplit_once('.').unwrap_or((user, ""));
+        // The same count as the panel's sign-in keeps, of the same failures:
+        // a password is not guessed here any faster than there.
+        let limits = &self.state.limits;
+        let trying = Trying::new(self.from, username);
+        if trying.may(limits).is_err() {
             return Ok(None);
-        };
+        }
+        let from = self.from.0.to_string();
         let Ok(server_id) = server.parse::<i64>() else {
+            trying.failed(limits);
             return Ok(None);
         };
         let db = &self.state.db;
@@ -166,6 +191,7 @@ impl Ssh {
         .fetch_optional(db)
         .await?;
         let Some((id, username, hash, owner)) = found else {
+            trying.failed(limits);
             return Ok(None);
         };
         let who = User {
@@ -173,13 +199,27 @@ impl Ssh {
             username,
             owner,
         };
+        // An account with a second step types its code straight after its
+        // password, as one word: SFTP has one field to put both in.
+        let two_steps: bool =
+            sqlx::query_scalar("SELECT totp_secret IS NOT NULL FROM users WHERE id = ?")
+                .bind(id)
+                .fetch_one(db)
+                .await?;
+        let (password, code) = match password.len().checked_sub(6) {
+            Some(at) if two_steps && password.is_char_boundary(at) => password.split_at(at),
+            _ => (password, ""),
+        };
         let password = password.to_owned();
         let right =
             tokio::task::spawn_blocking(move || auth::verify_password(&password, &hash)).await?;
+        let right = right && matches!(totp::second_step(db, id, code).await?, totp::Step::Passed);
         if !right {
-            audit::record(db, &who, Some(server_id), "sftp.sign_in_failed", "").await;
+            trying.failed(limits);
+            audit::record(db, &who, Some(server_id), "sftp.sign_in_failed", &from).await;
             return Ok(None);
         }
+        trying.passed(limits);
         // What the Files tab asks: to an account that may not, or where there
         // is no such server, there is nothing here to sign in to.
         if accounts::may(db, &who, server_id, Some(Permission::Files))
@@ -198,7 +238,7 @@ impl Ssh {
         let path = files_at(&self.state.data, &uuid);
         let (uid, gid) = files::owner();
         let files = tokio::task::spawn_blocking(move || ServerDir::open(&path, uid, gid)).await??;
-        audit::record(db, &who, Some(server_id), "sftp.sign_in", "").await;
+        audit::record(db, &who, Some(server_id), "sftp.sign_in", &from).await;
         Ok(Some(Arc::new(files)))
     }
 }

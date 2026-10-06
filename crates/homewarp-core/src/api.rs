@@ -5,14 +5,15 @@ use std::{
     borrow::Cow,
     path::Path,
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 
 use axum::{
     Json, Router,
     extract::{FromRequestParts, Request, State},
     http::{
-        HeaderMap, Method, StatusCode,
-        header::{HOST, ORIGIN, SET_COOKIE},
+        HeaderMap, HeaderValue, Method, StatusCode,
+        header::{HOST, ORIGIN, RETRY_AFTER, SET_COOKIE},
         request::Parts,
     },
     middleware::{self, Next},
@@ -24,8 +25,8 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    accounts, audit, auth, backups, files, runtime::Runtime, schedules, servers, settings,
-    templates, tunnel, tunnel::Tunnel, ui,
+    accounts, audit, auth, backups, door::Client, files, limits::Limiter, runtime::Runtime,
+    schedules, servers, settings, templates, totp, tunnel, tunnel::Tunnel, ui,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -42,6 +43,8 @@ pub struct AppState {
     pub(crate) tunnel: Arc<Tunnel>,
     setup_code: Option<Arc<str>>,
     sftp_port: Option<u16>,
+    /// How often a sign-in has failed, from where and at which account.
+    pub(crate) limits: Arc<Limiter>,
 }
 
 impl AppState {
@@ -67,6 +70,7 @@ impl AppState {
             runtime,
             setup_code,
             sftp_port: None,
+            limits: Arc::default(),
         })
     }
 
@@ -222,6 +226,10 @@ struct SetupRequest {
 struct LoginRequest {
     username: String,
     password: String,
+    /// The code of the second step, for an account that has one: from its
+    /// authenticator app, or one of its recovery codes.
+    #[serde(default)]
+    code: String,
 }
 
 /// The body of every error response.
@@ -229,6 +237,9 @@ struct LoginRequest {
 pub(crate) struct ProblemBody {
     /// A sentence fit to show to the person using the panel.
     error: String,
+    /// True when what is missing is the code of the second step of a sign-in.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    code_required: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -237,6 +248,9 @@ pub(crate) enum Problem {
     Invalid(Cow<'static, str>),
     #[error("{0}")]
     Unauthorized(&'static str),
+    /// The password was right, and the second step of the sign-in is still to do.
+    #[error("{0}")]
+    CodeNeeded(&'static str),
     #[error("{0}")]
     Forbidden(&'static str),
     #[error("{0}")]
@@ -245,6 +259,9 @@ pub(crate) enum Problem {
     Conflict(Cow<'static, str>),
     #[error("{0}")]
     Unavailable(&'static str),
+    /// Too many wrong tries: how long there is to wait.
+    #[error("Too many wrong tries. Wait {} and try again.", in_minutes(.0))]
+    TooMany(Duration),
     #[error("Something went wrong on the server. Its log has the details.")]
     Internal(#[from] anyhow::Error),
 }
@@ -259,23 +276,87 @@ impl IntoResponse for Problem {
     fn into_response(self) -> Response {
         let status = match &self {
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized(_) | Self::CodeNeeded(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(error) => {
                 tracing::error!("{error:#}");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        (
-            status,
-            Json(ProblemBody {
-                error: self.to_string(),
-            }),
-        )
-            .into_response()
+        let wait = match &self {
+            Self::TooMany(wait) => Some(wait.as_secs().max(1)),
+            _ => None,
+        };
+        let body = Json(ProblemBody {
+            error: self.to_string(),
+            code_required: matches!(self, Self::CodeNeeded(_)),
+        });
+        let mut response = (status, body).into_response();
+        // Said to a program as it is said to a person.
+        if let Some(seconds) = wait {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from(seconds));
+        }
+        response
+    }
+}
+
+/// How long a wait is, as it is said to whoever has to wait it.
+fn in_minutes(wait: &Duration) -> String {
+    match wait.as_secs().div_ceil(60) {
+        0 | 1 => "a minute".to_owned(),
+        minutes => format!("{minutes} minutes"),
+    }
+}
+
+/// How many times an address may get a sign-in wrong before it has to wait.
+const TRIES_FROM_AN_ADDRESS: u32 = 5;
+/// The same for one account, from wherever: more, so that someone who keeps
+/// guessing at an account's password does not lock its owner out with them.
+const TRIES_AT_AN_ACCOUNT: u32 = 20;
+
+/// Who is trying to sign in, as the limits know them: the address they come
+/// from and the account they name.
+pub(crate) struct Trying {
+    from: String,
+    account: String,
+}
+
+impl Trying {
+    pub(crate) fn new(client: Client, account: &str) -> Self {
+        Self {
+            from: format!("from {}", client.0),
+            account: format!("account {}", account.trim().to_lowercase()),
+        }
+    }
+
+    /// Refuses a try that comes after too many wrong ones, before anything is
+    /// looked up or worked out for it.
+    pub(crate) fn may(&self, limits: &Limiter) -> Result<(), Problem> {
+        let waits = [
+            limits.wait(&self.from, TRIES_FROM_AN_ADDRESS),
+            limits.wait(&self.account, TRIES_AT_AN_ACCOUNT),
+        ];
+        match waits.into_iter().flatten().max() {
+            Some(wait) => Err(Problem::TooMany(wait)),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn failed(&self, limits: &Limiter) {
+        limits.failed(&self.from);
+        limits.failed(&self.account);
+    }
+
+    /// The address has got it right, and starts afresh. What the account has
+    /// been failed at by others still counts.
+    pub(crate) fn passed(&self, limits: &Limiter) {
+        limits.passed(&self.from);
     }
 }
 
@@ -319,8 +400,13 @@ async fn session(
 )]
 async fn setup(
     State(state): State<AppState>,
+    client: Client,
     Json(request): Json<SetupRequest>,
 ) -> Result<Response, Problem> {
+    // The code is long enough that guessing it is hopeless. It is limited all
+    // the same, as every door that takes a secret is.
+    let trying = Trying::new(client, "the setup code");
+    trying.may(&state.limits)?;
     const DONE: Problem = Problem::Conflict(Cow::Borrowed(
         "This Homewarp already has its account. Sign in instead.",
     ));
@@ -329,6 +415,7 @@ async fn setup(
         return Err(DONE);
     };
     if !auth::setup_code_matches(&request.code, code) {
+        trying.failed(&state.limits);
         return Err(Problem::Forbidden(
             "That is not the setup code. It is in Homewarp's log.",
         ));
@@ -371,8 +458,11 @@ async fn setup(
 )]
 async fn login(
     State(state): State<AppState>,
+    client: Client,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response, Problem> {
+    let trying = Trying::new(client, &request.username);
+    trying.may(&state.limits)?;
     let found: Option<(i64, String, String, bool)> =
         sqlx::query_as("SELECT id, username, password_hash, owner FROM users WHERE username = ?")
             .bind(request.username.trim())
@@ -399,23 +489,44 @@ async fn login(
         auth::verify_password(&request.password, hash)
     })
     .await?;
-    if !correct {
-        // Against an account that is there, it is written down for its owner
-        // to see. What was typed where no account is, is not: it is as likely
-        // a password in the wrong field as a name.
-        if let Some(user) = &user {
-            audit::record(&state.db, user, None, "account.sign_in_failed", "").await;
+    let from = client.0.to_string();
+    let user = match user {
+        Some(user) if correct => user,
+        tried => {
+            trying.failed(&state.limits);
+            // Against an account that is there, it is written down for its
+            // owner to see, with where it came from. What was typed where no
+            // account is, is not: it is as likely a password in the wrong
+            // field as a name.
+            if let Some(user) = &tried {
+                audit::record(&state.db, user, None, "account.sign_in_failed", &from).await;
+            }
+            return Err(Problem::Unauthorized("Wrong username or password."));
         }
-        return Err(Problem::Unauthorized("Wrong username or password."));
-    }
-    let Some(user) = user else {
-        return Err(Problem::Unauthorized("Wrong username or password."));
     };
+    // The second step, for an account that has one. A wrong code counts as a
+    // wrong password does.
+    match totp::second_step(&state.db, user.id, &request.code).await? {
+        totp::Step::Passed => {}
+        totp::Step::Wanted => {
+            return Err(Problem::CodeNeeded(
+                "Enter the code from your authenticator app.",
+            ));
+        }
+        totp::Step::Wrong => {
+            trying.failed(&state.limits);
+            audit::record(&state.db, &user, None, "account.sign_in_failed", &from).await;
+            return Err(Problem::CodeNeeded(
+                "That code is not right. A code changes every half minute, and works once.",
+            ));
+        }
+    }
+    trying.passed(&state.limits);
     sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
         .bind(auth::now())
         .execute(&state.db)
         .await?;
-    audit::record(&state.db, &user, None, "account.sign_in", "").await;
+    audit::record(&state.db, &user, None, "account.sign_in", &from).await;
     sign_in(&state, user).await
 }
 

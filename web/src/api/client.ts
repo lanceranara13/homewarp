@@ -67,9 +67,40 @@ export async function setUp(body: SetupRequest): Promise<Session> {
   return data ?? fail(error)
 }
 
+/** The password was right, and the second step of the sign-in is still to do, or was got wrong. */
+export class CodeNeeded extends Error {}
+
 export async function signIn(body: LoginRequest): Promise<Session> {
   const { data, error } = await reach(() => api.POST('/api/v1/login', { body }))
+  if (error?.code_required) throw new CodeNeeded(error.error)
   return data ?? fail(error)
+}
+
+export type TwoSteps = components['schemas']['TwoSteps']
+export type TwoStepsSetup = components['schemas']['TwoStepsSetup']
+
+/** Whether the account signed in here has a second step, and how many recovery codes it has left. */
+export async function getTwoSteps(): Promise<TwoSteps> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/account/two-steps'))
+  return data ?? fail(error)
+}
+
+/** Makes a secret for an authenticator app. Nothing changes until a code from the app is typed back. */
+export async function beginTwoSteps(): Promise<TwoStepsSetup> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/account/two-steps'))
+  return data ?? fail(error)
+}
+
+/** Turns the second step on. The answer is the recovery codes, which are shown this once. */
+export async function confirmTwoSteps(code: string): Promise<string[]> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/account/two-steps/confirm', { body: { code } }))
+  return data ? data.recovery_codes : fail(error)
+}
+
+/** Turns the second step off, given the account's password. */
+export async function endTwoSteps(password: string): Promise<void> {
+  const { error, response } = await signedIn(() => api.POST('/api/v1/account/two-steps/off', { body: { password } }))
+  if (!response.ok) fail(error)
 }
 
 export async function signOut(): Promise<void> {

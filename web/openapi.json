@@ -57,6 +57,166 @@
         }
       }
     },
+    "/api/v1/account/two-steps": {
+      "get": {
+        "summary": "Whether the account signed in here has a second step, and how many\nrecovery codes it has left.",
+        "operationId": "two_steps",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TwoSteps"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Begins giving the account a second step: makes a secret for an\nauthenticator app. Nothing changes until a code from that app has been\ntyped back, which shows the app has it.",
+        "operationId": "begin_two_steps",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TwoStepsSetup"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account has a second step already.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/two-steps/confirm": {
+      "post": {
+        "summary": "Turns the second step on, given a code from the app that was just set up.\nThe answer is the account's recovery codes, which are not shown again.",
+        "operationId": "confirm_two_steps",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TypedCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No app is being set up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The code is not the app's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/two-steps/off": {
+      "post": {
+        "summary": "Turns the second step of the account that asks off, given its password.",
+        "operationId": "end_two_steps",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPassword"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The account signs in with its password alone."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The password is wrong.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/activity": {
       "get": {
         "summary": "What was done through the panel, the newest first, a hundred lines at a\ntime. The one request the Activity page needs.",
@@ -3171,6 +3331,59 @@
           }
         }
       }
+    },
+    "/api/v1/users/{id}/two-steps": {
+      "delete": {
+        "summary": "Turns another account's second step off: for whoever has lost both their\napp and their recovery codes.",
+        "operationId": "end_two_steps_of",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The account's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The account signs in with its password alone."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account asking is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3784,6 +3997,10 @@
           "password"
         ],
         "properties": {
+          "code": {
+            "type": "string",
+            "description": "The code of the second step, for an account that has one: from its\nauthenticator app, or one of its recovery codes."
+          },
           "password": {
             "type": "string"
           },
@@ -3992,9 +4209,28 @@
           "error"
         ],
         "properties": {
+          "code_required": {
+            "type": "boolean",
+            "description": "True when what is missing is the code of the second step of a sign-in."
+          },
           "error": {
             "type": "string",
             "description": "A sentence fit to show to the person using the panel."
+          }
+        }
+      },
+      "RecoveryCodes": {
+        "type": "object",
+        "description": "The codes that sign an account in when its app is lost. Each works once,\nand they are shown this one time.",
+        "required": [
+          "recovery_codes"
+        ],
+        "properties": {
+          "recovery_codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -4658,6 +4894,53 @@
           },
           "user_viewable": {
             "type": "boolean"
+          }
+        }
+      },
+      "TwoSteps": {
+        "type": "object",
+        "description": "Whether the account that asks has a second step to its sign-in.",
+        "required": [
+          "on",
+          "recovery_codes"
+        ],
+        "properties": {
+          "on": {
+            "type": "boolean"
+          },
+          "recovery_codes": {
+            "type": "integer",
+            "description": "How many of its recovery codes have not been used.",
+            "minimum": 0
+          }
+        }
+      },
+      "TwoStepsSetup": {
+        "type": "object",
+        "description": "What an authenticator app is given to make the codes of an account.",
+        "required": [
+          "secret",
+          "uri"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The secret, to type into the app."
+          },
+          "uri": {
+            "type": "string",
+            "description": "The same as a link, which an app on this device opens."
+          }
+        }
+      },
+      "TypedCode": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
           }
         }
       },

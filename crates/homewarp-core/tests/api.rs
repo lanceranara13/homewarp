@@ -1620,6 +1620,165 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
     );
 }
 
+#[tokio::test]
+async fn a_sign_in_that_keeps_failing_has_to_wait() {
+    let panel = panel().await;
+    panel.set_up().await;
+    let wrong = json!({ "username": "lance", "password": "not the password" });
+    for _ in 0..5 {
+        let answer = panel.post("/api/v1/login", wrong.clone(), None).await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+    // The sixth is not looked at, and neither is the right password after it:
+    // whoever is guessing learns nothing more from here.
+    let right = json!({ "username": "lance", "password": PASSWORD });
+    for tried in [wrong, right] {
+        let answer = panel.post("/api/v1/login", tried, None).await;
+        assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            answer.body["error"],
+            "Too many wrong tries. Wait 5 minutes and try again."
+        );
+    }
+}
+
+/// The code an authenticator app would show now for a secret: RFC 6238,
+/// written out a second time so that the test does not ask Homewarp's own.
+fn code_now(secret: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let (mut bits, mut held, mut key) = (0u32, 0, Vec::new());
+    for symbol in secret.bytes() {
+        bits = (bits << 5) | alphabet.iter().position(|known| *known == symbol).unwrap() as u32;
+        held += 5;
+        if held >= 8 {
+            held -= 8;
+            key.push((bits >> held) as u8);
+        }
+    }
+    let mut block = [0u8; 64];
+    block[..key.len()].copy_from_slice(&key);
+    let step = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 30;
+    let inner = Sha1::new()
+        .chain_update(block.map(|byte| byte ^ 0x36))
+        .chain_update(step.to_be_bytes())
+        .finalize();
+    let hash = Sha1::new()
+        .chain_update(block.map(|byte| byte ^ 0x5c))
+        .chain_update(inner)
+        .finalize();
+    let at = usize::from(hash[19] & 0x0f);
+    let word = u32::from_be_bytes([hash[at], hash[at + 1], hash[at + 2], hash[at + 3]]);
+    format!("{:06}", (word & 0x7fff_ffff) % 1_000_000)
+}
+
+#[tokio::test]
+async fn a_second_step_is_asked_for_once_it_is_turned_on() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let cookie = Some(cookie.as_str());
+    let two_steps = "/api/v1/account/two-steps";
+    let confirm = "/api/v1/account/two-steps/confirm";
+    let login = |code: Option<String>| {
+        let mut typed = json!({ "username": "lance", "password": PASSWORD });
+        if let Some(code) = code {
+            typed["code"] = json!(code);
+        }
+        panel.post("/api/v1/login", typed, None)
+    };
+
+    assert_eq!(
+        panel.get(two_steps, cookie).await.body,
+        json!({ "on": false, "recovery_codes": 0 })
+    );
+    // Nothing is being set up yet, so there is nothing to confirm.
+    let early = panel
+        .post(confirm, json!({ "code": "123456" }), cookie)
+        .await;
+    assert_eq!(early.status, StatusCode::CONFLICT);
+
+    let begun = panel.post(two_steps, json!({}), cookie).await;
+    assert_eq!(begun.status, StatusCode::OK, "{}", begun.body);
+    let secret = begun.body["secret"].as_str().unwrap().to_owned();
+    assert_eq!(
+        begun.body["uri"],
+        format!("otpauth://totp/Homewarp:lance?secret={secret}&issuer=Homewarp")
+    );
+    // Until the app has shown that it has the secret, nothing has changed.
+    let wrong = panel
+        .post(confirm, json!({ "code": "12345" }), cookie)
+        .await;
+    assert_eq!(wrong.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(login(None).await.status, StatusCode::OK);
+
+    let code = code_now(&secret);
+    let on = panel.post(confirm, json!({ "code": code }), cookie).await;
+    assert_eq!(on.status, StatusCode::OK, "{}", on.body);
+    let recovery: Vec<String> = serde_json::from_value(on.body["recovery_codes"].clone()).unwrap();
+    assert_eq!(recovery.len(), 8);
+    assert_eq!(
+        panel.get(two_steps, cookie).await.body,
+        json!({ "on": true, "recovery_codes": 8 })
+    );
+    assert_eq!(
+        panel.post(two_steps, json!({}), cookie).await.status,
+        StatusCode::CONFLICT
+    );
+
+    // The password alone no longer signs in, and says what is missing.
+    let asked = login(None).await;
+    assert_eq!(asked.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(asked.body["code_required"], true);
+    assert_eq!(
+        asked.body["error"],
+        "Enter the code from your authenticator app."
+    );
+    // A code is good once: the one that turned this on is spent.
+    let again = login(Some(code)).await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(again.body["code_required"], true);
+    // A wrong password is still only a wrong password.
+    let guess = json!({ "username": "lance", "password": "not the password", "code": "123456" });
+    let guessed = panel.post("/api/v1/login", guess, None).await;
+    assert_eq!(
+        guessed.body,
+        json!({ "error": "Wrong username or password." })
+    );
+
+    // A recovery code signs in, once.
+    let signed = login(Some(recovery[0].to_lowercase())).await;
+    assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+    assert_eq!(
+        login(Some(recovery[0].clone())).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(panel.get(two_steps, cookie).await.body["recovery_codes"], 7);
+
+    // Turned off with the password, the password is enough again.
+    let off = "/api/v1/account/two-steps/off";
+    let wrong = panel
+        .post(off, json!({ "password": "not the password" }), cookie)
+        .await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN);
+    let right = panel
+        .post(off, json!({ "password": PASSWORD }), cookie)
+        .await;
+    assert_eq!(right.status, StatusCode::NO_CONTENT);
+    assert_eq!(login(None).await.status, StatusCode::OK);
+    assert_eq!(
+        panel.get(two_steps, cookie).await.body,
+        json!({ "on": false, "recovery_codes": 0 })
+    );
+    assert_eq!(
+        panel.get(two_steps, None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 /// The web client's types are generated from `web/openapi.json`. If this fails,
 /// the API changed: run `scripts/dev.sh gen` and commit the result.
 #[test]

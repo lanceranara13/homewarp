@@ -36,6 +36,8 @@ rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
+# SHA-1, which the codes of an authenticator app are worked out with and nothing else here is.
+sha1 = "0.11"
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 # Without extended attributes, which no server's files need kept.

@@ -2,9 +2,19 @@ import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-q
 import { KeyRound, Plus, Trash2 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
-import { accountsQuery, settingsQuery } from '../accounts'
-import { changeOwnPassword, changeSettings, createAccount, removeAccount, setPassword, type Account } from '../api/client'
-import { Button, Confirm, Field, PageBar, Problem } from '../components/ui'
+import { accountsQuery, settingsQuery, twoStepsQuery } from '../accounts'
+import {
+  beginTwoSteps,
+  changeOwnPassword,
+  changeSettings,
+  confirmTwoSteps,
+  createAccount,
+  endTwoSteps,
+  removeAccount,
+  setPassword,
+  type Account,
+} from '../api/client'
+import { Button, Confirm, CopyChip, Field, PageBar, Problem } from '../components/ui'
 import { when } from '../format'
 import { sessionQuery } from '../session'
 
@@ -17,6 +27,7 @@ export function SettingsPage() {
       <PageBar title="Settings" />
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-10 p-4 md:p-6">
         <OwnPassword username={session.user?.username ?? ''} />
+        <TwoSteps />
         {session.user?.owner && <Accounts />}
         {session.user?.owner && <Resolvers />}
       </main>
@@ -85,6 +96,102 @@ function OwnPassword({ username }: { username: string }) {
           </Button>
         </div>
       </form>
+    </Section>
+  )
+}
+
+/**
+ * A second step for this account's sign-in: a code from an authenticator app.
+ * It is on only once the app has shown, with a code, that it has the secret.
+ */
+function TwoSteps() {
+  const queryClient = useQueryClient()
+  const { data: now } = useSuspenseQuery(twoStepsQuery)
+  const again = () => queryClient.invalidateQueries({ queryKey: twoStepsQuery.queryKey })
+  const beginning = useMutation({ mutationFn: beginTwoSteps })
+  const confirming = useMutation({ mutationFn: confirmTwoSteps, onSuccess: again })
+  const ending = useMutation({
+    mutationFn: endTwoSteps,
+    onSuccess: async () => {
+      beginning.reset()
+      confirming.reset()
+      await again()
+    },
+  })
+  const typed = (form: HTMLFormElement, name: string) => String(new FormData(form).get(name) ?? '')
+
+  return (
+    <Section
+      title="Two-step sign-in"
+      lead="With it on, signing in takes your password and then a code from an authenticator app on your phone. Over SFTP the code is typed straight after the password, as one word."
+    >
+      {confirming.data ? (
+        <div className="flex max-w-140 flex-col gap-3">
+          <p role="status" className="text-ink">
+            It is on. Keep these recovery codes somewhere safe: each signs you in once if the app is lost, and they are
+            not shown again.
+          </p>
+          <ul className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-mono text-ink">
+            {confirming.data.map((code) => (
+              <li key={code}>{code}</li>
+            ))}
+          </ul>
+        </div>
+      ) : now.on ? (
+        <form
+          className="flex max-w-80 flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            ending.mutate(typed(event.currentTarget, 'password'))
+          }}
+        >
+          <p className="text-ink">
+            It is on. {now.recovery_codes === 1 ? '1 recovery code is' : `${now.recovery_codes} recovery codes are`} left.
+          </p>
+          <Field label="Your password, to turn it off" name="password" type="password" required autoComplete="current-password" />
+          {ending.error && <Problem>{ending.error.message}</Problem>}
+          <div>
+            <Button type="submit" busy={ending.isPending}>
+              Turn off
+            </Button>
+          </div>
+        </form>
+      ) : beginning.data ? (
+        <form
+          className="flex max-w-140 flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            confirming.mutate(typed(event.currentTarget, 'code'))
+          }}
+        >
+          <p>
+            Add an account in the app with this secret, or{' '}
+            <a href={beginning.data.uri} className="text-accent hover:underline">
+              open it in an app on this device
+            </a>
+            . Then type the code the app shows.
+          </p>
+          <div>
+            <CopyChip text={beginning.data.secret} />
+          </div>
+          <div className="max-w-80">
+            <Field label="Code from the app" name="code" required mono inputMode="numeric" autoComplete="one-time-code" />
+          </div>
+          {confirming.error && <Problem>{confirming.error.message}</Problem>}
+          <div>
+            <Button type="submit" variant="primary" busy={confirming.isPending}>
+              Turn on
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <div className="flex flex-col items-start gap-3">
+          {beginning.error && <Problem>{beginning.error.message}</Problem>}
+          <Button busy={beginning.isPending} onClick={() => beginning.mutate()}>
+            Set up an authenticator app
+          </Button>
+        </div>
+      )}
     </Section>
   )
 }

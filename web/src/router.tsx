@@ -10,7 +10,7 @@ import {
   type ErrorComponentProps,
 } from '@tanstack/react-router'
 
-import { accountsQuery, activityQuery, serverUsersQuery, settingsQuery } from './accounts'
+import { accountsQuery, activityQuery, serverUsersQuery, settingsQuery, twoStepsQuery } from './accounts'
 import { AppShell } from './components/AppShell'
 import { Button, Doorway, Problem } from './components/ui'
 import { filesQuery } from './files'
@@ -338,10 +338,10 @@ const settingsRoute = createRoute({
   path: '/settings',
   loader: async ({ context: { queryClient } }) => {
     // The other accounts are the owner's to see, and so only the owner's page waits for them.
+    // What each account has of its own, and what the owner has of everyone's, set off together.
     const session = await queryClient.ensureQueryData(sessionQuery)
-    if (session.user?.owner) {
-      await Promise.all([queryClient.ensureQueryData(accountsQuery), queryClient.ensureQueryData(settingsQuery)])
-    }
+    const owners = session.user?.owner ? [queryClient.ensureQueryData(accountsQuery), queryClient.ensureQueryData(settingsQuery)] : []
+    await Promise.all([queryClient.ensureQueryData(twoStepsQuery), ...owners])
   },
   component: SettingsPage,
 })

@@ -24,6 +24,7 @@ use crate::{
     },
     audit, auth,
     servers::MISSING,
+    totp,
 };
 
 const NO_ACCOUNT: Problem = Problem::NotFound("There is no such account.");
@@ -34,6 +35,10 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(remove_account))
         .routes(routes!(set_password))
         .routes(routes!(change_own_password))
+        .routes(routes!(two_steps, begin_two_steps))
+        .routes(routes!(confirm_two_steps))
+        .routes(routes!(end_two_steps))
+        .routes(routes!(end_two_steps_of))
         .routes(routes!(list_server_users))
         .routes(routes!(let_in, turn_out))
 }
@@ -529,5 +534,222 @@ async fn turn_out(
         .execute(&state.db)
         .await?;
     audit::record(&state.db, &who, Some(id), "server.turn_out", &username).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether the account that asks has a second step to its sign-in.
+#[derive(Serialize, ToSchema)]
+struct TwoSteps {
+    on: bool,
+    /// How many of its recovery codes have not been used.
+    recovery_codes: usize,
+}
+
+/// What an authenticator app is given to make the codes of an account.
+#[derive(Serialize, ToSchema)]
+struct TwoStepsSetup {
+    /// The secret, to type into the app.
+    secret: String,
+    /// The same as a link, which an app on this device opens.
+    uri: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct TypedCode {
+    code: String,
+}
+
+/// The codes that sign an account in when its app is lost. Each works once,
+/// and they are shown this one time.
+#[derive(Serialize, ToSchema)]
+struct RecoveryCodes {
+    recovery_codes: Vec<String>,
+}
+
+/// Whether the account signed in here has a second step, and how many
+/// recovery codes it has left.
+#[utoipa::path(
+    get,
+    path = "/api/v1/account/two-steps",
+    responses(
+        (status = OK, body = TwoSteps),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+    )
+)]
+async fn two_steps(
+    State(state): State<AppState>,
+    SignedIn(who): SignedIn,
+) -> Result<Json<TwoSteps>, Problem> {
+    let (secret, codes): (Option<String>, String) =
+        sqlx::query_as("SELECT totp_secret, recovery_codes FROM users WHERE id = ?")
+            .bind(who.id)
+            .fetch_one(&state.db)
+            .await?;
+    let codes: Vec<String> = serde_json::from_str(&codes)
+        .context("reading an account's recovery codes")
+        .map_err(Problem::Internal)?;
+    Ok(Json(TwoSteps {
+        on: secret.is_some(),
+        recovery_codes: codes.len(),
+    }))
+}
+
+/// Begins giving the account a second step: makes a secret for an
+/// authenticator app. Nothing changes until a code from that app has been
+/// typed back, which shows the app has it.
+#[utoipa::path(
+    post,
+    path = "/api/v1/account/two-steps",
+    responses(
+        (status = OK, body = TwoStepsSetup),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = CONFLICT, body = ProblemBody, description = "The account has a second step already."),
+    )
+)]
+async fn begin_two_steps(
+    State(state): State<AppState>,
+    SignedIn(who): SignedIn,
+) -> Result<Json<TwoStepsSetup>, Problem> {
+    let secret = totp::new_secret()?;
+    let begun =
+        sqlx::query("UPDATE users SET totp_pending = ? WHERE id = ? AND totp_secret IS NULL")
+            .bind(&secret)
+            .bind(who.id)
+            .execute(&state.db)
+            .await?;
+    if begun.rows_affected() == 0 {
+        return Err(Problem::Conflict(
+            "This account has a second step already. Turn it off to set up another app.".into(),
+        ));
+    }
+    Ok(Json(TwoStepsSetup {
+        uri: totp::uri(&secret, &who.username),
+        secret,
+    }))
+}
+
+/// Turns the second step on, given a code from the app that was just set up.
+/// The answer is the account's recovery codes, which are not shown again.
+#[utoipa::path(
+    post,
+    path = "/api/v1/account/two-steps/confirm",
+    request_body = TypedCode,
+    responses(
+        (status = OK, body = RecoveryCodes),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = CONFLICT, body = ProblemBody, description = "No app is being set up."),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "The code is not the app's."),
+    )
+)]
+async fn confirm_two_steps(
+    State(state): State<AppState>,
+    SignedIn(who): SignedIn,
+    Json(typed): Json<TypedCode>,
+) -> Result<Json<RecoveryCodes>, Problem> {
+    let pending: Option<Option<String>> =
+        sqlx::query_scalar("SELECT totp_pending FROM users WHERE id = ? AND totp_secret IS NULL")
+            .bind(who.id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(secret) = pending.flatten() else {
+        return Err(Problem::Conflict(
+            "No authenticator app is being set up for this account.".into(),
+        ));
+    };
+    let Some(step) = totp::passes(&secret, &typed.code, auth::now(), 0) else {
+        return Err(Problem::Invalid(
+            "That is not the code the app shows now. Check that the secret was typed as it is, and that this device's clock is right.".into(),
+        ));
+    };
+    let (codes, kept) = totp::new_recovery_codes();
+    sqlx::query(
+        "UPDATE users SET totp_secret = ?, totp_pending = NULL, totp_step = ?, recovery_codes = ?
+         WHERE id = ?",
+    )
+    .bind(secret)
+    .bind(step)
+    .bind(kept)
+    .bind(who.id)
+    .execute(&state.db)
+    .await?;
+    audit::record(&state.db, &who, None, "account.two_steps_on", &who.username).await;
+    Ok(Json(RecoveryCodes {
+        recovery_codes: codes,
+    }))
+}
+
+/// Takes an account's second step away, and its recovery codes with it.
+async fn without_two_steps(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE users
+         SET totp_secret = NULL, totp_pending = NULL, totp_step = 0, recovery_codes = '[]'
+         WHERE id = ?",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Turns the second step of the account that asks off, given its password.
+#[utoipa::path(
+    post,
+    path = "/api/v1/account/two-steps/off",
+    request_body = NewPassword,
+    responses(
+        (status = NO_CONTENT, description = "The account signs in with its password alone."),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The password is wrong."),
+    )
+)]
+async fn end_two_steps(
+    State(state): State<AppState>,
+    SignedIn(who): SignedIn,
+    Json(asked): Json<NewPassword>,
+) -> Result<StatusCode, Problem> {
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+        .bind(who.id)
+        .fetch_one(&state.db)
+        .await?;
+    if !blocking(move || auth::verify_password(&asked.password, &hash)).await? {
+        return Err(Problem::Forbidden("That is not your password."));
+    }
+    without_two_steps(&state.db, who.id).await?;
+    audit::record(
+        &state.db,
+        &who,
+        None,
+        "account.two_steps_off",
+        &who.username,
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Turns another account's second step off: for whoever has lost both their
+/// app and their recovery codes.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/users/{id}/two-steps",
+    params(("id" = i64, Path, description = "The account's id.")),
+    responses(
+        (status = NO_CONTENT, description = "The account signs in with its password alone."),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account asking is not the owner's."),
+        (status = NOT_FOUND, body = ProblemBody, description = "There is no such account."),
+    )
+)]
+async fn end_two_steps_of(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, Problem> {
+    let username: Option<String> = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    let username = username.ok_or(NO_ACCOUNT)?;
+    without_two_steps(&state.db, id).await?;
+    audit::record(&state.db, &who, None, "account.two_steps_off", &username).await;
     Ok(StatusCode::NO_CONTENT)
 }

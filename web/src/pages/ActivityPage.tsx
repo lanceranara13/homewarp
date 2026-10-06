@@ -18,6 +18,8 @@ const WORDS: Record<string, string> = {
   'account.create': 'Made an account',
   'account.remove': 'Removed an account',
   'account.password': 'Changed a password',
+  'account.two_steps_on': 'Turned two-step sign-in on',
+  'account.two_steps_off': 'Turned two-step sign-in off',
   'template.import': 'Imported a template',
   'template.remove': 'Removed a template',
   'server.create': 'Made the server',

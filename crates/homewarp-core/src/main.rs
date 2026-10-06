@@ -6,8 +6,9 @@ use std::{
 };
 
 use anyhow::Context;
-use homewarp_core::{AppState, Runtime};
+use homewarp_core::{AppState, Client, Doored, Runtime, announce};
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpListener, UnixListener, UnixStream},
     signal::unix::{SignalKind, signal},
 };
@@ -95,17 +96,23 @@ async fn main() -> anyhow::Result<()> {
         Some(socket) => {
             let listener = socket_at(Path::new(socket))?;
             said(socket);
-            axum::serve(listener, homewarp_core::app(state))
-                .with_graceful_shutdown(stop_requested())
-                .await?;
+            axum::serve(
+                Doored(listener),
+                homewarp_core::app(state).into_make_service_with_connect_info::<Client>(),
+            )
+            .with_graceful_shutdown(stop_requested())
+            .await?;
         }
         None => {
             let address: SocketAddr = listen.parse()?;
             let listener = TcpListener::bind(address).await?;
             said(&format!("http://{address}"));
-            axum::serve(listener, homewarp_core::app(state))
-                .with_graceful_shutdown(stop_requested())
-                .await?;
+            axum::serve(
+                listener,
+                homewarp_core::app(state).into_make_service_with_connect_info::<Client>(),
+            )
+            .with_graceful_shutdown(stop_requested())
+            .await?;
         }
     }
     Ok(())
@@ -139,7 +146,7 @@ async fn door(listen: SocketAddr, socket: &Path) -> anyhow::Result<()> {
     let stop = stop_requested();
     tokio::pin!(stop);
     loop {
-        let (mut from, _) = tokio::select! {
+        let (mut from, peer) = tokio::select! {
             accepted = listener.accept() => accepted?,
             () = &mut stop => return Ok(()),
         };
@@ -147,7 +154,15 @@ async fn door(listen: SocketAddr, socket: &Path) -> anyhow::Result<()> {
         tokio::spawn(async move {
             // Core is being restarted, most likely. The browser asks again.
             if let Ok(mut to) = UnixStream::connect(&socket).await {
-                let _ = tokio::io::copy_bidirectional(&mut from, &mut to).await;
+                // Ahead of everything else, who this is from: to Core each of
+                // these would otherwise come from the door.
+                if to
+                    .write_all(announce(peer, listen).as_bytes())
+                    .await
+                    .is_ok()
+                {
+                    let _ = tokio::io::copy_bidirectional(&mut from, &mut to).await;
+                }
             }
         });
     }
