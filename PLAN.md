@@ -314,6 +314,7 @@ Core reproduces the contract Wings gives to a container, so unmodified eggs and
 - Startup command with `{{VAR}}` substitution.
 - Config-file patching before start: `properties`, `yaml`, `json`, `ini`, `xml`, `file`
   parsers, including wildcards and `{{server.allocations.default.port}}`-style lookups.
+  (All but `xml` are written: §11, Phase 2.)
 - "Started" detection from the `done` string; stop via command or `^C` / `^SIGTERM` etc.
 - Variable validation: a Rust port of the Laravel rule subset eggs actually use
   (`required`, `nullable`, `string`, `numeric`, `integer`, `boolean`, `max`, `min`,
@@ -748,8 +749,9 @@ families of format are in there, as YAML and as JSON.
 
 | | Result |
 |---|---|
-| Read | 115 of 116. They made 100 templates: 15 were a second export of an egg already read, and were turned away by name. |
-| Refused | 1: BungeeCord, whose `config.yml` replaces by pattern (`servers.*.address`). The importer says so rather than guess. |
+| Read | 115 of 116 on the first run, and all 116 since replacing by pattern was written. They make 101 templates: 15 are a second export of an egg already read, and are turned away by name. |
+| Refused | On the first run 1: BungeeCord, whose `config.yml` replaces by pattern (`servers.*.address`). The importer said so rather than guess. |
+| Config files | 50 eggs patch none, 38 only `properties` files, and 28 need another parser: `file` 9, `ini` 7, `json` 6, `yaml` 4, `xml` 1. |
 | Stop | 54 by a console command, 46 by an interrupt. Nine of the 116 spell the interrupt `^^C`. Wings does not know that spelling and sends SIGKILL (`environment/docker/power.go`); Homewarp reads it as the interrupt that was meant. Until this run it kept a signal named `^C`, which would have failed at the first stop. |
 | Install | All 100 have an install script and a "started" string. |
 | Images | 64 offer one image; 32 offer four or more (Java versions). |
@@ -813,7 +815,7 @@ Each phase ends with something that works on the homelab.
 - The donation popover has no links yet, and says so. The four destinations besides
   Servers are shown dimmed and lead nowhere.
 
-**Phase 2 — Servers** — *templates, a server's first life and its live console done 2026-10-06; the rest to do*
+**Phase 2 — Servers** — *done 2026-10-06, but for Paper past its EULA, which is the owner's to agree to*
 - Template import (all egg formats), validation rules, config-file parsers.
 - Install flow, lifecycle state machine, console WebSocket, stats, limits, crash recovery.
 - UI: template gallery, create-server wizard, server page with console.
@@ -879,21 +881,50 @@ Each phase ends with something that works on the homelab.
   it again. The page policy lets a page open a socket to its own origin, in Chromium
   at least: `'self'` is all it says, and Safari before 15.4 did not read that as
   covering WebSockets.
-- **Still to do in this phase:** on a server's page, its disk, its players and how
-  long it has been up, and usage on the Servers page, which still asks every four
-  seconds; starting again, with back-off, after a crash; the config-file
-  parsers other than `properties`, and replacing by pattern. Until those exist a
-  template that needs one is refused when a server is made from it, not after it has
-  installed: 28 of the 116 eggs (`file` 9, `ini` 7, `json` 6, `yaml` 4, `xml` 1), which
-  leaves 88 that work. Also: importing from a URL and a catalogue to pick from, both of
-  which need Core to fetch from the internet, which it does not yet do; protocol per
-  port (§5.6); changing a server once it is made; free memory and disk shown where one
-  is made; and the phase's exit, which is a SteamCMD game, a non-game template, and
-  Paper past its EULA.
+- *Done: the config-file parsers.* `file`, `ini`, `json` and `yaml` join `properties`,
+  written to do what Wings does, whose `parser/parser.go` was read for it, with three
+  differences made on purpose. An INI file keeps its comments and its layout, where
+  Wings writes it afresh. A JSON file keeps the order of its keys, where Wings sorts
+  them. And a setting that is made only where a certain value is there already, plain
+  or by pattern, is made when it is there: Wings has both of those tests the wrong way
+  round, so in Wings they never pass. With replacing by pattern, BungeeCord's egg
+  imports, and all 116 are read. A file that cannot be set up is said in the console
+  and passed over, as is a setting with a placeholder Core has nothing for. A config
+  file may sit in a directory the game has yet to make; it is made, and given to the
+  server's user. Only XML is missing: one egg of the 116, Space Engineers, which is
+  refused when a server is made from it and not after it has installed.
+- *Done: crash recovery.* A server that ends by itself with an error is started again
+  after 5 seconds, then 15, then 45, and after a fourth crash in a row is left alone,
+  with why in its console. One that had stayed up a minute starts the count afresh.
+  Tried: a server made to exit with code 3 was back in 6 seconds, and after a second
+  crash waited its 15.
+- *Done: changing a server.* Its name, image, memory, processor limit, port, variables
+  and EULA box, on a Settings page that is the wizard's form again. It has to be
+  stopped, and is as it was changed from its next start; its files are not touched.
+  Tried against the daemon: refused while running, held to the template's rules, and
+  after the change started with the new greeting, 384 MB in place of 256, and its port
+  published at the new number.
+- *Exit, run on the homelab from published eggs, each in a throwaway copy.* **Gitea**,
+  which is not a game: installed in 41 seconds, its page answered over the LAN, its
+  `app.ini` set by the `file` parser, stopped by a `^^C` read as an interrupt, removed.
+  **Barotrauma**, through SteamCMD: 549 MB installed and running in 116 seconds,
+  listening on UDP 27015 on the home machine, stopped, removed. **Paper**: installed
+  and started through the wizard as far as its EULA (above); the same engine ran it to
+  "Done" and answered a status ping in Phase 0. Agreeing to the EULA is the owner's to
+  do, with the box in the wizard.
+- **Moved out of this phase**, each to where it belongs. Importing from a URL, and a
+  catalogue to pick from, to Phase 6 with the catalogue browser: both need Core to
+  fetch from the internet, which it does not do and should not start doing without the
+  care that takes. Protocol per port to Phase 3, with allocations. A server's disk use
+  to Phase 4, with its files. Players to Phase 7. The XML parser to whenever an egg
+  that matters needs it. Small and still open: how long a server has been up; usage on
+  the Servers page, which asks every four seconds; free memory and disk shown where a
+  server is made.
 
 **Phase 3 — Gate and tunnel**
 - `homewarp-gate`, enrollment with key rotation, declarative forwards, self-probe,
-  transparent + NAT modes, allocations, Network page with live health.
+  transparent + NAT modes, allocations with a protocol for each port (§5.6; a server
+  has one port now, published for TCP and UDP both), Network page with live health.
 - x86_64 and ARM64 Gate binaries; the §7.1 resource budget asserted in the lab.
 - *Exit:* lab suite green; a player joins through a real VPS IP and the server logs
   their real address; VPS reboot, home reboot and home IP change all self-heal.
@@ -909,7 +940,8 @@ Each phase ends with something that works on the homelab.
 
 **Phase 6 — Packaging and onboarding**
 - One-line installers, signed releases, self-update, ARM64 builds of Core, docs.
-- Template catalogue browser; first-run wizard polish; five-minute target measured.
+- Template catalogue browser, and importing an egg from a URL (from Phase 2: both have
+  Core fetch from the internet); first-run wizard polish; five-minute target measured.
 
 **Phase 7 — Later**
 - Minecraft hostname routing (many servers on one `:25565`), sleep + wake-on-connect,
