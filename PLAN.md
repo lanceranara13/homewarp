@@ -959,7 +959,35 @@ Each phase ends with something that works on the homelab.
   `ring`, part of which is C. The binary is small all the same, but the Gate is 151
   crates, which is not the short list §9 had in mind. To weigh before a first release:
   driving netlink directly, with the three small crates that library is built on.
-- **Still to do in this phase:** Core's end of the tunnel (the interface, the way back,
+- *Done in the lab (2026-10-06): Core's end, and the two ends together.* The lab's
+  `home` runs Core itself now, built static as the Gate is. Through its own API it is
+  given an account, two lab eggs and two servers, and then told where its Gate is. It
+  makes its end of the tunnel, tells the Gate to forward its servers' ports, and asks
+  after it every ten seconds. All 28 checks pass on both of Docker's firewall
+  backends with nothing typed into either kernel by the script: NAT mode is asked of
+  Core and reaches the Gate within Core's ten seconds, and after the tunnel is wiped
+  on the simulated VPS it is Core's asking that brings it back. The WireGuard library
+  adds no route for home's allowed addresses, which was the thing to watch. Step 1
+  below is therefore done; 2 and 3 are next. What follows is how it was written.
+- *Core's end, as written.* `homewarp-net` has home's
+  table and the way back for replies, as the lab's script has them. Core has a `gate`
+  table and a `tunnel` module: one task that sets the kernel up for the Gate in the
+  database, tells the Gate to forward each server's port, for TCP and UDP both, and
+  asks after it every ten seconds. `GET`, `PUT` and `DELETE /api/v1/gate` show it,
+  connect a Gate that is already running, and forget it. It compiles and its unit
+  tests pass; nothing has yet shown that it works. **Next, in this order:**
+  1. *Core in the lab.* Build Core for musl as the Gate is built (`dev.sh gate` shows
+     how) and run it in the lab's `home` in place of the script's `ip`, `wg` and `nft`.
+     The lab is offline, so its servers need an image already in `home`: one made from
+     `homewarp-lab-node` with an entrypoint that runs `$STARTUP`, and a lab egg whose
+     startup is `game.sh`. Then the lab's forwards come from Core's servers and not
+     from the script's `push`. Watch for the WireGuard library adding a default route
+     for home's allowed addresses, which are all of them: it must not.
+  2. Core's own deployment: the host's network namespace and `NET_ADMIN`, with `ip`
+     and `nft` in its image. Only its own interface, table, rule and route table.
+  3. Enrolment, the self-probe, the Network page and wizard, ARM64, the real VPS.
+- **Still to do in this phase:** proving Core's end of the tunnel as above (the
+  interface, the way back,
   forwards from servers' ports, asking after the Gate); enrolment with a join token and
   fresh keys; the self-probe and the choice of mode; the Network page and the wizard;
   the ARM64 build; and then the real VPS, which is a working machine (§10) and will be
