@@ -683,8 +683,8 @@ Assertions:
 `lab/run.sh`, started with `scripts/dev.sh lab`. As built it differs from the drawing in
 two ways: both networks are internal, so the lab can reach neither the homelab's LAN nor
 the internet, and home also sits on a simulated LAN (`192.168.50.0/24`) with a NAS that
-nothing from outside may touch. The Gate does not exist yet, so `wg` and `nft` are driven
-by the script. Home ran Docker 29.8.2; every check passed on **both** of Docker's firewall
+nothing from outside may touch. The Gate did not exist yet, so `wg` and `nft` were driven
+by the script; since Phase 3 the simulated VPS runs the Gate program itself (§11). Home ran Docker 29.8.2; every check passed on **both** of Docker's firewall
 backends, iptables and nftables.
 
 | Check | Result |
@@ -928,6 +928,42 @@ Each phase ends with something that works on the homelab.
 - x86_64 and ARM64 Gate binaries; the §7.1 resource budget asserted in the lab.
 - *Exit:* lab suite green; a player joins through a real VPS IP and the server logs
   their real address; VPS reboot, home reboot and home IP change all self-heal.
+- *Done so far: the Gate program, in the lab (2026-10-06).* `homewarp-gate` is one static
+  binary of 3.1 MB that asks nothing of a VPS but `nft`. From two files in its
+  directory it makes the WireGuard interface, over netlink, and its one nftables table,
+  and then answers Core on its tunnel address only, to whoever shows its token.
+  `PUT /v1/state` takes all that it is to forward and in which mode; `GET /v1/status`
+  says what it is doing and when home was last heard from. What it is told it keeps, so
+  that it comes back from a reboot doing the same. The types the two ends share are in
+  `homewarp-proto`; the rules and the kernel work are in `homewarp-net`.
+- The lab's simulated VPS runs it now, in place of commands typed by the script, and
+  home tells it what to forward through the tunnel. 28 checks pass on both of Docker's
+  firewall backends: those of Phase 0 as they were, NAT mode asked for through the API
+  and taken back, and for the program itself that it answers nobody without its token
+  and nobody on the public address, that it holds 2 MB of memory against the 20 MB of
+  §7.1, that players still get through while it is stopped and when it is started
+  again over the tunnel it left, and that with the tunnel wiped from the kernel, as a
+  reboot of the VPS wipes it, it is back to what it was last told.
+- Found: set up a second time, a WireGuard interface forgets its session and where the
+  other end is. Restarting the Gate cut players off until home shook hands again. It
+  now leaves alone an interface that is already as wanted.
+- Found: after a reboot of the VPS, home notices only when something it sent goes
+  unanswered, which takes about 15 seconds, or at its next re-keying, which can take
+  two minutes. A keepalive alone does not do it. Core's regular asking after the Gate
+  is what makes recovery quick, and has to exist for that reason as well.
+- Found: the lab's own stand-in servers lost about one answer in a hundred (3 of 267),
+  by a reset overtaking it. Twice it looked like a fault of the tunnel. The lab's
+  clients now only listen; after that, 3024 connections through the Gate in four
+  minutes, across two re-keyings, and none unanswered.
+- Found: `defguard_wireguard_rs` always links its userspace fallback, and with it
+  `ring`, part of which is C. The binary is small all the same, but the Gate is 151
+  crates, which is not the short list §9 had in mind. To weigh before a first release:
+  driving netlink directly, with the three small crates that library is built on.
+- **Still to do in this phase:** Core's end of the tunnel (the interface, the way back,
+  forwards from servers' ports, asking after the Gate); enrolment with a join token and
+  fresh keys; the self-probe and the choice of mode; the Network page and the wizard;
+  the ARM64 build; and then the real VPS, which is a working machine (§10) and will be
+  touched only after the lab is green from end to end.
 
 **Phase 4 — Day-two features**
 - File manager (browse, edit, upload, archive/extract), backups (tar.zst, restore,
