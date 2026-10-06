@@ -509,6 +509,26 @@ the owner's to grant.
 Explicitly accepted: Core needs the Docker socket, which is root-equivalent on the
 home host. This is inherent to every panel of this kind (Wings included).
 
+### Held against what was built (2026-10-07)
+
+The table above was written before any of it was built. Here it is row by row, read
+against the code and against what the lab and the tests check. Four things were changed
+because of the reading; they are marked *changed*.
+
+| Row | As built | What it leaves |
+|---|---|---|
+| VPS is compromised | Holds. Home's rules let the tunnel in to what Docker published on the servers' bridge and, while the panel has a name, to the door of the panel over TLS, and to nothing else; the lab takes the Gate over, widens what it may send, and tries. What a Gate answers is read with a limit on its size and its time. *Changed:* what a Gate says went through a port is kept only for ports this Core asked it to forward. A Gate that named every port there is would have been given a row for each, every hour. | It sees what players send and can change it, as any relay can, and it knows the home's address. |
+| VPS is compromised, and the panel has a name | As the row says. The CAA record is the owner's to add; the Network page writes it out. | Until that record is there, whoever has the VPS can get a certificate for the name. |
+| Game server is exploited | Holds. Not root, no capabilities, no new privileges, read-only root, memory and process limits; kept from the machine it runs on and from the home network whether or not a VPS is connected (the lab asks both ways). *Changed:* kept as well from `100.64.0.0/10`, where Tailscale and carriers' own networks are, and from `169.254.0.0/16`. | Servers of one Homewarp reach each other on their bridge, which a proxy in front of several of them needs. There is no limit on what a server writes to the disk it is on. IPv6 is off on the bridge and nothing filters it if someone turns it on. |
+| Malicious template / install script | Partly. The script runs in a container of its own with the server's folder and nothing else of the machine, kept from the home network as servers are, with memory and process limits. It is root there with most of what Docker gives a container, because install scripts install packages: "the same limits" was not true. *Changed:* it may no longer write raw packets, with which it could pass itself off as a neighbour on the servers' network, nor make device files. The template page shows the script and the images. | Whoever imports an egg runs its script, in that container. |
+| Panel account takeover | Holds. Argon2id, with an unknown name costing the same work as a wrong password; sign-in limits by address and by account; a second step, and passkeys; a cookie that is `HttpOnly`, `SameSite=Strict` and over TLS `Secure`; the same-site check on every change and on the console's socket; the audit log. Adding a passkey, changing the password and turning the second step off each take the password. | There are no API keys, so none are hashed. The limits are kept in memory and a restart forgets them. A session lasts thirty days and is ended early only by signing out or by a change of password. |
+| File-manager path traversal | Holds, and is tried 1,400 ways with every test run (§11, Phase 5). | |
+| DDoS | Holds for floods of connections: the limit by address is a setting now. *Changed:* the panel's own port has limits too, 256 handshakes at once, 1,024 connections open and 64 from one address. | Packets from many addresses to a forwarded UDP port are passed home as fast as the VPS's line carries them: the limit is by address, and there is none for all of them together. |
+| Tampered binaries / updates | Not built. There are no releases yet (Phase 6). | |
+| Gate firewall change locks the user out of SSH | Built in Phase 5: the guard is put in place for a minute and undone by the Gate itself unless it is kept. | It is a list of what was listening when it was asked for. What begins to listen later is shut until the VPS is hardened again, and the panel says so. |
+| Join token leaks | Holds. The lab checks that the key and the token the command carried open nothing afterwards. | |
+| Home IP leaks through the game server | Not built. What a server sends out leaves by the home's own line, which the lab shows. A game that announces itself to a public list announces the home's address there. | Phase 7: servers' own traffic out through the Gate. |
+
 ## 7. Performance
 
 - Forwarding is in-kernel on both ends; the Rust processes are control plane only and

@@ -16,8 +16,10 @@ home address stays hidden and your router needs no setup.
 > players' own addresses. Both ends put the tunnel back when a reboot or another program
 > takes it away. A server's files are managed from the panel and over SFTP, backed up and
 > put back, and worked on by the clock; further accounts can be let into single servers
-> for chosen things, and what is done is written down. There are no releases yet, so
-> nothing here installs with one line. The
+> for chosen things, and what is done is written down. The panel can be given a name and
+> reached from anywhere over TLS, through the VPS and unread by it, with a certificate it
+> asks for and renews itself; sign-ins are limited, and take a second step or a passkey.
+> There are no releases yet, so nothing here installs with one line. The
 > plan is in [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works
