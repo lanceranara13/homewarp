@@ -1,8 +1,8 @@
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Link, getRouteApi, notFound, useNavigate } from '@tanstack/react-router'
-import { useId } from 'react'
+import { useId, type ReactNode } from 'react'
 
-import { createServer, type Template } from '../api/client'
+import { createServer, type ServerSettings, type Template } from '../api/client'
 import { Button, Field, PageBar, Problem, buttonClass } from '../components/ui'
 import { serverQuery, serversQuery } from '../servers'
 import { templateQuery, templatesQuery } from '../templates'
@@ -65,7 +65,6 @@ export function ChooseTemplatePage() {
 
 /** Step two: a name, how much of the machine it may use, and what the template asks. */
 export function NewServerPage() {
-  const id = useId()
   const { templateId } = route.useParams()
   const { data: template } = useSuspenseQuery(templateQuery(Number(templateId)))
   const { data: servers } = useSuspenseQuery(serversQuery)
@@ -83,139 +82,163 @@ export function NewServerPage() {
     },
   })
 
+  // The first port from Minecraft's own upward that no server has.
   const taken = new Set(servers.map((server) => server.port))
   let port = FIRST_PORT
   while (taken.has(port)) port += 1
-  // What a person is meant to set comes first, with what has to be set because the template
-  // leaves it empty. What the template sets for itself is tucked away.
-  const comesFirst = (variable: Template['variables'][number]) =>
-    variable.user_editable || (variable.default === '' && variable.rules.includes('required'))
-  const asked = template.variables.filter(comesFirst)
-  const tucked = template.variables.filter((variable) => !comesFirst(variable))
 
   return (
     <>
       <PageBar title={template.name} crumb={<Link to="/servers/new">New server</Link>} />
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
         <Steps at={1} />
-        <form
-          className="flex max-w-140 flex-col gap-4"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const form = new FormData(event.currentTarget)
-            const typed = (name: string) => String(form.get(name) ?? '')
-            creating.mutate({
-              name: typed('name'),
-              template_id: template.id,
-              image: typed('image') || null,
-              memory_mb: Number(typed('memory_mb')),
-              cpu_percent: Number(typed('cpu_percent')) || 0,
-              port: Number(typed('port')),
-              variables: Object.fromEntries(template.variables.map(({ env }) => [env, typed(`variable.${env}`)])),
-              eula: form.get('eula') === 'on',
-            })
-          }}
-        >
-          <Field label="Name" name="name" required autoFocus maxLength={60} autoComplete="off" placeholder="Survival" />
-          {template.images.length > 1 && (
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor={`${id}-image`} className="text-caption text-ink-subtle">
-                Version
-              </label>
-              <select
-                id={`${id}-image`}
-                name="image"
-                className="h-10 rounded-md border border-hairline-strong bg-surface-1 px-2 text-body text-ink md:h-8"
-              >
-                {template.images.map(({ label, image }) => (
-                  <option key={image} value={image}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          <Field
-            label="Memory, in MB"
-            name="memory_mb"
-            type="number"
-            required
-            min={128}
-            step={128}
-            defaultValue={2048}
-            hint="The most the server may use. It is stopped if it takes more."
-          />
-          <Field
-            label="Port"
-            name="port"
-            type="number"
-            mono
-            required
-            min={1024}
-            max={65535}
-            defaultValue={port}
-            hint="Where players reach it on this machine. The first one no other server has."
-          />
-          {asked.map((variable) => (
-            <VariableField key={variable.env} variable={variable} />
-          ))}
-          {template.features.includes('eula') && (
-            <label className="flex items-start gap-2">
-              <input type="checkbox" name="eula" className="mt-0.5 size-4 accent-accent" />
-              <span>
-                I agree to the{' '}
-                <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer" className="text-accent hover:underline">
-                  Minecraft EULA
-                </a>
-                .
-                <span className="block text-small text-ink-subtle">
-                  Without it the server stops at its first start and asks for it.
-                </span>
-              </span>
-            </label>
-          )}
-          <details>
-            <summary className="cursor-pointer text-ink">Advanced</summary>
-            <div className="mt-4 flex flex-col gap-4">
-              <Field
-                label="Processor limit, in % of one core"
-                name="cpu_percent"
-                type="number"
-                min={0}
-                step={10}
-                defaultValue={0}
-                hint="150 is a core and a half. 0 is no limit."
-              />
-              {tucked.map((variable) => (
-                <VariableField key={variable.env} variable={variable} />
-              ))}
-            </div>
-          </details>
-          {creating.error && <Problem>{creating.error.message}</Problem>}
-          <div className="flex gap-2">
-            <Button type="submit" variant="primary" busy={creating.isPending}>
-              Create server
-            </Button>
+        <ServerForm
+          template={template}
+          start={{ name: '', memory_mb: 2048, port }}
+          submit="Create server"
+          pending={creating.isPending}
+          problem={creating.error?.message}
+          onSubmit={(settings) => creating.mutate({ ...settings, template_id: template.id })}
+          cancel={
             <Link to="/" className={buttonClass('ghost')}>
               Cancel
             </Link>
-          </div>
-        </form>
+          }
+        />
       </main>
     </>
   )
 }
 
-function VariableField({ variable }: { variable: Template['variables'][number] }) {
-  return (
+type ServerFormProps = {
+  template: Template
+  /** What the fields hold to begin with. A variable it does not name starts at the template's default. */
+  start: ServerSettings
+  /** What the button that sends the form says. */
+  submit: string
+  pending: boolean
+  problem?: string
+  onSubmit: (settings: ServerSettings) => void
+  cancel: ReactNode
+}
+
+/** The form a server is made with, and changed with afterwards. */
+export function ServerForm({ template, start, submit, pending, problem, onSubmit, cancel }: ServerFormProps) {
+  const id = useId()
+  // What a person is meant to set comes first, with what has to be set because the template
+  // leaves it empty. What the template sets for itself is tucked away.
+  const comesFirst = (variable: Template['variables'][number]) =>
+    variable.user_editable || (variable.default === '' && variable.rules.includes('required'))
+  const asked = template.variables.filter(comesFirst)
+  const tucked = template.variables.filter((variable) => !comesFirst(variable))
+  const field = (variable: Template['variables'][number]) => (
     <Field
+      key={variable.env}
       label={variable.name}
       name={`variable.${variable.env}`}
       mono
       autoComplete="off"
       spellCheck={false}
-      defaultValue={variable.default}
+      defaultValue={start.variables?.[variable.env] ?? variable.default}
       hint={variable.description || undefined}
     />
+  )
+
+  return (
+    <form
+      className="flex max-w-140 flex-col gap-4"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const form = new FormData(event.currentTarget)
+        const typed = (name: string) => String(form.get(name) ?? '')
+        onSubmit({
+          name: typed('name'),
+          image: typed('image') || null,
+          memory_mb: Number(typed('memory_mb')),
+          cpu_percent: Number(typed('cpu_percent')) || 0,
+          port: Number(typed('port')),
+          variables: Object.fromEntries(template.variables.map(({ env }) => [env, typed(`variable.${env}`)])),
+          eula: form.get('eula') === 'on',
+        })
+      }}
+    >
+      <Field label="Name" name="name" required autoFocus maxLength={60} autoComplete="off" placeholder="Survival" defaultValue={start.name} />
+      {template.images.length > 1 && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor={`${id}-image`} className="text-caption text-ink-subtle">
+            Version
+          </label>
+          <select
+            id={`${id}-image`}
+            name="image"
+            defaultValue={start.image ?? template.images[0]?.image}
+            className="h-10 rounded-md border border-hairline-strong bg-surface-1 px-2 text-body text-ink md:h-8"
+          >
+            {template.images.map(({ label, image }) => (
+              <option key={image} value={image}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      <Field
+        label="Memory, in MB"
+        name="memory_mb"
+        type="number"
+        required
+        min={128}
+        step={128}
+        defaultValue={start.memory_mb}
+        hint="The most the server may use. It is stopped if it takes more."
+      />
+      <Field
+        label="Port"
+        name="port"
+        type="number"
+        mono
+        required
+        min={1024}
+        max={65535}
+        defaultValue={start.port}
+        hint="Where players reach it on this machine. No two servers have the same one."
+      />
+      {asked.map(field)}
+      {template.features.includes('eula') && (
+        <label className="flex items-start gap-2">
+          <input type="checkbox" name="eula" defaultChecked={start.eula ?? false} className="mt-0.5 size-4 accent-accent" />
+          <span>
+            I agree to the{' '}
+            <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer" className="text-accent hover:underline">
+              Minecraft EULA
+            </a>
+            .
+            <span className="block text-small text-ink-subtle">Without it the server stops at its first start and asks for it.</span>
+          </span>
+        </label>
+      )}
+      <details>
+        <summary className="cursor-pointer text-ink">Advanced</summary>
+        <div className="mt-4 flex flex-col gap-4">
+          <Field
+            label="Processor limit, in % of one core"
+            name="cpu_percent"
+            type="number"
+            min={0}
+            step={10}
+            defaultValue={start.cpu_percent ?? 0}
+            hint="150 is a core and a half. 0 is no limit."
+          />
+          {tucked.map(field)}
+        </div>
+      </details>
+      {problem && <Problem>{problem}</Problem>}
+      <div className="flex gap-2">
+        <Button type="submit" variant="primary" busy={pending}>
+          {submit}
+        </Button>
+        {cancel}
+      </div>
+    </form>
   )
 }

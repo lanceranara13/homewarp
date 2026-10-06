@@ -1,22 +1,27 @@
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Link, getRouteApi, notFound, useNavigate } from '@tanstack/react-router'
-import { Play, Square, Trash2 } from 'lucide-react'
+import { Play, SlidersHorizontal, Square, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 import {
+  changeServer,
   commandServer,
   followServer,
   powerServer,
   removeServer,
   type Power,
   type ServerEvent,
+  type ServerSettings,
   type ServerState,
   type Usage,
 } from '../api/client'
-import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill } from '../components/ui'
+import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill, buttonClass } from '../components/ui'
 import { EVERY, serverQuery, serversQuery } from '../servers'
+import { templateQuery } from '../templates'
+import { ServerForm } from './NewServerPage'
 
 const route = getRouteApi('/shell/servers/$serverId')
+const settingsRoute = getRouteApi('/shell/servers/$serverId/settings')
 
 /** How many lines of console a page holds on to. */
 const KEPT_LINES = 1000
@@ -39,7 +44,13 @@ export function ServerPage() {
   return (
     <>
       <PageBar title={server.name} crumb={<Link to="/">Servers</Link>}>
-        <RemoveServer id={server.id} name={server.name} />
+        <div className="flex shrink-0 gap-2">
+          <Link to="/servers/$serverId/settings" params={{ serverId }} title="Settings" className={buttonClass()}>
+            <SlidersHorizontal aria-hidden size={16} />
+            <span className="sr-only md:not-sr-only">Settings</span>
+          </Link>
+          <RemoveServer id={server.id} name={server.name} />
+        </div>
       </PageBar>
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
         <div className="flex flex-wrap items-start gap-3">
@@ -64,6 +75,63 @@ export function ServerPage() {
           {` · ${server.memory_mb} MB`}
           {server.cpu_percent > 0 && ` · ${server.cpu_percent} % of a core`}
         </p>
+      </main>
+    </>
+  )
+}
+
+/**
+ * Where a server is changed: its name, what it may use of the machine, and what
+ * its template asks. It has to be stopped, and is as it was changed from its
+ * next start.
+ */
+export function ServerSettingsPage() {
+  const { serverId } = settingsRoute.useParams()
+  const id = Number(serverId)
+  const { data: server } = useSuspenseQuery(serverQuery(id))
+  if (!server) throw notFound()
+  const { data: template } = useSuspenseQuery(templateQuery(server.template_id))
+  if (!template) throw notFound()
+
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const changing = useMutation({
+    mutationFn: (settings: ServerSettings) => changeServer(id, settings),
+    onSuccess: async (changed) => {
+      queryClient.setQueryData(serverQuery(id).queryKey, changed)
+      void queryClient.invalidateQueries({ queryKey: serversQuery.queryKey, exact: true })
+      await navigate({ to: '/servers/$serverId', params: { serverId } })
+    },
+  })
+
+  return (
+    <>
+      <PageBar
+        title="Settings"
+        crumb={
+          <Link to="/servers/$serverId" params={{ serverId }}>
+            {server.name}
+          </Link>
+        }
+      />
+      <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
+        <p className="max-w-140 text-small text-ink-subtle">
+          A server is changed while it is stopped, and runs as it was changed from its next start. Its files are not
+          touched.
+        </p>
+        <ServerForm
+          template={template}
+          start={server}
+          submit="Save"
+          pending={changing.isPending}
+          problem={changing.error?.message}
+          onSubmit={(settings) => changing.mutate(settings)}
+          cancel={
+            <Link to="/servers/$serverId" params={{ serverId }} className={buttonClass('ghost')}>
+              Cancel
+            </Link>
+          }
+        />
       </main>
     </>
   )

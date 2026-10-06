@@ -15,7 +15,7 @@ import { Button, Doorway, Problem } from './components/ui'
 import { ImportTemplatePage } from './pages/ImportTemplatePage'
 import { LoginPage } from './pages/LoginPage'
 import { ChooseTemplatePage, NewServerPage } from './pages/NewServerPage'
-import { ServerPage } from './pages/ServerPage'
+import { ServerPage, ServerSettingsPage } from './pages/ServerPage'
 import { ServersPage } from './pages/ServersPage'
 import { SetupPage } from './pages/SetupPage'
 import { TemplatePage } from './pages/TemplatePage'
@@ -146,6 +146,25 @@ const serverRoute = createRoute({
   component: ServerPage,
 })
 
+const serverSettingsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/servers/$serverId/settings',
+  staticData: {
+    reads: (queryClient, params) => {
+      const id = idFrom(params.serverId)
+      if (id !== undefined) void queryClient.prefetchQuery(serverQuery(id))
+    },
+  },
+  loader: async ({ context: { queryClient }, params }) => {
+    const id = idFrom(params.serverId)
+    const server = id === undefined ? null : await queryClient.ensureQueryData(serverQuery(id))
+    // Which template it is made from is known only once the server is: the one read that has to wait.
+    // Reached from the server's own page, the server is known already and this is the only request.
+    if (!server || !(await queryClient.ensureQueryData(templateQuery(server.template_id)))) throw notFound()
+  },
+  component: ServerSettingsPage,
+})
+
 const templatesRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/templates',
@@ -186,6 +205,7 @@ const routeTree = rootRoute.addChildren([
     chooseTemplateRoute,
     newServerRoute,
     serverRoute,
+    serverSettingsRoute,
     templatesRoute,
     importTemplateRoute,
     templateRoute,

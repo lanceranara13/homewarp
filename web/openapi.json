@@ -211,6 +211,83 @@
           }
         }
       },
+      "put": {
+        "summary": "Changes what a server is made of. It has to be stopped first, and what was\nchanged counts from its next start.",
+        "operationId": "change_server",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServerSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Server"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The server is running, or the name or the port belongs to another.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Something asked for will not do.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "summary": "Removes a server that is not running, with its files.",
         "operationId": "remove_server",
@@ -845,63 +922,23 @@
         }
       },
       "NewServer": {
-        "type": "object",
-        "required": [
-          "name",
-          "template_id",
-          "memory_mb",
-          "port"
-        ],
-        "properties": {
-          "cpu_percent": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "100 is one core. Nothing, or 0, is no limit.",
-            "minimum": 0
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ServerSettings"
           },
-          "eula": {
-            "type": "boolean",
-            "description": "Whoever asks agrees to the EULA of the game, for a game that has one."
-          },
-          "image": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "One of the template's images. Its first, if none is named."
-          },
-          "memory_mb": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "name": {
-            "type": "string"
-          },
-          "port": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Published on the home machine, for TCP and UDP.",
-            "minimum": 0
-          },
-          "template_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "variables": {
+          {
             "type": "object",
-            "description": "Values for the template's variables, by the name the server sees. One\nthat is not given takes the template's default.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
+            "required": [
+              "template_id"
+            ],
+            "properties": {
+              "template_id": {
+                "type": "integer",
+                "format": "int64"
+              }
             }
           }
-        }
+        ]
       },
       "Power": {
         "type": "string",
@@ -951,7 +988,9 @@
           "cpu_percent",
           "port",
           "state",
-          "console"
+          "console",
+          "variables",
+          "eula"
         ],
         "properties": {
           "console": {
@@ -970,6 +1009,10 @@
             "type": "integer",
             "format": "int64",
             "description": "When it was made, in Unix seconds."
+          },
+          "eula": {
+            "type": "boolean",
+            "description": "Whether the game's EULA was agreed to for it."
           },
           "id": {
             "type": "integer",
@@ -1000,6 +1043,71 @@
           "template_id": {
             "type": "integer",
             "format": "int64"
+          },
+          "variables": {
+            "type": "object",
+            "description": "The value of each of the template's variables, by the name the server sees.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ServerSettings": {
+        "type": "object",
+        "description": "What a server is made of that can still be changed once it is made.",
+        "required": [
+          "name",
+          "memory_mb",
+          "port"
+        ],
+        "properties": {
+          "cpu_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "100 is one core. Nothing, or 0, is no limit.",
+            "minimum": 0
+          },
+          "eula": {
+            "type": "boolean",
+            "description": "Whoever asks agrees to the EULA of the game, for a game that has one."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One of the template's images. Its first, if none is named."
+          },
+          "memory_mb": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Published on the home machine, for TCP and UDP.",
+            "minimum": 0
+          },
+          "variables": {
+            "type": "object",
+            "description": "Values for the template's variables, by the name the server sees. One\nthat is not given takes the template's default.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },

@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     pin::pin,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, ensure};
@@ -20,7 +21,7 @@ use futures_util::StreamExt;
 use homewarp_runtime::{
     Engine, InstallScript, Network, Port, Protocol, Server as Spec, ServerDir, strip_ansi,
 };
-use homewarp_template::{Parser, Stop, Template, properties, substitute};
+use homewarp_template::{Replacement, Stop, Template, config, substitute};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
@@ -31,12 +32,20 @@ use crate::servers;
 /// The bridge servers sit on. Its subnet is outside what Docker hands out by itself.
 const NETWORK: &str = "homewarp-br";
 const SUBNET: &str = "10.213.80.0/24";
+/// The home machine's own address on that bridge.
+const GATEWAY: &str = "10.213.80.1";
 /// The user servers run as: deliberately not one that exists on the host.
 const USER: u32 = 4857;
 /// How much of a console is kept for a page that opens later.
 const KEPT_LINES: usize = 500;
 /// How far a page may fall behind before it is started again from where things stand.
 const BACKLOG: usize = 1024;
+/// How many times a crashed server is started again before it is left alone.
+const RESTARTS: u32 = 3;
+/// How long the first of those waits. Each one after waits three times as long.
+const FIRST_WAIT: Duration = Duration::from_secs(5);
+/// A server that stayed up this long was not in a round of crashes.
+const STEADY: Duration = Duration::from_secs(60);
 
 /// What a server is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -54,6 +63,11 @@ pub(crate) enum State {
 }
 
 impl State {
+    /// Whether the server has no process, and none on its way.
+    pub(crate) fn is_idle(self) -> bool {
+        matches!(self, Self::Offline | Self::Crashed | Self::InstallFailed)
+    }
+
     /// For the sentence "This server is ...".
     pub(crate) fn in_words(self) -> &'static str {
         match self {
@@ -118,6 +132,7 @@ pub(crate) enum Event {
 }
 
 /// A server as the database has it, with its template read.
+#[derive(Clone)]
 pub(crate) struct Definition {
     pub(crate) id: i64,
     pub(crate) uuid: String,
@@ -142,11 +157,17 @@ impl Definition {
             "SERVER_PORT" | "server.build.default.port" | "server.allocations.default.port" => {
                 Some(self.port.to_string())
             }
+            // Where a server finds the home machine, and through it the ports
+            // that other servers publish there.
+            "config.docker.interface" | "config.docker.network.interface" => {
+                Some(GATEWAY.to_owned())
+            }
             other => {
                 // Pterodactyl's way of naming a variable, Pelican's, and the plain one.
                 let variable = other
                     .strip_prefix("server.build.env.")
                     .or_else(|| other.strip_prefix("server.environment."))
+                    .or_else(|| other.strip_prefix("env."))
                     .unwrap_or(other);
                 self.variables
                     .iter()
@@ -256,6 +277,17 @@ enum Asked {
 struct Live {
     watch: Watch,
     asked: mpsc::Sender<Asked>,
+    /// What the server is made of. Its task reads this afresh each time it
+    /// starts the server, so a change made while it is down counts from then.
+    made_of: Arc<Mutex<Definition>>,
+}
+
+fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
+    shared.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn current(made_of: &Mutex<Definition>) -> Definition {
+    lock(made_of).clone()
 }
 
 /// Every server's task, and the Docker daemon they share.
@@ -344,6 +376,22 @@ impl Runtime {
             .map_err(|_| Some(now))
     }
 
+    /// Changes what a server that is not running is made of. The errors are
+    /// those of [`Runtime::ask`].
+    pub(crate) fn change(&self, id: i64, mut new: Definition) -> Result<(), Option<State>> {
+        let servers = self.servers();
+        let live = servers.get(&id).ok_or(None)?;
+        let now = live.watch.state();
+        if !now.is_idle() {
+            return Err(Some(now));
+        }
+        let mut made_of = lock(&live.made_of);
+        // Whether it is installed is the task's to say, not the form's.
+        new.installed = made_of.installed;
+        *made_of = new;
+        Ok(())
+    }
+
     /// Where a server stands, and everything that happens to it from here on.
     pub(crate) fn follow(&self, id: i64) -> Option<(Event, broadcast::Receiver<Event>)> {
         Some(self.servers().get(&id)?.watch.follow())
@@ -354,12 +402,9 @@ impl Runtime {
     pub(crate) async fn remove(&self, id: i64, uuid: &str) -> anyhow::Result<bool> {
         {
             let mut servers = self.servers();
-            let busy = servers.get(&id).is_some_and(|live| {
-                !matches!(
-                    live.watch.state(),
-                    State::Offline | State::Crashed | State::InstallFailed
-                )
-            });
+            let busy = servers
+                .get(&id)
+                .is_some_and(|live| !live.watch.state().is_idle());
             if busy {
                 return Ok(false);
             }
@@ -389,34 +434,38 @@ impl Runtime {
             (false, true) => State::Offline,
         });
         let (asked, inbox) = mpsc::channel(16);
+        let id = server.id;
+        let made_of = Arc::new(Mutex::new(server));
         self.servers().insert(
-            server.id,
+            id,
             Live {
                 watch: watch.clone(),
                 asked,
+                made_of: Arc::clone(&made_of),
             },
         );
-        tokio::spawn(Arc::clone(self).run(server, watch, inbox, fresh));
+        tokio::spawn(Arc::clone(self).run(made_of, watch, inbox, fresh));
     }
 
     /// A server's task. It ends when the server is removed.
     async fn run(
         self: Arc<Self>,
-        mut server: Definition,
+        made_of: Arc<Mutex<Definition>>,
         watch: Watch,
         mut inbox: mpsc::Receiver<Asked>,
         fresh: bool,
     ) {
+        let server = current(&made_of);
         let spec = self.spec(&server);
         if fresh {
-            if self.install(&mut server, &spec, &watch).await {
-                self.serve(&server, &spec, &watch, &mut inbox, false).await;
+            if self.install(&made_of, &watch).await {
+                self.keep_serving(&made_of, &watch, &mut inbox, false).await;
             }
         } else if !server.installed {
             watch.say("Homewarp stopped while this server was being installed.");
         } else {
             match self.engine.is_running(&spec).await {
-                Ok(true) => self.serve(&server, &spec, &watch, &mut inbox, true).await,
+                Ok(true) => self.keep_serving(&made_of, &watch, &mut inbox, true).await,
                 Ok(false) => {}
                 Err(error) => {
                     watch.say(format!("Homewarp could not ask Docker about it: {error}"));
@@ -425,13 +474,13 @@ impl Runtime {
         }
         while let Some(asked) = inbox.recv().await {
             match asked {
-                Asked::Power(Power::Install) if !server.installed => {
-                    if self.install(&mut server, &spec, &watch).await {
-                        self.serve(&server, &spec, &watch, &mut inbox, false).await;
+                Asked::Power(Power::Install) if !current(&made_of).installed => {
+                    if self.install(&made_of, &watch).await {
+                        self.keep_serving(&made_of, &watch, &mut inbox, false).await;
                     }
                 }
-                Asked::Power(Power::Start) if server.installed => {
-                    self.serve(&server, &spec, &watch, &mut inbox, false).await;
+                Asked::Power(Power::Start) if current(&made_of).installed => {
+                    self.keep_serving(&made_of, &watch, &mut inbox, false).await;
                 }
                 // Asked of a server that had ended by the time this was read.
                 _ => {}
@@ -440,7 +489,9 @@ impl Runtime {
     }
 
     /// Runs the template's install script. True if the server is installed now.
-    async fn install(&self, server: &mut Definition, spec: &Spec, watch: &Watch) -> bool {
+    async fn install(&self, made_of: &Mutex<Definition>, watch: &Watch) -> bool {
+        let server = current(made_of);
+        let spec = &self.spec(&server);
         watch.set(State::Installing);
         let installed = async {
             ServerDir::open(&spec.dir, USER, USER)?;
@@ -477,7 +528,7 @@ impl Runtime {
         .await;
         match installed {
             Ok(()) => {
-                server.installed = true;
+                lock(made_of).installed = true;
                 watch.say("Installed.");
                 watch.set(State::Offline);
                 true
@@ -491,7 +542,7 @@ impl Runtime {
     }
 
     /// Starts the server, or takes over one found running, and stays with it
-    /// until it has ended.
+    /// until it has ended. True if it ended in a crash.
     async fn serve(
         &self,
         server: &Definition,
@@ -499,7 +550,7 @@ impl Runtime {
         watch: &Watch,
         inbox: &mut mpsc::Receiver<Asked>,
         found_running: bool,
-    ) {
+    ) -> bool {
         let ended = async {
             let mut console = if found_running {
                 watch.set(State::Running);
@@ -508,7 +559,7 @@ impl Runtime {
             } else {
                 watch.set(State::Starting);
                 self.fetch(&spec.image, watch).await?;
-                self.prepare(server, spec)?;
+                self.prepare(server, spec, watch)?;
                 self.engine.create(spec).await?;
                 let console = self.engine.attach(spec).await?;
                 self.engine.start(spec).await?;
@@ -565,18 +616,78 @@ impl Runtime {
         }
         .await;
         match ended {
-            Ok((code, told_to_stop)) if told_to_stop || code == 0 => watch.set(State::Offline),
+            Ok((code, told_to_stop)) if told_to_stop || code == 0 => {
+                watch.set(State::Offline);
+                false
+            }
             Ok((code, _)) => {
                 watch.say(format!(
                     "The server stopped by itself, with exit code {code}."
                 ));
                 watch.set(State::Crashed);
+                true
             }
+            // Not a crash of the server's: the same would happen again at once.
             Err(error) => {
                 watch.say(format!("Homewarp could not run this server: {error:#}"));
                 // Whatever was made of it must not be left running unwatched.
                 let _ = self.engine.remove(spec).await;
                 watch.set(State::Crashed);
+                false
+            }
+        }
+    }
+
+    /// Runs the server and, when it crashes, runs it again: a little later
+    /// each time, and not for ever. A server that had stayed up for a while
+    /// before it crashed starts the count afresh.
+    async fn keep_serving(
+        &self,
+        made_of: &Mutex<Definition>,
+        watch: &Watch,
+        inbox: &mut mpsc::Receiver<Asked>,
+        mut found_running: bool,
+    ) {
+        let mut crashes = 0;
+        loop {
+            // Read afresh: it may have been changed while the server was down.
+            let server = current(made_of);
+            let spec = self.spec(&server);
+            let began = Instant::now();
+            if !self
+                .serve(&server, &spec, watch, inbox, found_running)
+                .await
+            {
+                return;
+            }
+            found_running = false;
+            if began.elapsed() >= STEADY {
+                crashes = 0;
+            }
+            crashes += 1;
+            if crashes > RESTARTS {
+                watch.say(format!(
+                    "That is {crashes} crashes one after another. Homewarp will not start it again by itself."
+                ));
+                return;
+            }
+            let wait = FIRST_WAIT * 3u32.pow(crashes - 1);
+            watch.say(format!(
+                "Homewarp will start it again in {} seconds.",
+                wait.as_secs()
+            ));
+            let mut waited = pin!(tokio::time::sleep(wait));
+            loop {
+                tokio::select! {
+                    () = &mut waited => break,
+                    asked = inbox.recv() => match asked {
+                        // Started by hand in the meantime: the same, sooner.
+                        Some(Asked::Power(Power::Start)) => break,
+                        Some(_) => {}
+                        // Removed while it waited.
+                        None => return,
+                    },
+                }
             }
         }
     }
@@ -590,29 +701,31 @@ impl Runtime {
     }
 
     /// Writes what the template wants in the server's files before a start.
-    fn prepare(&self, server: &Definition, spec: &Spec) -> anyhow::Result<()> {
+    fn prepare(&self, server: &Definition, spec: &Spec, watch: &Watch) -> anyhow::Result<()> {
         let files = ServerDir::open(&spec.dir, USER, USER)?;
         for file in &server.template.config_files {
-            ensure!(
-                file.parser == Parser::Properties,
-                "{} is set up by a parser Homewarp does not have yet",
-                file.path
-            );
-            let pairs = file
-                .find
-                .iter()
-                .map(|(key, value)| {
-                    let value = substitute(value, |name| server.lookup(name));
-                    ensure!(
-                        !value.contains("{{"),
-                        "{}: nothing to put in place of {value}",
-                        file.path
-                    );
-                    Ok((key.clone(), value))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut replacements = Vec::with_capacity(file.find.len());
+            for replacement in &file.find {
+                let value = substitute(&replacement.value, |name| server.lookup(name));
+                if value.contains("{{") {
+                    watch.say(format!(
+                        "{}: {} was left as it is, for there is nothing to put in place of {value}.",
+                        file.path, replacement.key
+                    ));
+                    continue;
+                }
+                replacements.push(Replacement {
+                    value,
+                    ..replacement.clone()
+                });
+            }
             let before = files.read_to_string(&file.path)?.unwrap_or_default();
-            files.write(&file.path, &properties::patch(&before, &pairs))?;
+            // A file that cannot be set up is said and passed over, as Wings
+            // passes over it: the server may still do without.
+            match config::patch(file.parser, &before, &replacements) {
+                Ok(after) => files.write(&file.path, &after)?,
+                Err(error) => watch.say(format!("{} was left as it is: {error}.", file.path)),
+            }
         }
         if server.eula {
             files.write("eula.txt", "eula=true\n")?;

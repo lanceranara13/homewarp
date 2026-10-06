@@ -122,6 +122,14 @@ impl Panel {
             .await
     }
 
+    async fn put(&self, path: &str, body: Value, cookie: Option<&str>) -> Answer {
+        let request = Request::put(path)
+            .header(CONTENT_TYPE, "application/json")
+            .header(COOKIE, cookie.unwrap_or_default());
+        self.send(request.body(Body::from(body.to_string())).unwrap())
+            .await
+    }
+
     async fn delete(&self, path: &str, cookie: Option<&str>) -> Answer {
         let request = Request::delete(path).header(COOKIE, cookie.unwrap_or_default());
         self.send(request.body(Body::empty()).unwrap()).await
@@ -530,9 +538,15 @@ async fn servers_are_for_someone_signed_in() {
         panel.post("/api/v1/servers", json!({}), None).await,
         panel.post("/api/v1/servers/1/power", power, None).await,
         panel.delete("/api/v1/servers/1", None).await,
+        panel.put("/api/v1/servers/1", json!({}), None).await,
     ] {
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     }
+    let settings = json!({ "name": "Survival", "memory_mb": 1024, "port": 25565 });
+    let changed = panel
+        .put("/api/v1/servers/1", settings, Some(&cookie))
+        .await;
+    assert_eq!(changed.status, StatusCode::NOT_FOUND);
     for answer in [
         panel.get("/api/v1/servers/1", Some(&cookie)).await,
         panel.delete("/api/v1/servers/1", Some(&cookie)).await,

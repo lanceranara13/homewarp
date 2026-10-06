@@ -39,7 +39,21 @@ impl ServerDir {
         }
     }
 
+    /// Writes a file, making the directories it sits in if the server has not
+    /// made them yet. Those are given to the server's user as the file is.
     pub fn write(&self, path: &str, contents: &str) -> io::Result<()> {
+        let parent = Path::new(path).parent().unwrap_or(Path::new(""));
+        if !parent.as_os_str().is_empty() {
+            self.dir.create_dir_all(parent)?;
+            for made in parent
+                .ancestors()
+                .filter(|made| !made.as_os_str().is_empty())
+            {
+                // Opened as a file: a directory opened as one is only a path
+                // to the kernel, and it will not change the owner of a path.
+                fchown(self.dir.open(made)?, Some(self.uid), Some(self.gid))?;
+            }
+        }
         let mut file = self.dir.create(path)?;
         file.write_all(contents.as_bytes())?;
         fchown(&file, Some(self.uid), Some(self.gid))
@@ -69,6 +83,19 @@ mod tests {
             dir.read_to_string("server.properties").unwrap().as_deref(),
             Some("motd=hi\n")
         );
+
+        // A config file may belong in a directory the server has yet to make.
+        dir.write("config/deep/settings.json", "{}").unwrap();
+        assert_eq!(
+            dir.read_to_string("config/deep/settings.json")
+                .unwrap()
+                .as_deref(),
+            Some("{}")
+        );
+        // But not in one that is a link to somewhere else.
+        symlink(scratch.path(), root.join("elsewhere")).unwrap();
+        assert!(dir.write("elsewhere/planted.txt", "x").is_err());
+        assert!(!scratch.path().join("planted.txt").exists());
 
         symlink(&outside, root.join("absolute")).unwrap();
         symlink("../outside.txt", root.join("relative")).unwrap();

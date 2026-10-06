@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::{ConfigFile, Image, Install, Parser, Stop, Template, Variable};
+use crate::{ConfigFile, Image, Install, Parser, Replacement, Stop, Template, Variable};
 
 const VERSIONS: [&str; 5] = ["PTDL_v1", "PTDL_v2", "PLCN_v1", "PLCN_v2", "PLCN_v3"];
 
@@ -135,16 +135,29 @@ fn config_files(root: &Value) -> Result<Vec<ConfigFile>, ImportError> {
                 Some("file") => Parser::File,
                 _ => return Err(ImportError::Shape(format!("{what}.parser"))),
             };
-            let find = object(entry.get("find"), &format!("{what}.find"))?
-                .iter()
-                .map(|(key, value)| match scalar(value) {
-                    Some(value) => Ok((key.clone(), value)),
-                    // A table of pattern → replacement, as the BungeeCord egg uses.
-                    None => Err(ImportError::Unsupported(format!(
-                        "{what}: `{key}` replaces by pattern, which is not supported yet"
-                    ))),
-                })
-                .collect::<Result<_, ImportError>>()?;
+            let mut find = Vec::new();
+            for (key, value) in object(entry.get("find"), &format!("{what}.find"))? {
+                let odd = || ImportError::Shape(format!("{what}.find.{key}"));
+                match (scalar(&value), &value) {
+                    (Some(value), _) => find.push(Replacement {
+                        key,
+                        value,
+                        only_if: None,
+                    }),
+                    // A table of what has to be there and what to put in its
+                    // place, as the BungeeCord egg has for its servers.
+                    (None, Value::Object(tests)) => {
+                        for (only_if, value) in tests {
+                            find.push(Replacement {
+                                key: key.clone(),
+                                value: scalar(value).ok_or_else(odd)?,
+                                only_if: Some(only_if.clone()),
+                            });
+                        }
+                    }
+                    (None, _) => return Err(odd()),
+                }
+            }
             Ok(ConfigFile {
                 path: path.clone(),
                 parser,
@@ -301,6 +314,14 @@ fn object(value: Option<&Value>, what: &str) -> Result<Map<String, Value>, Impor
 mod tests {
     use super::*;
 
+    fn set(key: &str, value: &str) -> Replacement {
+        Replacement {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            only_if: None,
+        }
+    }
+
     /// Shaped like a Pelican panel export, quirks included: `{  }` where a list
     /// is empty, a script with CRLF line endings, variables out of display order.
     const PELICAN: &str = r##"
@@ -416,12 +437,9 @@ variables:
         assert_eq!(
             file.find,
             [
-                ("server-ip".to_owned(), String::new()),
-                (
-                    "server-port".to_owned(),
-                    "{{server.allocations.default.port}}".to_owned()
-                ),
-                ("max-players".to_owned(), "20".to_owned()),
+                set("server-ip", ""),
+                set("server-port", "{{server.allocations.default.port}}"),
+                set("max-players", "20"),
             ]
         );
 
@@ -458,16 +476,28 @@ variables:
         assert_eq!(template.config_files[0].parser, Parser::File);
         assert_eq!(
             template.config_files[0].find,
-            [(
-                "port".to_owned(),
-                "port {{server.build.default.port}}".to_owned()
-            )]
+            [set("port", "port {{server.build.default.port}}")]
         );
 
         let players = &template.variables[0];
         assert_eq!(players.default, "20");
         assert_eq!(players.rules, ["required", "integer", "between:1,100"]);
         assert!(players.user_viewable && !players.user_editable);
+    }
+
+    /// A setting made only where a pattern matches what is there, which is how
+    /// the BungeeCord egg points its servers at the host.
+    #[test]
+    fn keeps_what_a_replacement_asks_to_be_there_first() {
+        let by_pattern = PELICAN.replace("server-ip: ''", "server-ip: { 'regex:^127': '0.0.0.0' }");
+        let template = import(&by_pattern).unwrap();
+        assert_eq!(
+            template.config_files[0].find[0],
+            Replacement {
+                only_if: Some("regex:^127".to_owned()),
+                ..set("server-ip", "0.0.0.0")
+            }
+        );
     }
 
     #[test]
@@ -513,10 +543,10 @@ variables:
         assert!(said.starts_with("not valid YAML: line 2 "), "{said}");
         assert!(!said.contains('\n'), "{said}");
 
-        let by_pattern = PELICAN.replace("server-ip: ''", "server-ip: { 'regex:^127': '0.0.0.0' }");
+        let unknown_rule = PTERODACTYL.replace("required|integer", "required|prohibited");
         assert!(matches!(
-            import(&by_pattern),
-            Err(ImportError::Unsupported(_))
+            import(&unknown_rule),
+            Err(ImportError::Unsupported(said)) if said.contains("prohibited")
         ));
     }
 }

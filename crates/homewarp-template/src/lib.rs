@@ -7,6 +7,7 @@
 //! Nothing here touches the disk or the network. It turns untrusted text into
 //! checked values, which keeps it cheap to test and to fuzz.
 
+pub mod config;
 mod egg;
 pub mod properties;
 pub mod rules;
@@ -55,8 +56,22 @@ pub enum Stop {
 pub struct ConfigFile {
     pub path: String,
     pub parser: Parser,
-    /// Key and new value, in the egg's order. Values may hold `{{...}}` placeholders.
-    pub find: Vec<(String, String)>,
+    /// In the egg's order.
+    pub find: Vec<Replacement>,
+}
+
+/// One setting to make in a config file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replacement {
+    /// Which setting: a key, a dotted path or the start of a line, as the
+    /// file's parser reads it.
+    pub key: String,
+    /// What to set it to. It may hold `{{...}}` placeholders.
+    pub value: String,
+    /// Set it only where what is there now is this. After `regex:` it is a
+    /// pattern that what is there has to match, and `value` rewrites the match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_if: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

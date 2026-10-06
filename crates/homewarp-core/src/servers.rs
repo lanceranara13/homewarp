@@ -47,7 +47,7 @@ const NO_DOCKER: Problem = Problem::Unavailable(
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_servers, create_server))
-        .routes(routes!(get_server, remove_server))
+        .routes(routes!(get_server, change_server, remove_server))
         .routes(routes!(power_server))
         .routes(routes!(command_server))
         // A WebSocket, which the API's description has no way to describe.
@@ -86,12 +86,16 @@ struct Server {
     state: runtime::State,
     /// The last lines of its console: the install first, then what the server prints.
     console: Vec<String>,
+    /// The value of each of the template's variables, by the name the server sees.
+    variables: BTreeMap<String, String>,
+    /// Whether the game's EULA was agreed to for it.
+    eula: bool,
 }
 
+/// What a server is made of that can still be changed once it is made.
 #[derive(Deserialize, ToSchema)]
-struct NewServer {
+struct ServerSettings {
     name: String,
-    template_id: i64,
     /// One of the template's images. Its first, if none is named.
     image: Option<String>,
     memory_mb: u32,
@@ -106,6 +110,128 @@ struct NewServer {
     /// Whoever asks agrees to the EULA of the game, for a game that has one.
     #[serde(default)]
     eula: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct NewServer {
+    template_id: i64,
+    #[serde(flatten)]
+    settings: ServerSettings,
+}
+
+/// Settings that have been found sound for a template.
+struct Checked {
+    name: String,
+    image: String,
+    memory_mb: u32,
+    cpu_percent: u32,
+    port: u16,
+    variables: Vec<(String, String)>,
+    eula: bool,
+}
+
+impl Checked {
+    fn definition(
+        self,
+        id: i64,
+        uuid: String,
+        template: homewarp_template::Template,
+        installed: bool,
+    ) -> Definition {
+        Definition {
+            id,
+            uuid,
+            template,
+            image: self.image,
+            memory_mb: self.memory_mb,
+            cpu_percent: self.cpu_percent,
+            port: self.port,
+            variables: self.variables,
+            eula: self.eula,
+            installed,
+        }
+    }
+}
+
+/// Holds what is asked for against the limits and against the template.
+fn check(
+    template: &homewarp_template::Template,
+    settings: ServerSettings,
+) -> Result<Checked, Problem> {
+    let invalid = |sentence: String| Err(Problem::Invalid(sentence.into()));
+    let name = settings.name.trim().to_owned();
+    if !(1..=LONGEST_NAME).contains(&name.chars().count()) {
+        return invalid("A server's name is 1 to 60 characters.".to_owned());
+    }
+    if !(LEAST_MEMORY..=MOST_MEMORY).contains(&settings.memory_mb) {
+        return invalid("A server needs 128 MB of memory or more.".to_owned());
+    }
+    if settings.port < LOWEST_PORT {
+        return invalid("A port is a number from 1024 to 65535.".to_owned());
+    }
+    let cpu_percent = settings.cpu_percent.unwrap_or(0);
+    if cpu_percent > MOST_CPU {
+        return invalid("A processor limit is 25600 % at the most.".to_owned());
+    }
+    let image = match settings.image {
+        Some(asked) if template.images.iter().any(|image| image.image == asked) => asked,
+        Some(_) => return invalid("This template has no such image.".to_owned()),
+        None => template
+            .images
+            .first()
+            .map(|image| image.image.clone())
+            .unwrap_or_default(),
+    };
+    // Said now, and not by a server that installs for minutes and then will not start.
+    if let Some(file) = template
+        .config_files
+        .iter()
+        .find(|file| file.parser == Parser::Xml)
+    {
+        return invalid(format!(
+            "This template sets up {} in a way Homewarp cannot yet, so a server made from it would not work.",
+            file.path
+        ));
+    }
+
+    let mut given = settings.variables;
+    let mut variables = Vec::with_capacity(template.variables.len());
+    for variable in &template.variables {
+        let value = given
+            .remove(&variable.env)
+            .unwrap_or_else(|| variable.default.clone());
+        if let Err(reason) = rules::check(&variable.rules, &value) {
+            return invalid(format!("{} {reason}.", variable.name));
+        }
+        variables.push((variable.env.clone(), value));
+    }
+    if let Some(unknown) = given.keys().next() {
+        return invalid(format!("This template has no variable called {unknown}."));
+    }
+    Ok(Checked {
+        name,
+        image,
+        memory_mb: settings.memory_mb,
+        cpu_percent,
+        port: settings.port,
+        variables,
+        eula: settings.eula,
+    })
+}
+
+/// What the database said to a name or a port that another server has, in words.
+fn taken(error: sqlx::Error, name: &str, port: u16) -> Problem {
+    match error {
+        sqlx::Error::Database(error) if error.is_unique_violation() => {
+            let said = if error.message().contains("servers.port") {
+                format!("Port {port} belongs to another server.")
+            } else {
+                format!("There is already a server called {name}.")
+            };
+            Problem::Conflict(said.into())
+        }
+        other => other.into(),
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -224,127 +350,129 @@ async fn create_server(
     _: SignedIn,
     Json(new): Json<NewServer>,
 ) -> Result<(StatusCode, Json<Server>), Problem> {
-    let invalid = |sentence: String| Err(Problem::Invalid(sentence.into()));
-    let name = new.name.trim().to_owned();
-    if !(1..=LONGEST_NAME).contains(&name.chars().count()) {
-        return invalid("A server's name is 1 to 60 characters.".to_owned());
-    }
-    if !(LEAST_MEMORY..=MOST_MEMORY).contains(&new.memory_mb) {
-        return invalid("A server needs 128 MB of memory or more.".to_owned());
-    }
-    if new.port < LOWEST_PORT {
-        return invalid("A port is a number from 1024 to 65535.".to_owned());
-    }
-    let cpu_percent = new.cpu_percent.unwrap_or(0);
-    if cpu_percent > MOST_CPU {
-        return invalid("A processor limit is 25600 % at the most.".to_owned());
-    }
-
     let found: Option<(String, String)> =
         sqlx::query_as("SELECT name, definition FROM templates WHERE id = ?")
             .bind(new.template_id)
             .fetch_optional(&state.db)
             .await?;
     let Some((template_name, definition)) = found else {
-        return invalid("There is no such template.".to_owned());
+        return Err(Problem::Invalid("There is no such template.".into()));
     };
     let template = templates::read(&definition)?;
-
-    let image = match new.image {
-        Some(asked) if template.images.iter().any(|image| image.image == asked) => asked,
-        Some(_) => return invalid("This template has no such image.".to_owned()),
-        None => template
-            .images
-            .first()
-            .map(|image| image.image.clone())
-            .unwrap_or_default(),
-    };
-    // Said now, and not by a server that installs for minutes and then will not start.
-    if let Some(file) = template
-        .config_files
-        .iter()
-        .find(|file| file.parser != Parser::Properties)
-    {
-        return invalid(format!(
-            "This template sets up {} in a way Homewarp cannot yet, so a server made from it would not work.",
-            file.path
-        ));
-    }
-
-    let mut given = new.variables;
-    let mut variables = Vec::with_capacity(template.variables.len());
-    for variable in &template.variables {
-        let value = given
-            .remove(&variable.env)
-            .unwrap_or_else(|| variable.default.clone());
-        if let Err(reason) = rules::check(&variable.rules, &value) {
-            return invalid(format!("{} {reason}.", variable.name));
-        }
-        variables.push((variable.env.clone(), value));
-    }
-    if let Some(unknown) = given.keys().next() {
-        return invalid(format!("This template has no variable called {unknown}."));
-    }
+    let checked = check(&template, new.settings)?;
 
     let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
     let uuid = auth::new_uuid();
     let created_at = auth::now();
-    let inserted = sqlx::query(
+    let id = sqlx::query(
         "INSERT INTO servers
              (uuid, name, template_id, image, memory_mb, cpu_percent, port, variables, eula, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&uuid)
-    .bind(&name)
+    .bind(&checked.name)
     .bind(new.template_id)
-    .bind(&image)
-    .bind(new.memory_mb)
-    .bind(cpu_percent)
-    .bind(new.port)
-    .bind(serde_json::to_string(&variables).map_err(anyhow::Error::new)?)
-    .bind(new.eula)
+    .bind(&checked.image)
+    .bind(checked.memory_mb)
+    .bind(checked.cpu_percent)
+    .bind(checked.port)
+    .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
+    .bind(checked.eula)
     .bind(created_at)
     .execute(&state.db)
-    .await;
-    let id = match inserted {
-        Ok(inserted) => inserted.last_insert_rowid(),
-        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
-            let taken = if error.message().contains("servers.port") {
-                format!("Port {} belongs to another server.", new.port)
-            } else {
-                format!("There is already a server called {name}.")
-            };
-            return Err(Problem::Conflict(taken.into()));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    .await
+    .map_err(|error| taken(error, &checked.name, checked.port))?
+    .last_insert_rowid();
 
-    runtime.add(Definition {
-        id,
-        uuid,
-        template,
-        image: image.clone(),
-        memory_mb: new.memory_mb,
-        cpu_percent,
-        port: new.port,
-        variables,
-        eula: new.eula,
-        installed: false,
-    });
     let server = Server {
         id,
         created_at,
-        name,
+        name: checked.name.clone(),
         template_id: new.template_id,
         template: template_name,
-        image,
-        memory_mb: new.memory_mb.into(),
-        cpu_percent: cpu_percent.into(),
-        port: new.port.into(),
+        image: checked.image.clone(),
+        memory_mb: checked.memory_mb.into(),
+        cpu_percent: checked.cpu_percent.into(),
+        port: checked.port.into(),
         state: runtime::State::Installing,
         console: Vec::new(),
+        variables: checked.variables.iter().cloned().collect(),
+        eula: checked.eula,
     };
+    runtime.add(checked.definition(id, uuid, template, false));
     Ok((StatusCode::CREATED, Json(server)))
+}
+
+/// Changes what a server is made of. It has to be stopped first, and what was
+/// changed counts from its next start.
+#[utoipa::path(
+    put,
+    path = "/api/v1/servers/{id}",
+    params(("id" = i64, Path, description = "The server's id.")),
+    request_body = ServerSettings,
+    responses(
+        (status = OK, body = Server),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = NOT_FOUND, body = ProblemBody, description = "There is no such server."),
+        (status = CONFLICT, body = ProblemBody, description = "The server is running, or the name or the port belongs to another."),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "Something asked for will not do."),
+    )
+)]
+async fn change_server(
+    State(state): State<AppState>,
+    _: SignedIn,
+    Path(id): Path<i64>,
+    Json(settings): Json<ServerSettings>,
+) -> Result<Json<Server>, Problem> {
+    const RUNNING: Problem = Problem::Conflict(std::borrow::Cow::Borrowed(
+        "Stop this server before changing it.",
+    ));
+    let found: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT servers.uuid, templates.definition, servers.installed
+         FROM servers JOIN templates ON templates.id = servers.template_id
+         WHERE servers.id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (uuid, definition, installed) = found.ok_or(MISSING)?;
+    let template = templates::read(&definition)?;
+    let checked = check(&template, settings)?;
+    // A running server was started as it was. Changed under itself, it would
+    // no longer be what is written down for it.
+    if state
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.state(id))
+        .is_some_and(|now| !now.is_idle())
+    {
+        return Err(RUNNING);
+    }
+
+    sqlx::query(
+        "UPDATE servers
+         SET name = ?, image = ?, memory_mb = ?, cpu_percent = ?, port = ?, variables = ?, eula = ?
+         WHERE id = ?",
+    )
+    .bind(&checked.name)
+    .bind(&checked.image)
+    .bind(checked.memory_mb)
+    .bind(checked.cpu_percent)
+    .bind(checked.port)
+    .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
+    .bind(checked.eula)
+    .bind(id)
+    .execute(&state.db)
+    .await
+    .map_err(|error| taken(error, &checked.name, checked.port))?;
+    if let Some(runtime) = &state.runtime
+        && runtime
+            .change(id, checked.definition(id, uuid, template, installed != 0))
+            .is_err()
+    {
+        return Err(RUNNING);
+    }
+    get_server(State(state), SignedIn, Path(id)).await
 }
 
 /// One server, with its state and the end of its console. A page that stays
@@ -364,18 +492,32 @@ async fn get_server(
     _: SignedIn,
     Path(id): Path<i64>,
 ) -> Result<Json<Server>, Problem> {
-    type Row = (String, i64, String, String, i64, i64, i64, i64);
+    type Row = (String, i64, String, String, i64, i64, i64, i64, String, i64);
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.name, servers.template_id, templates.name, servers.image,
-                servers.memory_mb, servers.cpu_percent, servers.port, servers.created_at
+                servers.memory_mb, servers.cpu_percent, servers.port, servers.created_at,
+                servers.variables, servers.eula
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
-    let (name, template_id, template, image, memory_mb, cpu_percent, port, created_at) =
-        found.ok_or(MISSING)?;
+    let (
+        name,
+        template_id,
+        template,
+        image,
+        memory_mb,
+        cpu_percent,
+        port,
+        created_at,
+        variables,
+        eula,
+    ) = found.ok_or(MISSING)?;
+    let variables: Vec<(String, String)> = serde_json::from_str(&variables)
+        .context("reading a server's variables")
+        .map_err(Problem::Internal)?;
     let (now, console) = state
         .runtime
         .as_ref()
@@ -393,6 +535,8 @@ async fn get_server(
         port,
         state: now,
         console,
+        variables: variables.into_iter().collect(),
+        eula: eula != 0,
     }))
 }
 

@@ -11,6 +11,7 @@ export type ServerSummary = components['schemas']['ServerSummary']
 export type Server = components['schemas']['Server']
 export type ServerState = components['schemas']['State']
 export type NewServer = components['schemas']['NewServer']
+export type ServerSettings = components['schemas']['ServerSettings']
 export type Power = components['schemas']['Power']
 export type ServerEvent = components['schemas']['Event']
 export type Usage = components['schemas']['Usage']
@@ -109,6 +110,12 @@ export async function getServer(id: number): Promise<Server | null> {
 /** Makes a server. The answer comes at once, while it is still being installed. */
 export async function createServer(body: NewServer): Promise<Server> {
   const { data, error } = await signedIn(() => api.POST('/api/v1/servers', { body }))
+  return data ?? fail(error)
+}
+
+/** Changes what a stopped server is made of. The answer is the server as it now is. */
+export async function changeServer(id: number, body: ServerSettings): Promise<Server> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/servers/{id}', { params: { path: { id } }, body }))
   return data ?? fail(error)
 }
 

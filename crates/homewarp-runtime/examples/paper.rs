@@ -142,8 +142,8 @@ async fn main() -> Result<()> {
         let pairs: Vec<(String, String)> = file
             .find
             .iter()
-            .map(|(key, value)| {
-                let value = substitute(value, |name| match name {
+            .map(|replacement| {
+                let value = substitute(&replacement.value, |name| match name {
                     "server.build.default.port" | "server.allocations.default.port" => {
                         Some(port.to_string())
                     }
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
                     other => variable(other.strip_prefix("server.build.env.")?),
                 });
                 ensure!(!value.contains("{{"), "{}: no value for {value}", file.path);
-                Ok((key.clone(), value))
+                Ok((replacement.key.clone(), value))
             })
             .collect::<Result<_>>()?;
         let before = files.read_to_string(&file.path)?.unwrap_or_default();
