@@ -813,7 +813,7 @@ Each phase ends with something that works on the homelab.
 - The donation popover has no links yet, and says so. The four destinations besides
   Servers are shown dimmed and lead nowhere.
 
-**Phase 2 — Servers** — *templates, and a server's first life, done 2026-10-06; the rest to do*
+**Phase 2 — Servers** — *templates, a server's first life and its live console done 2026-10-06; the rest to do*
 - Template import (all egg formats), validation rules, config-file parsers.
 - Install flow, lifecycle state machine, console WebSocket, stats, limits, crash recovery.
 - UI: template gallery, create-server wizard, server page with console.
@@ -843,8 +843,8 @@ Each phase ends with something that works on the homelab.
   cannot follow is refused when it is imported, and none of the 116 is. Core installs
   the server, starts it and watches its console. It can be stopped, killed when it will
   not stop, started again, and removed with its files. Each server has a task of its
-  own in Core. Its page follows its state and the last 500 lines of its console by
-  asking every second and a half, until the socket of §5.8 exists.
+  own in Core, which keeps the last 500 lines of its console for a page that opens
+  later.
 - Core holds the Docker socket now (§13). It runs as root inside its container, with a
   read-only root and two capabilities, CHOWN and DAC_OVERRIDE: what it takes to keep
   files that belong to the servers' user. It sees its data directory at the path the
@@ -863,8 +863,25 @@ Each phase ends with something that works on the homelab.
   words in the console.
 - Nothing else on the homelab was touched: every other container it runs was still
   running afterwards. Looked at 390 and 1250 px wide, in the dark theme.
-- **Still to do in this phase:** typing into the console, and the socket that carries
-  it with stats (§5.8); starting again, with back-off, after a crash; the config-file
+- *Done so far: the socket of §5.8.* A server's page opens one WebSocket and is sent,
+  as it happens, each line of the console, each change of state, and about once a
+  second what the server uses of the processor and of its memory. The first paint
+  still comes from one request; the socket takes over once it has said where things
+  stand, and a page that loses it goes back to asking until it has it again. A line
+  typed under the console goes to the server, with the up and down arrows for what was
+  typed before. A socket is opened with a GET, which the check on requests from other
+  sites lets pass, so this endpoint makes that check itself, as well as asking for a
+  session.
+- Tried in a browser against a throwaway copy: with the socket open a page made no
+  request after its first two; a line typed in came back answered by the server; `stop`
+  typed in took it to Offline and locked the line; Core was restarted under the open
+  page, which came back by itself to a server that had never stopped, and typed into
+  it again. The page policy lets a page open a socket to its own origin, in Chromium
+  at least: `'self'` is all it says, and Safari before 15.4 did not read that as
+  covering WebSockets.
+- **Still to do in this phase:** on a server's page, its disk, its players and how
+  long it has been up, and usage on the Servers page, which still asks every four
+  seconds; starting again, with back-off, after a crash; the config-file
   parsers other than `properties`, and replacing by pattern. Until those exist a
   template that needs one is refused when a server is made from it, not after it has
   installed: 28 of the 116 eggs (`file` 9, `ini` 7, `json` 6, `yaml` 4, `xml` 1), which
