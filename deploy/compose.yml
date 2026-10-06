@@ -6,6 +6,13 @@
 # anything on the machine, so what the rest of this file withholds is modest: a
 # read-only root, and of root's powers only the two it takes to keep the files of
 # servers, which belong to a user of their own.
+#
+# It also keeps its end of the tunnel to the VPS (PLAN.md §5.3), which is in the
+# machine's own network and not in a container's: so it runs in the host's
+# network namespace with the right to change it. What it changes there is its
+# own and nothing else's: one interface (homewarp0), one nftables table (inet
+# homewarp), one routing rule and its table (4857), and none of them until a VPS
+# is connected. Disconnecting the VPS in the panel takes them all away again.
 name: homewarp
 
 services:
@@ -15,9 +22,10 @@ services:
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
-    cap_add: [CHOWN, DAC_OVERRIDE]
+    cap_add: [CHOWN, DAC_OVERRIDE, NET_ADMIN]
     security_opt: ["no-new-privileges:true"]
-    ports: ["3600:3600"]
+    # The panel is then on the machine's port 3600 without being published.
+    network_mode: host
     environment:
       HOMEWARP_DATA: "${HOMEWARP_DATA_DIR:?the data directory, as a path on this machine}"
     volumes:

@@ -37,6 +37,8 @@ const MOST_MEMORY: u32 = 1024 * 1024;
 /// Ports below this belong to the system.
 const LOWEST_PORT: u16 = 1024;
 const MOST_CPU: u32 = 25_600;
+/// More than any game asks for, and few enough to refuse a mistake.
+const MOST_PORTS: usize = 16;
 const LONGEST_COMMAND: usize = 1000;
 
 const MISSING: Problem = Problem::NotFound("There is no such server.");
@@ -52,6 +54,98 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(command_server))
         // A WebSocket, which the API's description has no way to describe.
         .route("/api/v1/servers/{id}/console", get(follow_server))
+}
+
+/// Which protocols a port is published for at home and forwarded for by the Gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PortProtocol {
+    Tcp,
+    Udp,
+    /// An egg does not say which its port speaks, so this is what a port starts as.
+    #[default]
+    Both,
+}
+
+impl PortProtocol {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+            Self::Both => "both",
+        }
+    }
+
+    fn read(text: &str) -> Self {
+        match text {
+            "tcp" => Self::Tcp,
+            "udp" => Self::Udp,
+            _ => Self::Both,
+        }
+    }
+
+    /// The one protocol or the two, as the Gate is told them.
+    pub(crate) fn each(self) -> &'static [homewarp_proto::Protocol] {
+        use homewarp_proto::Protocol::{Tcp, Udp};
+        match self {
+            Self::Tcp => &[Tcp],
+            Self::Udp => &[Udp],
+            Self::Both => &[Tcp, Udp],
+        }
+    }
+}
+
+/// A further port of a server: voice chat, say, or the port it is queried on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub(crate) struct ExtraPort {
+    pub(crate) port: u16,
+    #[serde(default)]
+    pub(crate) protocol: PortProtocol,
+}
+
+/// A port some server has, its first or a further one.
+pub(crate) struct Published {
+    pub(crate) server_id: i64,
+    pub(crate) server: String,
+    pub(crate) port: u16,
+    pub(crate) protocol: PortProtocol,
+}
+
+/// Every port of every server, lowest first: what is published at home, and
+/// what a Gate forwards.
+pub(crate) async fn published(db: &SqlitePool) -> anyhow::Result<Vec<Published>> {
+    let rows: Vec<(i64, String, i64, String, String)> =
+        sqlx::query_as("SELECT id, name, port, protocol, ports FROM servers")
+            .fetch_all(db)
+            .await?;
+    let mut all = Vec::with_capacity(rows.len());
+    for (server_id, server, port, protocol, further) in rows {
+        let further: Vec<ExtraPort> =
+            serde_json::from_str(&further).context("reading a server's ports")?;
+        let first = ExtraPort {
+            port: port.try_into()?,
+            protocol: PortProtocol::read(&protocol),
+        };
+        for one in std::iter::once(first).chain(further) {
+            all.push(Published {
+                server_id,
+                server: server.clone(),
+                port: one.port,
+                protocol: one.protocol,
+            });
+        }
+    }
+    all.sort_by_key(|published| published.port);
+    Ok(all)
+}
+
+/// The port among `ports` that a server other than `except` has, if any does.
+async fn clash(db: &SqlitePool, except: Option<i64>, ports: &[u16]) -> anyhow::Result<Option<u16>> {
+    Ok(published(db)
+        .await?
+        .into_iter()
+        .find(|published| Some(published.server_id) != except && ports.contains(&published.port))
+        .map(|published| published.port))
 }
 
 /// A server as the Servers page shows it.
@@ -81,8 +175,12 @@ struct Server {
     memory_mb: i64,
     /// 100 is one core. 0 is no limit.
     cpu_percent: i64,
-    /// Where players reach it on the home machine, over TCP and UDP.
+    /// Where players reach it, on the home machine and on a connected VPS.
     port: i64,
+    /// Which protocols that port is open for.
+    protocol: PortProtocol,
+    /// The further ports it has.
+    ports: Vec<ExtraPort>,
     state: runtime::State,
     /// The last lines of its console: the install first, then what the server prints.
     console: Vec<String>,
@@ -101,8 +199,14 @@ struct ServerSettings {
     memory_mb: u32,
     /// 100 is one core. Nothing, or 0, is no limit.
     cpu_percent: Option<u32>,
-    /// Published on the home machine, for TCP and UDP.
+    /// Published on the home machine, and forwarded by a connected VPS.
     port: u16,
+    /// Which protocols that port is open for. Both, if none is named.
+    #[serde(default)]
+    protocol: PortProtocol,
+    /// Further ports, each published and forwarded as the first is.
+    #[serde(default)]
+    ports: Vec<ExtraPort>,
     /// Values for the template's variables, by the name the server sees. One
     /// that is not given takes the template's default.
     #[serde(default)]
@@ -126,11 +230,36 @@ struct Checked {
     memory_mb: u32,
     cpu_percent: u32,
     port: u16,
+    protocol: PortProtocol,
+    ports: Vec<ExtraPort>,
     variables: Vec<(String, String)>,
     eula: bool,
 }
 
 impl Checked {
+    /// Every port number asked for, the first one first.
+    fn numbers(&self) -> Vec<u16> {
+        std::iter::once(self.port)
+            .chain(self.ports.iter().map(|further| further.port))
+            .collect()
+    }
+
+    /// The further ports as the database keeps them.
+    fn ports_json(&self) -> Result<String, Problem> {
+        Ok(serde_json::to_string(&self.ports).map_err(anyhow::Error::new)?)
+    }
+
+    /// Refuses a port that another server has. The database would refuse the
+    /// first port by itself; the further ones it does not know one by one.
+    async fn free(&self, db: &SqlitePool, except: Option<i64>) -> Result<(), Problem> {
+        match clash(db, except, &self.numbers()).await? {
+            Some(port) => Err(Problem::Conflict(
+                format!("Port {port} belongs to another server.").into(),
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn definition(
         self,
         id: i64,
@@ -146,6 +275,8 @@ impl Checked {
             memory_mb: self.memory_mb,
             cpu_percent: self.cpu_percent,
             port: self.port,
+            protocol: self.protocol,
+            ports: self.ports,
             variables: self.variables,
             eula: self.eula,
             installed,
@@ -166,8 +297,18 @@ fn check(
     if !(LEAST_MEMORY..=MOST_MEMORY).contains(&settings.memory_mb) {
         return invalid("A server needs 128 MB of memory or more.".to_owned());
     }
-    if settings.port < LOWEST_PORT {
+    if settings.ports.len() > MOST_PORTS {
+        return invalid("A server has 16 further ports at the most.".to_owned());
+    }
+    let mut numbers: Vec<u16> = std::iter::once(settings.port)
+        .chain(settings.ports.iter().map(|further| further.port))
+        .collect();
+    if numbers.iter().any(|port| *port < LOWEST_PORT) {
         return invalid("A port is a number from 1024 to 65535.".to_owned());
+    }
+    numbers.sort_unstable();
+    if let Some(twice) = numbers.windows(2).find(|pair| pair[0] == pair[1]) {
+        return invalid(format!("Port {} is given twice.", twice[0]));
     }
     let cpu_percent = settings.cpu_percent.unwrap_or(0);
     if cpu_percent > MOST_CPU {
@@ -214,6 +355,8 @@ fn check(
         memory_mb: settings.memory_mb,
         cpu_percent,
         port: settings.port,
+        protocol: settings.protocol,
+        ports: settings.ports,
         variables,
         eula: settings.eula,
     })
@@ -247,10 +390,24 @@ struct CommandRequest {
 
 /// Every server as the database has it, for the tasks that run them.
 pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definition>> {
-    type Row = (i64, String, String, String, i64, i64, i64, String, i64, i64);
+    type Row = (
+        i64,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT servers.id, servers.uuid, templates.definition, servers.image, servers.memory_mb,
-                servers.cpu_percent, servers.port, servers.variables, servers.eula, servers.installed
+                servers.cpu_percent, servers.port, servers.protocol, servers.ports,
+                servers.variables, servers.eula, servers.installed
          FROM servers JOIN templates ON templates.id = servers.template_id",
     )
     .fetch_all(db)
@@ -265,6 +422,8 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
                 memory_mb,
                 cpu_percent,
                 port,
+                protocol,
+                ports,
                 variables,
                 eula,
                 installed,
@@ -278,6 +437,8 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
                     memory_mb: memory_mb.try_into()?,
                     cpu_percent: cpu_percent.try_into()?,
                     port: port.try_into()?,
+                    protocol: PortProtocol::read(&protocol),
+                    ports: serde_json::from_str(&ports).context("reading a server's ports")?,
                     variables: serde_json::from_str(&variables)
                         .context("reading a server's variables")?,
                     eula: eula != 0,
@@ -362,12 +523,14 @@ async fn create_server(
     let checked = check(&template, new.settings)?;
 
     let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
+    checked.free(&state.db, None).await?;
     let uuid = auth::new_uuid();
     let created_at = auth::now();
     let id = sqlx::query(
         "INSERT INTO servers
-             (uuid, name, template_id, image, memory_mb, cpu_percent, port, variables, eula, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (uuid, name, template_id, image, memory_mb, cpu_percent, port, protocol, ports,
+              variables, eula, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&uuid)
     .bind(&checked.name)
@@ -376,6 +539,8 @@ async fn create_server(
     .bind(checked.memory_mb)
     .bind(checked.cpu_percent)
     .bind(checked.port)
+    .bind(checked.protocol.as_str())
+    .bind(checked.ports_json()?)
     .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
     .bind(checked.eula)
     .bind(created_at)
@@ -394,12 +559,16 @@ async fn create_server(
         memory_mb: checked.memory_mb.into(),
         cpu_percent: checked.cpu_percent.into(),
         port: checked.port.into(),
+        protocol: checked.protocol,
+        ports: checked.ports.clone(),
         state: runtime::State::Installing,
         console: Vec::new(),
         variables: checked.variables.iter().cloned().collect(),
         eula: checked.eula,
     };
     runtime.add(checked.definition(id, uuid, template, false));
+    // A connected Gate is told of the new ports now, and not in ten seconds.
+    state.tunnel.wake();
     Ok((StatusCode::CREATED, Json(server)))
 }
 
@@ -448,10 +617,12 @@ async fn change_server(
     {
         return Err(RUNNING);
     }
+    checked.free(&state.db, Some(id)).await?;
 
     sqlx::query(
         "UPDATE servers
-         SET name = ?, image = ?, memory_mb = ?, cpu_percent = ?, port = ?, variables = ?, eula = ?
+         SET name = ?, image = ?, memory_mb = ?, cpu_percent = ?, port = ?, protocol = ?,
+             ports = ?, variables = ?, eula = ?
          WHERE id = ?",
     )
     .bind(&checked.name)
@@ -459,6 +630,8 @@ async fn change_server(
     .bind(checked.memory_mb)
     .bind(checked.cpu_percent)
     .bind(checked.port)
+    .bind(checked.protocol.as_str())
+    .bind(checked.ports_json()?)
     .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
     .bind(checked.eula)
     .bind(id)
@@ -472,6 +645,7 @@ async fn change_server(
     {
         return Err(RUNNING);
     }
+    state.tunnel.wake();
     get_server(State(state), SignedIn, Path(id)).await
 }
 
@@ -492,11 +666,24 @@ async fn get_server(
     _: SignedIn,
     Path(id): Path<i64>,
 ) -> Result<Json<Server>, Problem> {
-    type Row = (String, i64, String, String, i64, i64, i64, i64, String, i64);
+    type Row = (
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        i64,
+        String,
+        i64,
+    );
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.name, servers.template_id, templates.name, servers.image,
-                servers.memory_mb, servers.cpu_percent, servers.port, servers.created_at,
-                servers.variables, servers.eula
+                servers.memory_mb, servers.cpu_percent, servers.port, servers.protocol,
+                servers.ports, servers.created_at, servers.variables, servers.eula
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
@@ -511,12 +698,17 @@ async fn get_server(
         memory_mb,
         cpu_percent,
         port,
+        protocol,
+        ports,
         created_at,
         variables,
         eula,
     ) = found.ok_or(MISSING)?;
     let variables: Vec<(String, String)> = serde_json::from_str(&variables)
         .context("reading a server's variables")
+        .map_err(Problem::Internal)?;
+    let ports: Vec<ExtraPort> = serde_json::from_str(&ports)
+        .context("reading a server's ports")
         .map_err(Problem::Internal)?;
     let (now, console) = state
         .runtime
@@ -533,6 +725,8 @@ async fn get_server(
         memory_mb,
         cpu_percent,
         port,
+        protocol: PortProtocol::read(&protocol),
+        ports,
         state: now,
         console,
         variables: variables.into_iter().collect(),
@@ -705,5 +899,6 @@ async fn remove_server(
         .bind(id)
         .execute(&state.db)
         .await?;
+    state.tunnel.wake();
     Ok(StatusCode::NO_CONTENT)
 }

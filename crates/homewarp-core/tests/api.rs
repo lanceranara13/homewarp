@@ -444,6 +444,14 @@ async fn a_server_is_asked_for_in_full_before_anything_is_made() {
         (json!({ "name": "  " }), "1 to 60 characters"),
         (json!({ "memory_mb": 64 }), "128 MB"),
         (json!({ "port": 80 }), "1024 to 65535"),
+        (
+            json!({ "ports": [{ "port": 53, "protocol": "udp" }] }),
+            "1024 to 65535",
+        ),
+        (
+            json!({ "ports": [{ "port": 24454, "protocol": "udp" }, { "port": 25565 }] }),
+            "Port 25565 is given twice.",
+        ),
         (json!({ "template_id": template + 1 }), "no such template"),
         (
             json!({ "image": "example.invalid/other:1" }),
@@ -525,6 +533,87 @@ async fn a_console_is_followed_only_from_this_site_and_signed_in() {
     // ordinary request is not how a socket is opened.
     let here = follow("http://192.168.1.250:3600", &cookie).await;
     assert_eq!(here.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_vps_is_connected_with_one_command_that_counts_for_a_while() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let gate = || panel.get("/api/v1/gate", Some(&cookie));
+
+    let none = gate().await;
+    assert_eq!(none.status, StatusCode::OK);
+    assert_eq!(none.body["state"], "none");
+    assert_eq!(none.body["player_addresses"], "unchecked");
+    assert_eq!(none.body["ports"], json!([]));
+
+    for odd in ["", "  ", "203.0.113.10; reboot", "http://example.com"] {
+        let refused = panel
+            .post("/api/v1/gate", json!({ "address": odd }), Some(&cookie))
+            .await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{odd}");
+    }
+
+    let asked = json!({ "address": " 203.0.113.10 ", "wg_port": 51999 });
+    let waiting = panel.post("/api/v1/gate", asked, Some(&cookie)).await;
+    assert_eq!(waiting.status, StatusCode::CREATED);
+    assert_eq!(waiting.body["state"], "waiting");
+    assert_eq!(waiting.body["address"], "203.0.113.10");
+    assert_eq!(waiting.body["reachable"], false);
+    // The command carries all a VPS needs, and says when it stops counting.
+    let command = waiting.body["command"].as_str().unwrap();
+    let token = command.strip_prefix("homewarp-gate join ").unwrap();
+    let token = homewarp_proto::JoinToken::decode(token).unwrap();
+    assert_eq!((token.wg_port, token.api_port), (51999, 4857));
+    assert_eq!(token.gate_address.to_string(), "10.213.77.1");
+    assert_eq!(token.home_address.to_string(), "10.213.77.2");
+    for key in [
+        &token.private_key,
+        &token.home_public_key,
+        &token.preshared_key,
+    ] {
+        assert_eq!(key.len(), 44);
+    }
+    let until = waiting.body["expires_at"].as_i64().unwrap();
+    assert_eq!(token.expires_at, until.unsigned_abs());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!((now + 890..=now + 900).contains(&until));
+    // Asked for again, it is the same command: the page can be opened anew.
+    assert_eq!(gate().await.body["command"], waiting.body["command"]);
+    // Asked to connect again while waiting, the command is a new one.
+    let again = json!({ "address": "vps.example.com" });
+    let again = panel.post("/api/v1/gate", again, Some(&cookie)).await;
+    assert_eq!(again.status, StatusCode::CREATED);
+    assert_eq!(again.body["address"], "vps.example.com");
+    assert_ne!(again.body["command"], waiting.body["command"]);
+
+    // Nothing has been enrolled, so there is nothing to check yet.
+    let check = panel
+        .post("/api/v1/gate/check", json!({}), Some(&cookie))
+        .await;
+    assert_eq!(check.status, StatusCode::CONFLICT);
+
+    let gone = panel.delete("/api/v1/gate", Some(&cookie)).await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT);
+    assert_eq!(gate().await.body["state"], "none");
+}
+
+#[tokio::test]
+async fn the_gate_is_for_someone_signed_in() {
+    let panel = panel().await;
+    for answer in [
+        panel.get("/api/v1/gate", None).await,
+        panel
+            .post("/api/v1/gate", json!({ "address": "203.0.113.10" }), None)
+            .await,
+        panel.post("/api/v1/gate/check", json!({}), None).await,
+        panel.delete("/api/v1/gate", None).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
 }
 
 #[tokio::test]

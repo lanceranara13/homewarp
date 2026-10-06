@@ -6,8 +6,9 @@
 
 use std::{
     fmt::Write as _,
+    fs,
     io::{self, Write as _},
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     process::{Command, Stdio},
     time::SystemTime,
@@ -40,6 +41,21 @@ pub enum Error {
     Refused(String),
 }
 
+/// What an interface's name can be, which is also what is safe inside a rule.
+fn named_well(interface: &str) -> bool {
+    (1..=15).contains(&interface.len())
+        && interface
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// A port on the VPS that is sent home for the length of a probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeForward {
+    pub public_port: u16,
+    pub home_port: u16,
+}
+
 /// The Gate's whole table, as nft reads it.
 ///
 /// A forwarded port is translated to the same port at `home` and sent into the
@@ -49,21 +65,31 @@ pub enum Error {
 ///
 /// `wan` is the interface players arrive on. It is written into the rules, so
 /// it is held to what an interface's name can be.
-pub fn gate_ruleset(wan: &str, home: Ipv4Addr, desired: &Desired) -> Result<String, Error> {
-    let named_well = (1..=15).contains(&wan.len())
-        && wan
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if !named_well {
+///
+/// `probe` is one more TCP port, sent to a port of home's choosing: there for
+/// the few seconds in which home looks at how a connection through here arrives.
+pub fn gate_ruleset(
+    wan: &str,
+    home: Ipv4Addr,
+    desired: &Desired,
+    probe: Option<ProbeForward>,
+) -> Result<String, Error> {
+    if !named_well(wan) {
         return Err(Error::Interface(wan.to_owned()));
     }
     let map = |protocol: Protocol| {
-        let ports: Vec<String> = desired
+        let mut ports: Vec<String> = desired
             .forwards
             .iter()
             .filter(|forward| forward.protocol == protocol)
             .map(|forward| format!("{0} : {home} . {0}", forward.port))
             .collect();
+        if let (Protocol::Tcp, Some(probe)) = (protocol, probe) {
+            ports.push(format!(
+                "{} : {home} . {}",
+                probe.public_port, probe.home_port
+            ));
+        }
         // nft has no way to write a list of nothing.
         match ports.is_empty() {
             true => String::new(),
@@ -135,6 +161,8 @@ pub struct Link {
 pub struct Heard {
     /// How long ago the two last shook hands. None if they never have.
     pub handshake_age_seconds: Option<u64>,
+    /// Where the other end's packets last came from.
+    pub endpoint: Option<IpAddr>,
     pub received_bytes: u64,
     pub sent_bytes: u64,
 }
@@ -143,10 +171,25 @@ fn wireguard(error: impl std::fmt::Display) -> Error {
     Error::WireGuard(error.to_string())
 }
 
+/// A private key as the kernel keeps it. Three bits of a key have no say in
+/// what it does, and the kernel sets them its own way when it is given one. A
+/// key kept as it was made would then never look like the one the kernel has.
+fn clamped(key: &Key) -> Key {
+    let mut bytes = key.as_array();
+    bytes[0] &= 248;
+    bytes[31] = (bytes[31] & 127) | 64;
+    Key::new(bytes)
+}
+
 /// A new private key and the public key that goes with it, both in base64.
 pub fn new_keypair() -> (String, String) {
-    let private = Key::generate();
+    let private = clamped(&Key::generate());
     (private.to_string(), private.public_key().to_string())
+}
+
+/// A new preshared key, in base64: 32 bytes of nothing but chance.
+pub fn new_preshared_key() -> String {
+    Key::generate().to_string()
 }
 
 /// Makes the tunnel's interface if it is not there and sets it up as `link`
@@ -165,7 +208,7 @@ pub fn bring_up(link: &Link) -> Result<(), Error> {
         // other end is, and whoever is playing waits for the next handshake.
         // So an interface that is already as wanted is left alone: this
         // program can then be restarted or replaced under a running tunnel.
-        let as_wanted = now.private_key == Some(key(&link.private_key)?)
+        let as_wanted = now.private_key == Some(clamped(&key(&link.private_key)?))
             && (link.listen_port == 0 || now.listen_port == link.listen_port)
             && now.peers.len() == 1
             && now.peers.get(&peer_key).is_some_and(|peer| {
@@ -207,6 +250,7 @@ pub fn heard() -> Result<Heard, Error> {
         .map_err(wireguard)?;
     let mut heard = Heard {
         handshake_age_seconds: None,
+        endpoint: None,
         received_bytes: 0,
         sent_bytes: 0,
     };
@@ -220,6 +264,7 @@ pub fn heard() -> Result<Heard, Error> {
             .and_then(|at| at.elapsed().ok())
             .map(|age| age.as_secs());
         heard.handshake_age_seconds = heard.handshake_age_seconds.or(age);
+        heard.endpoint = heard.endpoint.or(peer.endpoint.map(|from| from.ip()));
     }
     Ok(heard)
 }
@@ -232,26 +277,38 @@ pub fn heard() -> Result<Heard, Error> {
 /// neither the Gate nor a game server may do. From the tunnel, only what
 /// Docker published on `bridge` gets in; a server reaches neither this
 /// machine nor the networks behind it.
-pub fn home_ruleset(bridge: &str) -> Result<String, Error> {
-    let named_well = (1..=15).contains(&bridge.len())
-        && bridge
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if !named_well {
+///
+/// `probe` lets one TCP port of this machine be reached from the tunnel, for
+/// the few seconds in which Core listens there to see how a connection through
+/// the Gate arrives. What arrives for it is counted before anything can drop
+/// it, and its replies are marked on their way out as a server's are on their
+/// way through, so that they take the same way back.
+pub fn home_ruleset(bridge: &str, probe: Option<u16>) -> Result<String, Error> {
+    if !named_well(bridge) {
         return Err(Error::Interface(bridge.to_owned()));
     }
+    let (counter, counted, let_in, mark_out) = match probe {
+        None => Default::default(),
+        Some(port) => (
+            "\n  counter probe { packets 0 bytes 0 }".to_owned(),
+            format!("\n    iifname \"homewarp0\" tcp dport {port} counter name \"probe\""),
+            format!("\n    iifname \"homewarp0\" tcp dport {port} accept"),
+            "\n  chain mark_out {\n    type route hook output priority mangle; policy accept;\n    ct mark 0x4857 meta mark set ct mark\n  }"
+                .to_owned(),
+        ),
+    };
     Ok(format!(
         r#"table inet homewarp
 delete table inet homewarp
-table inet homewarp {{
+table inet homewarp {{{counter}
   chain mark_in {{
-    type filter hook prerouting priority mangle; policy accept;
+    type filter hook prerouting priority mangle; policy accept;{counted}
     iifname "homewarp0" ct state new ct mark set 0x4857
     iifname != "homewarp0" ct mark 0x4857 meta mark set ct mark
-  }}
+  }}{mark_out}
   chain input {{
     type filter hook input priority filter; policy accept;
-    iifname {{ "homewarp0", "{bridge}" }} ct state established,related accept
+    iifname {{ "homewarp0", "{bridge}" }} ct state established,related accept{let_in}
     iifname "homewarp0" counter drop
     iifname "{bridge}" counter drop
   }}
@@ -267,11 +324,11 @@ table inet homewarp {{
     ))
 }
 
-fn ip(arguments: &[&str]) -> Result<(), Error> {
+/// Runs `ip` and returns what it printed.
+fn ip(arguments: &[&str]) -> Result<String, Error> {
     let done = Command::new("ip")
         .args(arguments)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .map_err(Error::Ip)?;
@@ -279,24 +336,105 @@ fn ip(arguments: &[&str]) -> Result<(), Error> {
         let said = String::from_utf8_lossy(&done.stderr);
         return Err(Error::Routing(said.trim().to_owned()));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&done.stdout).into_owned())
 }
 
 /// Home's way back: replies that carry the mark leave by the tunnel and not by
 /// the home's own line, and the tunnel's interface alone lets in packets from
 /// addresses that route elsewhere, which is what every player's is.
+///
+/// Done again it changes nothing, and at no moment is the way back missing:
+/// it is done again every few seconds, under whoever is playing.
 pub fn route_replies() -> Result<(), Error> {
-    // Taken away first, so that doing this twice leaves one rule and not two.
-    let _ = ip(&["rule", "del", "fwmark", "0x4857", "lookup", "4857"]);
-    ip(&["rule", "add", "fwmark", "0x4857", "lookup", "4857"])?;
+    let rules = ip(&["rule", "show"])?;
+    let there = rules
+        .lines()
+        .any(|rule| rule.contains("fwmark 0x4857") && rule.contains("lookup 4857"));
+    if !there {
+        ip(&["rule", "add", "fwmark", "0x4857", "lookup", "4857"])?;
+    }
+    // The kernel drops this route whenever the interface loses its address,
+    // which setting WireGuard up again makes it do for a moment.
     ip(&[
         "route", "replace", "default", "dev", INTERFACE, "table", "4857",
     ])?;
-    std::fs::write(
+    let filter = |of: &str| {
+        fs::read_to_string(format!("/proc/sys/net/ipv4/conf/{of}/rp_filter"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u8>().ok())
+    };
+    // The kernel goes by the greater of an interface's own setting and the one
+    // for all of them, where 1 is strict and 2 is loose.
+    let strict = || filter(INTERFACE).max(filter("all")) == Some(1);
+    if !strict() {
+        return Ok(());
+    }
+    // A container is often not allowed to change this, even with the right to
+    // change the network. Then players' packets are dropped as they arrive,
+    // which Core's probe finds out, and the Gate stands in for them instead.
+    let _ = fs::write(
         format!("/proc/sys/net/ipv4/conf/{INTERFACE}/rp_filter"),
         "2",
-    )
-    .map_err(Error::Ip)
+    );
+    Ok(())
+}
+
+/// Whether this end's table is in the kernel. Something that empties the
+/// machine's whole ruleset, a firewall restarting for one, takes it along.
+pub fn has_table() -> bool {
+    Command::new("nft")
+        .args(["list", "table", "inet", "homewarp"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// How many packets have arrived from the tunnel for the port of the probe
+/// that [`home_ruleset`] was last given.
+pub fn probe_packets() -> Result<u64, Error> {
+    let done = Command::new("nft")
+        .args(["list", "counter", "inet", "homewarp", "probe"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !done.status.success() {
+        let said = String::from_utf8_lossy(&done.stderr);
+        return Err(Error::Refused(said.trim().to_owned()));
+    }
+    let said = String::from_utf8_lossy(&done.stdout);
+    let mut words = said.split_whitespace();
+    words
+        .by_ref()
+        .find(|word| *word == "packets")
+        .and_then(|_| words.next())
+        .and_then(|count| count.parse().ok())
+        .ok_or_else(|| Error::Refused(format!("nft said of the counter: {}", said.trim())))
+}
+
+/// The interface this machine's default route leaves by: on a VPS, the one
+/// players arrive on. None if there is no default route.
+pub fn default_interface() -> Option<String> {
+    default_route(&fs::read_to_string("/proc/net/route").ok()?)
+}
+
+/// Reads the kernel's table of routes: a line of headings, then for each route
+/// its interface, its destination in hexadecimal and, further on, its metric
+/// and its mask.
+fn default_route(routes: &str) -> Option<String> {
+    routes
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let metric: u32 = fields.get(6)?.parse().ok()?;
+            let interface = (*fields.first()?).to_owned();
+            (fields.get(1) == Some(&"00000000") && fields.get(7) == Some(&"00000000"))
+                .then_some((metric, interface))
+        })
+        .min()
+        .map(|(_, interface)| interface)
 }
 
 /// Removes everything this crate makes, on either end: the table, the way
@@ -333,7 +471,7 @@ mod tests {
 
     use homewarp_proto::{Desired, Forward, Mode, Protocol};
 
-    use super::{Error, gate_ruleset};
+    use super::{Error, ProbeForward, default_route, gate_ruleset};
 
     const HOME: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 2);
 
@@ -355,7 +493,7 @@ mod tests {
             (25565, Protocol::Udp),
             (27015, Protocol::Udp),
         ];
-        let rules = gate_ruleset("eth0", HOME, &desired(Mode::Transparent, &asked)).unwrap();
+        let rules = gate_ruleset("eth0", HOME, &desired(Mode::Transparent, &asked), None).unwrap();
         assert!(rules.contains(
             "map fwd_tcp { type inet_service : ipv4_addr . inet_service; elements = { 25565 : 10.213.77.2 . 25565 } }"
         ));
@@ -373,20 +511,88 @@ mod tests {
 
     #[test]
     fn with_nothing_to_forward_the_maps_are_empty_and_still_there() {
-        let rules = gate_ruleset("ens3", HOME, &Desired::default()).unwrap();
+        let rules = gate_ruleset("ens3", HOME, &Desired::default(), None).unwrap();
         assert!(rules.contains("map fwd_tcp { type inet_service : ipv4_addr . inet_service; }"));
         assert!(!rules.contains("elements"));
     }
 
     #[test]
     fn nat_mode_is_one_rule_more() {
-        let nat = gate_ruleset("eth0", HOME, &desired(Mode::Nat, &[])).unwrap();
+        let nat = gate_ruleset("eth0", HOME, &desired(Mode::Nat, &[]), None).unwrap();
         assert!(nat.contains("oifname \"homewarp0\" masquerade"));
     }
 
     #[test]
+    fn a_probe_is_one_more_tcp_port_sent_to_the_port_home_chose() {
+        let probe = ProbeForward {
+            public_port: 40001,
+            home_port: 50002,
+        };
+        let asked = [(25565, Protocol::Tcp)];
+        let rules = gate_ruleset(
+            "eth0",
+            HOME,
+            &desired(Mode::Transparent, &asked),
+            Some(probe),
+        )
+        .unwrap();
+        assert!(
+            rules.contains(
+                "elements = { 25565 : 10.213.77.2 . 25565, 40001 : 10.213.77.2 . 50002 }"
+            )
+        );
+        assert!(rules.contains("map fwd_udp { type inet_service : ipv4_addr . inet_service; }"));
+    }
+
+    #[test]
+    fn home_lets_a_probe_in_counts_it_and_marks_its_replies() {
+        let plain = super::home_ruleset("homewarp-br", None).unwrap();
+        assert!(!plain.contains("probe") && !plain.contains("hook output"));
+        let probing = super::home_ruleset("homewarp-br", Some(50002)).unwrap();
+        assert!(probing.contains("counter probe { packets 0 bytes 0 }"));
+        // Counted where it arrives, before anything has had the chance to drop it.
+        let counted = probing
+            .find("iifname \"homewarp0\" tcp dport 50002 counter name \"probe\"")
+            .unwrap();
+        assert!(counted < probing.find("ct state new ct mark set").unwrap());
+        // Let in ahead of the rule that drops everything else from the tunnel.
+        let let_in = probing
+            .find("iifname \"homewarp0\" tcp dport 50002 accept")
+            .unwrap();
+        assert!(let_in < probing.find("iifname \"homewarp0\" counter drop").unwrap());
+        assert!(probing.contains("type route hook output priority mangle"));
+    }
+
+    #[test]
+    fn a_new_key_is_kept_as_the_kernel_will_report_it() {
+        use defguard_wireguard_rs::key::Key;
+
+        for _ in 0..32 {
+            let (private, public) = super::new_keypair();
+            let key = Key::try_from(private.as_str()).unwrap();
+            assert_eq!(super::clamped(&key), key);
+            assert_eq!(key.public_key().to_string(), public);
+        }
+        // The three bits the kernel sets its own way, whatever it is given.
+        let clamped = super::clamped(&Key::new([0xff; 32])).as_array();
+        assert_eq!((clamped[0], clamped[31]), (0xf8, 0x7f));
+        let clamped = super::clamped(&Key::new([0; 32])).as_array();
+        assert_eq!((clamped[0], clamped[31]), (0, 0x40));
+    }
+
+    #[test]
+    fn finds_the_interface_of_the_default_route() {
+        let routes = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+            docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
+            wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n\
+            eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n";
+        assert_eq!(default_route(routes).as_deref(), Some("eth0"));
+        assert_eq!(default_route("Iface\tDestination\n"), None);
+    }
+
+    #[test]
     fn home_marks_what_comes_from_the_gate_and_lets_in_only_what_docker_published() {
-        let rules = super::home_ruleset("homewarp-br").unwrap();
+        let rules = super::home_ruleset("homewarp-br", None).unwrap();
         // The mark goes on a connection as it arrives, and onto its replies only.
         assert!(rules.contains("iifname \"homewarp0\" ct state new ct mark set 0x4857"));
         assert!(rules.contains("iifname != \"homewarp0\" ct mark 0x4857 meta mark set ct mark"));
@@ -397,7 +603,7 @@ mod tests {
             "iifname { \"homewarp0\", \"homewarp-br\" } ct state established,related accept"
         ));
         assert!(matches!(
-            super::home_ruleset("br\" accept; #"),
+            super::home_ruleset("br\" accept; #", None),
             Err(Error::Interface(_))
         ));
     }
@@ -411,7 +617,7 @@ mod tests {
             "eth 0",
         ] {
             assert!(matches!(
-                gate_ruleset(odd, HOME, &Desired::default()),
+                gate_ruleset(odd, HOME, &Desired::default(), None),
                 Err(Error::Interface(_))
             ));
         }

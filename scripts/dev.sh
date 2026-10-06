@@ -3,7 +3,8 @@
 # tree to the homelab and runs every build and test there, inside containers.
 #
 # Usage: dev.sh sync | check | test | fmt | gen | npm <args...> | build | gate | deploy
-#               | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune
+#               | scratch [down] | run <cmd...> | lab [cmd] | vps [leave] | paper [clean]
+#               | du | prune
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
@@ -104,24 +105,34 @@ cmd_deploy() {
 }
 
 # A throwaway copy of the last build on port 3601, with data of its own, for
-# trying what needs an account without touching staging's. It shares the Docker
-# daemon, so a server made in it is a real container. `scratch down` removes the
-# copy, the containers of its servers and its data.
+# trying what needs an account without touching staging's. It runs as the
+# deployment does: it shares the Docker daemon, so a server made in it is a real
+# container, and the machine's network, so a VPS connected in it is a real
+# tunnel. There is one tunnel on a machine: connect a VPS here only while
+# staging has none. `scratch down` removes the copy, the containers of its
+# servers, its data and, if it had a VPS, its end of the tunnel.
 cmd_scratch() {
   local data=$REMOTE/scratch
-  home "docker rm -f homewarp-scratch >/dev/null 2>&1 || true"
   if [ "${1:-up}" = down ]; then
-    home "for id in \$(ls $data/servers 2>/dev/null); do
+    home "had=\$(docker exec homewarp-scratch sh -c 'test -e /sys/class/net/homewarp0 && echo tunnel' 2>/dev/null || true)
+          docker rm -f homewarp-scratch >/dev/null 2>&1 || true
+          for id in \$(ls $data/servers 2>/dev/null); do
             docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown >/dev/null 2>&1 || true
           done
+          if [ -n \"\$had\" ]; then
+            docker run --rm --network host --cap-drop ALL --cap-add NET_ADMIN --entrypoint sh homewarp:dev -c \
+              'ip link del homewarp0; nft delete table inet homewarp; ip rule del fwmark 0x4857 lookup 4857; true' 2>/dev/null
+          fi
           docker run --rm -v $REMOTE:/homewarp alpine:3.20 rm -rf /homewarp/scratch"
     return
   fi
+  home "docker rm -f homewarp-scratch >/dev/null 2>&1 || true"
   home "set -e
     mkdir -p $data
     docker run -d --name homewarp-scratch --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
-      --security-opt no-new-privileges:true -e HOMEWARP_DATA=$data -v $data:$data \
-      -v /var/run/docker.sock:/var/run/docker.sock -p 3601:3600 homewarp:dev >/dev/null
+      --cap-add NET_ADMIN --security-opt no-new-privileges:true --network host \
+      -e HOMEWARP_DATA=$data -e HOMEWARP_LISTEN=0.0.0.0:3601 -v $data:$data \
+      -v /var/run/docker.sock:/var/run/docker.sock homewarp:dev >/dev/null
     for _ in \$(seq 30); do curl -fsS -o /dev/null http://127.0.0.1:3601/api/v1/health 2>/dev/null && break; sleep 1; done
     docker logs homewarp-scratch 2>&1 | grep -E 'setup code|cannot run servers' | tail -2"
 }
@@ -146,14 +157,37 @@ cmd_gen() {
   mv "$ROOT/web/openapi.json.new" "$ROOT/web/openapi.json"
 }
 
-# Builds the Gate as a VPS will run it: one static binary that needs nothing installed.
-# Core is built the same way beside it, for the lab, whose home has no glibc.
+# Builds the Gate as a VPS will run it: one static binary that needs nothing installed,
+# for x86_64 and for ARM64. Core is built the same way beside it, for the lab, whose
+# home has no glibc.
 cmd_gate() {
   cmd_sync && builder
   in_builder 'cargo build --release -p homewarp-gate -p homewarp-core --target x86_64-unknown-linux-musl
-              mkdir -p deploy/out && cd /target/x86_64-unknown-linux-musl/release
-              cp homewarp-gate /work/deploy/out/ && cp homewarp /work/deploy/out/homewarp-static
+              cargo build --release -p homewarp-gate --target aarch64-unknown-linux-musl
+              mkdir -p deploy/out && cd /target
+              cp x86_64-unknown-linux-musl/release/homewarp-gate /work/deploy/out/
+              cp x86_64-unknown-linux-musl/release/homewarp /work/deploy/out/homewarp-static
+              cp aarch64-unknown-linux-musl/release/homewarp-gate /work/deploy/out/homewarp-gate-arm64
               ls -l /work/deploy/out | cut -d" " -f5- '
+  # Nothing here is an ARM machine, so an emulator says whether that one runs at all.
+  home "docker run --rm -v $REMOTE/src/deploy/out:/out:ro alpine:3.20 sh -c \
+    'apk add -q --no-cache qemu-aarch64 >/dev/null 2>&1 && printf \"on ARM64: \" && qemu-aarch64 /out/homewarp-gate-arm64 version'"
+}
+
+# Puts the Gate just built on a VPS, by way of this machine: the homelab and the
+# VPS need not know each other. Enrolling it is then one command, which the
+# panel gives. `vps leave` takes the Gate off the VPS again, with all it made.
+VPS_SSH=${VPS_SSH:-server1}
+cmd_vps() {
+  local vps=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_SSH")
+  if [ "${1:-}" = leave ]; then
+    "${vps[@]}" 'if [ -x /usr/local/bin/homewarp-gate ]; then homewarp-gate leave; else echo "There is no Gate on this machine."; fi'
+    return
+  fi
+  cmd_gate
+  home "cat $REMOTE/src/deploy/out/homewarp-gate" |
+    "${vps[@]}" 'cat > /usr/local/bin/homewarp-gate.new && chmod 755 /usr/local/bin/homewarp-gate.new &&
+      mv /usr/local/bin/homewarp-gate.new /usr/local/bin/homewarp-gate && homewarp-gate version'
 }
 
 # The simulated VPS, internet and home (lab/run.sh), with the Gate just built. HOME_FW=nftables switches
@@ -216,8 +250,9 @@ case "${1:-}" in
   deploy) cmd_deploy ;;
   scratch) shift; cmd_scratch "$@" ;;
   lab)   shift; cmd_lab "$@" ;;
+  vps)   shift; cmd_vps "$@" ;;
   paper) shift; cmd_paper "$@" ;;
   du)    cmd_du ;;
   prune) cmd_prune ;;
-  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | gate | deploy | scratch [down] | run <cmd...> | lab [cmd] | paper [clean] | du | prune" >&2; exit 2 ;;
+  *) echo "usage: $0 sync | check | test | fmt | gen | npm <args...> | build | gate | deploy | scratch [down] | run <cmd...> | lab [cmd] | vps [leave] | paper [clean] | du | prune" >&2; exit 2 ;;
 esac

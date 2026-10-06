@@ -1,28 +1,40 @@
-//! Core's end of the tunnel (PLAN.md §5.3 and §5.4): the interface and the way
-//! back at home, and telling the Gate what to forward.
+//! Core's end of the tunnel (PLAN.md §5.3 to §5.5): the interface and the way
+//! back at home, enrolling a VPS, and telling its Gate what to forward.
 //!
-//! One task does all of it, every few seconds: sets the kernel up if the Gate
-//! in the database is not the one it was set up for, tells the Gate which
-//! ports to forward if that has changed, and otherwise asks how it is. The
-//! asking is not only for show. It is traffic that goes unanswered when the
-//! Gate has lost its end of the tunnel, and that is what makes WireGuard at
-//! home shake hands again within seconds and not minutes.
+//! One task does all of it, every few seconds: sets the kernel up as the Gate
+//! in the database needs it, sees a new Gate through to keys of its own, tells
+//! the Gate which ports to forward if that has changed, and otherwise asks how
+//! it is. The asking is not only for show. It is traffic that goes unanswered
+//! when the Gate has lost its end of the tunnel, and that is what makes
+//! WireGuard at home shake hands again within seconds and not minutes. And
+//! the setting up is done every time round, because whatever is undone
+//! between two rounds, by a reboot or by another program, has to come back.
 
 use std::{
-    net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
 use axum::{Json, extract::State, http::StatusCode};
-use homewarp_net::{Link, apply, bring_up, home_ruleset, route_replies, take_down};
-use homewarp_proto::{Desired, Forward, Mode, Protocol, Status};
-use serde::{Deserialize, Serialize};
+use homewarp_net::{
+    INTERFACE, Link, apply, bring_up, has_table, home_ruleset, new_keypair, new_preshared_key,
+    probe_packets, route_replies, take_down,
+};
+use homewarp_proto::{
+    Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Rotate, Rotated, Status,
+};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
+    sync::Notify,
     time::timeout,
 };
 use utoipa::ToSchema;
@@ -31,6 +43,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{
     api::{AppState, Problem, ProblemBody, SignedIn},
     auth,
+    servers::{self, PortProtocol},
 };
 
 /// The two ends' addresses inside the tunnel (PLAN.md §5.3, Addressing).
@@ -38,10 +51,55 @@ const GATE: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 1);
 const HOME: Ipv4Addr = Ipv4Addr::new(10, 213, 77, 2);
 /// The bridge servers sit on, which `runtime` makes.
 const BRIDGE: &str = "homewarp-br";
+/// Where a Gate's WireGuard listens unless another port is asked for.
+const WG_PORT: u16 = 51820;
+/// Where a Gate answers Core, on its tunnel address.
+const API_PORT: u16 = 4857;
 const EVERY: Duration = Duration::from_secs(10);
+/// How often a VPS that has been handed its join token is looked for.
+const EVERY_WHILE_WAITING: Duration = Duration::from_secs(2);
+/// How long a join token counts (PLAN.md §5.5).
+const JOIN_SECONDS: i64 = 15 * 60;
+/// How long the Gate takes to put its new keys to use once it has agreed to.
+const GATE_SWITCHES_IN: Duration = Duration::from_millis(900);
+/// How long the Gate keeps a probe's port open, and how long home waits on it.
+const PROBE_SECONDS: u8 = 8;
+const PROBE_WAIT: Duration = Duration::from_secs(4);
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(get_gate, connect_gate, disconnect_gate))
+    OpenApiRouter::new()
+        .routes(routes!(get_gate, enrol_gate, disconnect_gate))
+        .routes(routes!(check_gate))
+}
+
+/// What the two ends know each other by, and what Core shows the Gate.
+#[derive(Clone, PartialEq, Eq)]
+struct Keys {
+    gate_public_key: String,
+    preshared_key: String,
+    token: String,
+}
+
+/// Whether servers see their players' own addresses, as the self-probe found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum PlayerAddresses {
+    /// They do: a connection through the Gate arrived with its own address.
+    Preserved,
+    /// They see the Gate's, because replies could not be sent back otherwise.
+    Hidden,
+    /// It could not be found out, or has not been yet.
+    Unchecked,
+}
+
+impl PlayerAddresses {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preserved => "preserved",
+            Self::Hidden => "hidden",
+            Self::Unchecked => "unchecked",
+        }
+    }
 }
 
 /// The Gate as the database has it.
@@ -49,65 +107,210 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
 struct Gate {
     address: String,
     wg_port: u16,
-    private_key: String,
-    gate_public_key: String,
-    preshared_key: String,
-    token: String,
     api_port: u16,
+    private_key: String,
+    keys: Keys,
+    /// What the Gate will switch to, in the middle of a change of keys.
+    next: Option<Keys>,
+    /// Until the Gate has keys of its own: its join token and when that runs out.
+    join: Option<(String, i64)>,
     mode: Mode,
+    checked: PlayerAddresses,
+    note: Option<String>,
+}
+
+/// Why the Gate gave no answer that could be used.
+#[derive(Debug, thiserror::Error)]
+enum Unanswered {
+    /// Nothing came back through the tunnel.
+    #[error("the Gate could not be reached through the tunnel: {0}")]
+    Unreachable(String),
+    /// The Gate answered, with a refusal.
+    #[error("the Gate refused: {1}")]
+    Refused(u16, String),
+}
+
+/// What the Gate last said, and how long the way to it took.
+#[derive(Clone, Default)]
+struct Heard {
+    status: Option<Status>,
+    latency_ms: Option<u32>,
+    /// Why it could not be asked, when it could not.
+    problem: Option<String>,
+}
+
+/// How a connection through the Gate arrived at home.
+enum Seen {
+    /// Whole, from this address.
+    From(IpAddr),
+    /// Its first packet came, and the reply never got back.
+    NoWayBack,
+    /// Nothing came through the tunnel at all.
+    Nothing,
 }
 
 /// Core's end of the tunnel, and what it last heard from the other.
 pub(crate) struct Tunnel {
     db: SqlitePool,
-    /// What the Gate last said, or why it could not be asked.
-    heard: Mutex<Option<Result<Status, String>>>,
-    /// Which Gate the kernel was last set up for: it is set up once for each,
-    /// and not every time round.
+    /// One thing at a time is done to the tunnel: a round of keeping it, or
+    /// something a page asked for.
+    busy: tokio::sync::Mutex<()>,
+    /// Rung when something has changed that should not wait for the next round.
+    wake: Notify,
+    heard: Mutex<Heard>,
+    /// Which Gate, by which of its keys, the kernel was last set up for. The
+    /// table is replaced once for each and after that only if it has gone.
     up_for: Mutex<Option<String>>,
     /// What the Gate was last told.
     told: Mutex<Option<Desired>>,
+    /// Set when a Gate has just been enrolled: the self-probe is due.
+    check_due: AtomicBool,
 }
 
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Runs work that waits on the kernel or on another program off the async threads.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, homewarp_net::Error> + Send + 'static,
+) -> anyhow::Result<T> {
+    Ok(tokio::task::spawn_blocking(work).await??)
+}
+
+/// A name or an address, as one IPv4 address and a port.
+async fn find(address: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    tokio::net::lookup_host((address, port))
+        .await
+        .with_context(|| format!("looking up {address}"))?
+        .find(SocketAddr::is_ipv4)
+        .with_context(|| format!("{address} has no IPv4 address"))
+}
+
 impl Tunnel {
     pub(crate) fn new(db: SqlitePool) -> Arc<Self> {
         Arc::new(Self {
             db,
+            busy: tokio::sync::Mutex::default(),
+            wake: Notify::new(),
             heard: Mutex::default(),
             up_for: Mutex::default(),
             told: Mutex::default(),
+            check_due: AtomicBool::new(false),
         })
+    }
+
+    /// Has the next round begin now: a server's ports have changed, or a VPS
+    /// is about to be enrolled.
+    pub(crate) fn wake(&self) {
+        self.wake.notify_one();
     }
 
     /// Keeps the tunnel as the database says it should be, for as long as Core runs.
     pub(crate) fn keep(self: &Arc<Self>) {
         let tunnel = Arc::clone(self);
         tokio::spawn(async move {
+            // An interface left by a Core that was stopped before it could
+            // take it down, with no Gate in the database to account for it.
+            *lock(&tunnel.up_for) = Path::new("/sys/class/net")
+                .join(INTERFACE)
+                .exists()
+                .then(String::new);
             loop {
-                let heard = match tunnel.gate().await {
-                    Ok(Some(gate)) => Some(
-                        tunnel
-                            .tend(&gate)
-                            .await
-                            .map_err(|error| format!("{error:#}")),
-                    ),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(format!("{error:#}"))),
+                let waiting = tunnel.round().await;
+                let pause = match waiting {
+                    true => EVERY_WHILE_WAITING,
+                    false => EVERY,
                 };
-                *lock(&tunnel.heard) = heard;
-                tokio::time::sleep(EVERY).await;
+                tokio::select! {
+                    () = tokio::time::sleep(pause) => {}
+                    () = tunnel.wake.notified() => {}
+                }
             }
         });
     }
 
+    /// One round. True while a VPS that was handed a join token is awaited.
+    async fn round(&self) -> bool {
+        let _busy = self.busy.lock().await;
+        let gate = match self.gate().await {
+            Ok(Some(gate)) => gate,
+            Ok(None) => {
+                self.take_down().await;
+                return false;
+            }
+            Err(error) => {
+                lock(&self.heard).problem = Some(format!("{error:#}"));
+                return false;
+            }
+        };
+        let waiting = gate.join.is_some();
+        // A join token that has run out: home stops dialling with the key it carried.
+        if gate
+            .join
+            .as_ref()
+            .is_some_and(|(_, until)| *until <= auth::now())
+        {
+            self.take_down().await;
+            return false;
+        }
+        let heard = match self.tend(gate).await {
+            Ok((status, latency)) => Heard {
+                status: Some(status),
+                latency_ms: Some(latency),
+                problem: None,
+            },
+            // A VPS that has not run its command yet is no problem to report.
+            Err(error)
+                if waiting
+                    && matches!(
+                        error.downcast_ref::<Unanswered>(),
+                        Some(Unanswered::Unreachable(_))
+                    ) =>
+            {
+                Heard::default()
+            }
+            Err(error) => Heard {
+                problem: Some(format!("{error:#}")),
+                ..Heard::default()
+            },
+        };
+        *lock(&self.heard) = heard;
+        waiting
+    }
+
+    /// Takes home's end out of the kernel, if this Core put it there.
+    async fn take_down(&self) {
+        *lock(&self.heard) = Heard::default();
+        *lock(&self.told) = None;
+        if lock(&self.up_for).take().is_some() {
+            let _ = tokio::task::spawn_blocking(take_down).await;
+        }
+    }
+
     async fn gate(&self) -> anyhow::Result<Option<Gate>> {
-        type Row = (String, i64, String, String, String, String, i64, String);
+        type Text = Option<String>;
+        type Row = (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Text,
+            Text,
+            Text,
+            Text,
+            Option<i64>,
+            String,
+            String,
+            Text,
+        );
         let row: Option<Row> = sqlx::query_as(
-            "SELECT address, wg_port, private_key, gate_public_key, preshared_key, token, api_port, mode
+            "SELECT address, wg_port, api_port, private_key, gate_public_key, preshared_key, token,
+                    next_public_key, next_preshared_key, next_token, join_token, join_expires_at,
+                    mode, checked, note
              FROM gate WHERE id = 1",
         )
         .fetch_optional(&self.db)
@@ -115,165 +318,499 @@ impl Tunnel {
         let Some((
             address,
             wg_port,
+            api_port,
             private_key,
             gate_public_key,
             preshared_key,
             token,
-            api_port,
+            next_public_key,
+            next_preshared_key,
+            next_token,
+            join_token,
+            join_expires_at,
             mode,
+            checked,
+            note,
         )) = row
         else {
             return Ok(None);
         };
+        let next = match (next_public_key, next_preshared_key, next_token) {
+            (Some(gate_public_key), Some(preshared_key), Some(token)) => Some(Keys {
+                gate_public_key,
+                preshared_key,
+                token,
+            }),
+            _ => None,
+        };
         Ok(Some(Gate {
             address,
             wg_port: wg_port.try_into()?,
-            private_key,
-            gate_public_key,
-            preshared_key,
-            token,
             api_port: api_port.try_into()?,
-            mode: if mode == "nat" {
-                Mode::Nat
-            } else {
-                Mode::Transparent
+            private_key,
+            keys: Keys {
+                gate_public_key,
+                preshared_key,
+                token,
             },
+            next,
+            join: join_token.zip(join_expires_at),
+            mode: match mode.as_str() {
+                "nat" => Mode::Nat,
+                _ => Mode::Transparent,
+            },
+            checked: match checked.as_str() {
+                "preserved" => PlayerAddresses::Preserved,
+                "hidden" => PlayerAddresses::Hidden,
+                _ => PlayerAddresses::Unchecked,
+            },
+            note,
         }))
     }
 
-    /// One round: the kernel, then the Gate.
-    async fn tend(&self, gate: &Gate) -> anyhow::Result<Status> {
-        let which = format!("{}:{} {}", gate.address, gate.wg_port, gate.gate_public_key);
-        if lock(&self.up_for).as_deref() != Some(which.as_str()) {
-            let link = gate.clone();
-            tokio::task::spawn_blocking(move || set_up(&link)).await??;
+    /// One round with a Gate: the kernel, its keys if it is new, then what it
+    /// forwards. Returns what it said and how many milliseconds away it is.
+    async fn tend(&self, gate: Gate) -> anyhow::Result<(Status, u32)> {
+        self.set_up(&gate, &gate.keys).await?;
+        let gate = match gate.join {
+            Some(_) => self.enrol(gate).await?,
+            None => gate,
+        };
+        let mut heard = self.tell(&gate, gate.mode).await?;
+        if self.check_due.swap(false, Ordering::Relaxed) {
+            let mode = self.check(&gate).await?;
+            heard = self.tell(&gate, mode).await?;
+        }
+        Ok(heard)
+    }
+
+    /// Home's end in the kernel: the interface, dialling the Gate; the way
+    /// back for replies; and the rules. Done again it changes nothing, and it
+    /// is done every round.
+    async fn set_up(&self, gate: &Gate, keys: &Keys) -> anyhow::Result<()> {
+        let endpoint = find(&gate.address, gate.wg_port).await?;
+        let link = Link {
+            private_key: gate.private_key.clone(),
+            listen_port: 0,
+            address: HOME,
+            peer_public_key: keys.gate_public_key.clone(),
+            preshared_key: keys.preshared_key.clone(),
+            // Players come from anywhere, and their packets come in by this link.
+            peer_allowed: (Ipv4Addr::UNSPECIFIED, 0),
+            peer_endpoint: Some(endpoint),
+        };
+        let which = format!("{endpoint} {}", keys.gate_public_key);
+        let again = lock(&self.up_for).as_deref() == Some(which.as_str());
+        blocking(move || {
+            bring_up(&link)?;
+            route_replies()?;
+            // Replaced once for each Gate, so that a newer Core's rules take
+            // the place of an older one's, and put back if they have gone.
+            if !again || !has_table() {
+                apply(&home_ruleset(BRIDGE, None)?)?;
+            }
+            Ok(())
+        })
+        .await?;
+        if !again {
             *lock(&self.up_for) = Some(which);
             *lock(&self.told) = None;
         }
+        Ok(())
+    }
 
-        // An egg does not say which protocol its port speaks, so both are forwarded.
-        let ports: Vec<i64> = sqlx::query_scalar("SELECT port FROM servers ORDER BY port")
-            .fetch_all(&self.db)
-            .await?;
-        let mut forwards = Vec::with_capacity(ports.len() * 2);
-        for port in ports {
-            for protocol in [Protocol::Tcp, Protocol::Udp] {
+    /// Sees a new Gate through to keys of its own (PLAN.md §5.5): what its
+    /// join token carried has travelled, and after this none of it counts.
+    ///
+    /// In two steps, so that there is no moment at which a lost answer leaves
+    /// the two ends with different keys for good. The Gate first makes its
+    /// keys and goes on with the old ones; home writes the new ones down; only
+    /// then is the Gate told to switch. Returns the Gate as it is afterwards.
+    async fn enrol(&self, gate: Gate) -> anyhow::Result<Gate> {
+        let next = match &gate.next {
+            Some(next) => next.clone(),
+            None => {
+                let preshared_key = new_preshared_key();
+                let asked = Rotate {
+                    preshared_key: preshared_key.clone(),
+                };
+                let (made, _): (Rotated, _) =
+                    ask(&gate, &gate.keys, "POST", "/v1/rotate", Some(&asked)).await?;
+                let next = Keys {
+                    gate_public_key: made.public_key,
+                    preshared_key,
+                    token: made.token,
+                };
+                sqlx::query(
+                    "UPDATE gate SET next_public_key = ?, next_preshared_key = ?, next_token = ?",
+                )
+                .bind(&next.gate_public_key)
+                .bind(&next.preshared_key)
+                .bind(&next.token)
+                .execute(&self.db)
+                .await?;
+                next
+            }
+        };
+        match ask::<(), ()>(&gate, &gate.keys, "POST", "/v1/rotate/commit", None).await {
+            Ok(_) => tokio::time::sleep(GATE_SWITCHES_IN).await,
+            // The Gate has no new keys to switch to: it was started again
+            // after it made them. They are asked for again the next time round.
+            Err(Unanswered::Refused(409, _)) => {
+                sqlx::query(
+                    "UPDATE gate
+                     SET next_public_key = NULL, next_preshared_key = NULL, next_token = NULL",
+                )
+                .execute(&self.db)
+                .await?;
+                bail!("The Gate was started again while its keys were being changed.");
+            }
+            Err(refused @ Unanswered::Refused(..)) => return Err(refused.into()),
+            // Not reached with the old keys. It may have switched already,
+            // and its answer been lost on the way: so the new ones are tried.
+            Err(unreachable @ Unanswered::Unreachable(_)) => {
+                self.set_up(&gate, &next).await?;
+                if ask::<Status, ()>(&gate, &next, "GET", "/v1/status", None)
+                    .await
+                    .is_err()
+                {
+                    self.set_up(&gate, &gate.keys).await?;
+                    return Err(unreachable.into());
+                }
+            }
+        }
+        sqlx::query(
+            "UPDATE gate
+             SET gate_public_key = ?, preshared_key = ?, token = ?,
+                 next_public_key = NULL, next_preshared_key = NULL, next_token = NULL,
+                 join_token = NULL, join_expires_at = NULL",
+        )
+        .bind(&next.gate_public_key)
+        .bind(&next.preshared_key)
+        .bind(&next.token)
+        .execute(&self.db)
+        .await?;
+        let gate = Gate {
+            keys: next,
+            next: None,
+            join: None,
+            ..gate
+        };
+        self.set_up(&gate, &gate.keys).await?;
+        tracing::info!("The Gate at {} has keys of its own now.", gate.address);
+        self.check_due.store(true, Ordering::Relaxed);
+        Ok(gate)
+    }
+
+    /// Tells the Gate what to forward and in which mode, if it has not been
+    /// told just that already, and asks how it is if it has.
+    async fn tell(&self, gate: &Gate, mode: Mode) -> anyhow::Result<(Status, u32)> {
+        let mut forwards = Vec::new();
+        for published in servers::published(&self.db).await? {
+            for protocol in published.protocol.each() {
                 forwards.push(Forward {
-                    port: port.try_into()?,
-                    protocol,
+                    port: published.port,
+                    protocol: *protocol,
                 });
             }
         }
         let told = lock(&self.told).clone();
-        if let Some(told) = told.filter(|told| told.forwards == forwards && told.mode == gate.mode)
-        {
-            let status = ask(gate, "GET", "/v1/status", &[]).await?;
+        if let Some(told) = told.filter(|told| told.forwards == forwards && told.mode == mode) {
+            let heard: (Status, _) =
+                ask::<_, ()>(gate, &gate.keys, "GET", "/v1/status", None).await?;
             // A Gate that has forgotten what it was told, a new VPS say, is told again.
-            if status.generation == told.generation {
-                return Ok(status);
+            if heard.0.generation == told.generation {
+                return Ok(heard);
             }
         }
         let desired = Desired {
             generation: auth::now().unsigned_abs(),
-            mode: gate.mode,
+            mode,
             forwards,
         };
-        let status = ask(gate, "PUT", "/v1/state", &serde_json::to_vec(&desired)?).await?;
+        let heard = ask(gate, &gate.keys, "PUT", "/v1/state", Some(&desired)).await?;
         *lock(&self.told) = Some(desired);
-        Ok(status)
+        Ok(heard)
+    }
+
+    /// The self-probe (PLAN.md §5.3): finds out whether a server at home sees
+    /// its players' own addresses, falls back to the Gate standing in for them
+    /// if replies cannot be sent back otherwise, and writes down which it is.
+    /// Returns the mode the Gate is to be in.
+    async fn check(&self, gate: &Gate) -> anyhow::Result<Mode> {
+        self.tell(gate, Mode::Transparent).await?;
+        let (mode, checked, note) = match self.probe(gate).await? {
+            Seen::From(from) if from != IpAddr::V4(GATE) => {
+                (Mode::Transparent, PlayerAddresses::Preserved, None)
+            }
+            Seen::From(_) => (
+                Mode::Transparent,
+                PlayerAddresses::Unchecked,
+                Some(
+                    "The Gate stood in for the test connection when it was told not to.".to_owned(),
+                ),
+            ),
+            Seen::Nothing => (
+                Mode::Transparent,
+                PlayerAddresses::Unchecked,
+                Some(format!(
+                    "A test connection to {} did not come back through the tunnel, so this could not be checked. A firewall in front of the VPS may be closed for the port it tried.",
+                    gate.address
+                )),
+            ),
+            Seen::NoWayBack => {
+                self.tell(gate, Mode::Nat).await?;
+                match self.probe(gate).await? {
+                    Seen::From(_) => (
+                        Mode::Nat,
+                        PlayerAddresses::Hidden,
+                        Some(
+                            "Replies to players cannot leave this machine through the tunnel, so the Gate stands in for them: servers see its address and not their players' own."
+                                .to_owned(),
+                        ),
+                    ),
+                    _ => (
+                        Mode::Transparent,
+                        PlayerAddresses::Unchecked,
+                        Some(
+                            "Connections arrive from the Gate, but replies do not get back to it. Something on this machine is in their way."
+                                .to_owned(),
+                        ),
+                    ),
+                }
+            }
+        };
+        sqlx::query("UPDATE gate SET mode = ?, checked = ?, note = ?")
+            .bind(match mode {
+                Mode::Transparent => "transparent",
+                Mode::Nat => "nat",
+            })
+            .bind(checked.as_str())
+            .bind(note)
+            .execute(&self.db)
+            .await?;
+        Ok(mode)
+    }
+
+    /// One connection through the Gate and back home, and how it arrived.
+    ///
+    /// Core listens on a port of the tunnel's address and has the Gate send a
+    /// port of the VPS's public address there for a few seconds. Then it
+    /// connects to that, out through the home's own line as a player would
+    /// come, and sees what address the connection arrives from.
+    async fn probe(&self, gate: &Gate) -> anyhow::Result<Seen> {
+        let listener = TcpListener::bind((HOME, 0))
+            .await
+            .context("listening on the tunnel's address")?;
+        let port = listener.local_addr()?.port();
+        blocking(move || apply(&home_ruleset(BRIDGE, Some(port))?)).await?;
+        let arrived = async {
+            let asked = ProbeRequest {
+                home_port: port,
+                seconds: PROBE_SECONDS,
+            };
+            let (opened, _): (Probe, _) =
+                ask(gate, &gate.keys, "POST", "/v1/probe", Some(&asked)).await?;
+            let public = find(&gate.address, opened.port).await?;
+            // Both are held to the end, so that the connection is still open
+            // when the listener gets to it.
+            let (_dialled, accepted) = tokio::join!(
+                timeout(PROBE_WAIT, TcpStream::connect(public)),
+                timeout(PROBE_WAIT, listener.accept()),
+            );
+            anyhow::Ok(
+                accepted
+                    .ok()
+                    .and_then(Result::ok)
+                    .map(|(_, from)| from.ip()),
+            )
+        }
+        .await;
+        // Counted before the rules that count it are replaced by the usual ones.
+        let packets = blocking(probe_packets).await;
+        blocking(|| apply(&home_ruleset(BRIDGE, None)?)).await?;
+        Ok(match (arrived?, packets?) {
+            (Some(from), _) => Seen::From(from),
+            (None, 0) => Seen::Nothing,
+            (None, _) => Seen::NoWayBack,
+        })
     }
 }
 
-/// Home's end in the kernel: the interface, dialling the Gate; the way back
-/// for replies; and the rules. Done again it changes nothing.
-fn set_up(gate: &Gate) -> anyhow::Result<()> {
-    let endpoint = (gate.address.as_str(), gate.wg_port)
-        .to_socket_addrs()
-        .with_context(|| format!("looking up {}", gate.address))?
-        .find(SocketAddr::is_ipv4)
-        .with_context(|| format!("{} has no IPv4 address", gate.address))?;
-    bring_up(&Link {
-        private_key: gate.private_key.clone(),
-        listen_port: 0,
-        address: HOME,
-        peer_public_key: gate.gate_public_key.clone(),
-        preshared_key: gate.preshared_key.clone(),
-        // Players come from anywhere, and their packets come in by this link.
-        peer_allowed: (Ipv4Addr::UNSPECIFIED, 0),
-        peer_endpoint: Some(endpoint),
-    })?;
-    route_replies()?;
-    apply(&home_ruleset(BRIDGE)?)?;
-    Ok(())
-}
-
-/// One request to the Gate, through the tunnel. Its API is a handful of small
-/// JSON answers from a program of ours, so this speaks just enough HTTP for
-/// that and brings no client library with it.
-async fn ask(gate: &Gate, method: &str, path: &str, body: &[u8]) -> anyhow::Result<Status> {
+/// One request to the Gate, through the tunnel, and how many milliseconds the
+/// way there and back took. Its API is a handful of small JSON answers from a
+/// program of ours, so this speaks just enough HTTP for that and brings no
+/// client library with it.
+async fn ask<T: DeserializeOwned, B: Serialize>(
+    gate: &Gate,
+    keys: &Keys,
+    method: &str,
+    path: &str,
+    body: Option<&B>,
+) -> Result<(T, u32), Unanswered> {
+    let unreachable = |error: &dyn std::fmt::Display| Unanswered::Unreachable(error.to_string());
+    let body = match body {
+        Some(body) => serde_json::to_vec(body).map_err(|error| unreachable(&error))?,
+        None => Vec::new(),
+    };
     let talk = async {
+        let began = Instant::now();
         let mut stream = TcpStream::connect(SocketAddr::from((GATE, gate.api_port))).await?;
+        // Connecting is one trip there and back, and nothing else.
+        let latency = began.elapsed();
         let head = format!(
             "{method} {path} HTTP/1.1\r\nHost: gate\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            gate.token,
+            keys.token,
             body.len()
         );
         stream.write_all(head.as_bytes()).await?;
-        stream.write_all(body).await?;
+        stream.write_all(&body).await?;
         let mut answer = Vec::new();
         stream.take(1 << 20).read_to_end(&mut answer).await?;
-        anyhow::Ok(answer)
+        std::io::Result::Ok((answer, latency))
     };
-    let answer = timeout(Duration::from_secs(5), talk)
+    let (answer, latency) = timeout(Duration::from_secs(5), talk)
         .await
-        .context("the Gate did not answer through the tunnel")?
-        .context("the Gate could not be reached through the tunnel")?;
+        .map_err(|_| unreachable(&"it did not answer"))?
+        .map_err(|error| unreachable(&error))?;
     let answer = String::from_utf8_lossy(&answer);
     let (head, body) = answer
         .split_once("\r\n\r\n")
-        .context("what the Gate answered was not HTTP")?;
-    if !head.starts_with("HTTP/1.1 200") {
-        bail!("the Gate refused: {}", body.trim());
+        .ok_or_else(|| unreachable(&"what it answered was not HTTP"))?;
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| unreachable(&"what it answered was not HTTP"))?;
+    if !(200..300).contains(&status) {
+        return Err(Unanswered::Refused(status, body.trim().to_owned()));
     }
-    serde_json::from_str(body).context("reading the Gate's answer")
+    // An answer with nothing in it is read as JSON's nothing.
+    let body = match body.trim() {
+        "" => "null",
+        body => body,
+    };
+    let said = serde_json::from_str(body).map_err(|error| unreachable(&error))?;
+    Ok((said, u32::try_from(latency.as_millis()).unwrap_or(u32::MAX)))
 }
 
-/// The Gate as the Network page shows it.
+/// Where a Gate stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum GateState {
+    /// No VPS is connected. Servers are reached on the home network only.
+    None,
+    /// A VPS has been handed its command, and has not been heard from yet.
+    Waiting,
+    /// The command was not run in time. It takes a new one.
+    Expired,
+    /// A Gate is enrolled. Whether it answers just now is `reachable`.
+    Connected,
+}
+
+/// A port of a server, which a connected Gate forwards.
 #[derive(Serialize, ToSchema)]
-struct GateView {
-    /// Whether a Gate has been connected at all.
-    connected: bool,
-    /// The VPS's public address: what players type.
-    address: Option<String>,
-    /// Whether servers see their players' own addresses, and not the Gate's.
-    transparent: bool,
-    /// How long ago the Gate was heard from over the tunnel. None if it never was.
-    handshake_age_seconds: Option<u64>,
-    /// How many ports the Gate forwards.
-    forwards: usize,
-    /// Why the Gate could not be reached, when it could not.
-    problem: Option<String>,
-}
-
-/// What it takes to reach a Gate that is already running.
-#[derive(Deserialize, ToSchema)]
-struct GateSettings {
-    /// The VPS's public address or name.
-    address: String,
-    wg_port: u16,
-    /// Home's own key for the tunnel, the public half of which the Gate has.
-    private_key: String,
-    gate_public_key: String,
-    preshared_key: String,
-    token: String,
-    api_port: u16,
-    /// Have servers see the Gate's address and not their players' own: for a
-    /// home where the way back through the tunnel cannot be made to work.
-    #[serde(default)]
-    nat: bool,
+struct ForwardedPort {
+    port: u16,
+    protocol: PortProtocol,
+    server_id: i64,
+    /// The server's name.
+    server: String,
 }
 
 /// The Gate, and how the tunnel to it is doing.
+#[derive(Serialize, ToSchema)]
+struct GateView {
+    state: GateState,
+    /// The VPS's public address: what players type.
+    address: Option<String>,
+    /// While a VPS is awaited: what to run on it, as root.
+    command: Option<String>,
+    /// When that command stops counting, in Unix seconds.
+    expires_at: Option<i64>,
+    /// Whether the Gate answered through the tunnel when it was last asked.
+    reachable: bool,
+    /// How long the way to the Gate and back takes, in milliseconds.
+    latency_ms: Option<u32>,
+    /// How long ago the Gate last heard from home over the tunnel.
+    handshake_age_seconds: Option<u64>,
+    /// Whether servers see their players' own addresses.
+    player_addresses: PlayerAddresses,
+    /// What the check of that found, where it needs saying.
+    note: Option<String>,
+    /// Why the Gate could not be reached, when it could not.
+    problem: Option<String>,
+    /// The version of the Gate program on the VPS.
+    version: Option<String>,
+    /// Through the tunnel since the Gate last set it up, as the Gate counts.
+    received_bytes: u64,
+    sent_bytes: u64,
+    /// Every port of every server: what a connected Gate forwards.
+    ports: Vec<ForwardedPort>,
+}
+
+/// What it takes to start connecting a VPS.
+#[derive(Deserialize, ToSchema)]
+struct NewGate {
+    /// The VPS's public IPv4 address, or a name for it.
+    address: String,
+    /// The UDP port its WireGuard is to listen on. 51820 if none is given.
+    wg_port: Option<u16>,
+}
+
+async fn view(state: &AppState) -> Result<GateView, Problem> {
+    // Neither read depends on the other, so neither waits for the other.
+    let (gate, ports) = tokio::try_join!(state.tunnel.gate(), servers::published(&state.db))?;
+    let heard = lock(&state.tunnel.heard).clone();
+    let now = auth::now();
+    let ports = ports
+        .into_iter()
+        .map(|published| ForwardedPort {
+            port: published.port,
+            protocol: published.protocol,
+            server_id: published.server_id,
+            server: published.server,
+        })
+        .collect();
+    let status = heard.status;
+    Ok(GateView {
+        state: match &gate {
+            None => GateState::None,
+            Some(gate) => match &gate.join {
+                Some((_, until)) if *until <= now => GateState::Expired,
+                Some(_) => GateState::Waiting,
+                None => GateState::Connected,
+            },
+        },
+        command: gate
+            .as_ref()
+            .and_then(|gate| gate.join.as_ref())
+            .filter(|(_, until)| *until > now)
+            .map(|(token, _)| format!("homewarp-gate join {token}")),
+        expires_at: gate
+            .as_ref()
+            .and_then(|gate| gate.join.as_ref())
+            .map(|(_, until)| *until),
+        reachable: status.is_some(),
+        latency_ms: heard.latency_ms,
+        handshake_age_seconds: status
+            .as_ref()
+            .and_then(|status| status.handshake_age_seconds),
+        player_addresses: gate
+            .as_ref()
+            .map_or(PlayerAddresses::Unchecked, |gate| gate.checked),
+        note: gate.as_ref().and_then(|gate| gate.note.clone()),
+        problem: heard.problem,
+        version: status.as_ref().map(|status| status.version.clone()),
+        received_bytes: status.as_ref().map_or(0, |status| status.received_bytes),
+        sent_bytes: status.as_ref().map_or(0, |status| status.sent_bytes),
+        address: gate.map(|gate| gate.address),
+        ports,
+    })
+}
+
+/// The Gate, how the tunnel to it is doing, and every port it forwards. The
+/// one request the Network page needs, and the one the Gate's pill asks again.
 #[utoipa::path(
     get,
     path = "/api/v1/gate",
@@ -283,84 +820,140 @@ struct GateSettings {
     )
 )]
 async fn get_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<GateView>, Problem> {
-    let gate = state.tunnel.gate().await?;
-    let heard = lock(&state.tunnel.heard).clone();
-    let (status, problem) = match heard {
-        Some(Ok(status)) => (Some(status), None),
-        Some(Err(problem)) => (None, Some(problem)),
-        None => (None, None),
-    };
-    Ok(Json(GateView {
-        connected: gate.is_some(),
-        transparent: gate
-            .as_ref()
-            .is_none_or(|gate| gate.mode == Mode::Transparent),
-        address: gate.map(|gate| gate.address),
-        handshake_age_seconds: status
-            .as_ref()
-            .and_then(|status| status.handshake_age_seconds),
-        forwards: status.map_or(0, |status| status.forwards),
-        problem,
-    }))
+    Ok(Json(view(&state).await?))
 }
 
-/// Connects this home to a Gate that is already running. The tunnel comes up
-/// within a few seconds; asking again shows how it went.
+/// Starts connecting a VPS: makes the keys of a tunnel to it and answers with
+/// the one command to run there. The command counts for a quarter of an hour.
+/// Core dials the VPS from now until then, and the tunnel is up within a few
+/// seconds of the command being run; asking for the Gate again shows it.
 #[utoipa::path(
-    put,
+    post,
     path = "/api/v1/gate",
-    request_body = GateSettings,
+    request_body = NewGate,
     responses(
-        (status = NO_CONTENT, description = "The Gate is kept, and the tunnel is on its way up."),
+        (status = CREATED, body = GateView, description = "The command is ready, and the VPS is awaited."),
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
-        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "Something given will not do."),
+        (status = CONFLICT, body = ProblemBody, description = "A Gate is connected already."),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "The address or the port will not do."),
     )
 )]
-async fn connect_gate(
+async fn enrol_gate(
     State(state): State<AppState>,
     _: SignedIn,
-    Json(gate): Json<GateSettings>,
-) -> Result<StatusCode, Problem> {
+    Json(new): Json<NewGate>,
+) -> Result<(StatusCode, Json<GateView>), Problem> {
     let invalid = |sentence: &'static str| Err(Problem::Invalid(sentence.into()));
-    let address = gate.address.trim();
+    let address = new.address.trim();
     let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-');
     if address.is_empty() || address.len() > 253 || !address.chars().all(named) {
-        return invalid("A Gate's address is an IPv4 address or a name.");
+        return invalid("A VPS's address is an IPv4 address or a name.");
     }
-    // A WireGuard key is 32 bytes, which base64 writes as 44 characters.
-    let key =
-        |text: &str| text.len() == 44 && text.ends_with('=') && !text.contains(char::is_whitespace);
-    if !key(&gate.private_key) || !key(&gate.gate_public_key) || !key(&gate.preshared_key) {
-        return invalid("That is not a WireGuard key.");
-    }
-    // It is sent in a header, so it is held to what cannot end one.
-    if gate.token.is_empty() || !gate.token.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return invalid("A Gate's token is letters and digits.");
-    }
-    if gate.wg_port == 0 || gate.api_port == 0 {
+    let wg_port = new.wg_port.unwrap_or(WG_PORT);
+    if wg_port == 0 {
         return invalid("A port is a number from 1 to 65535.");
     }
-    sqlx::query(
-        "INSERT OR REPLACE INTO gate
-             (id, address, wg_port, private_key, gate_public_key, preshared_key, token, api_port, mode, created_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    // A Gate that is in use is not replaced by a slip of the hand.
+    if state
+        .tunnel
+        .gate()
+        .await?
+        .is_some_and(|gate| gate.join.is_none())
+    {
+        return Err(Problem::Conflict(
+            "A VPS is connected already. Disconnect it before connecting another.".into(),
+        ));
+    }
+
+    let (private_key, home_public_key) = new_keypair();
+    // The Gate's first key. Home keeps the public half, and the VPS is handed
+    // the private one inside the token.
+    let (gate_private_key, gate_public_key) = new_keypair();
+    let preshared_key = new_preshared_key();
+    let token = auth::new_token();
+    let now = auth::now();
+    let join = JoinToken {
+        private_key: gate_private_key,
+        home_public_key,
+        preshared_key: preshared_key.clone(),
+        token: token.clone(),
+        wg_port,
+        api_port: API_PORT,
+        gate_address: GATE,
+        home_address: HOME,
+        expires_at: (now + JOIN_SECONDS).unsigned_abs(),
+    };
+    {
+        let _busy = state.tunnel.busy.lock().await;
+        sqlx::query(
+            "INSERT OR REPLACE INTO gate
+                 (id, address, wg_port, api_port, private_key, gate_public_key, preshared_key,
+                  token, join_token, join_expires_at, mode, created_at)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'transparent', ?)",
+        )
+        .bind(address)
+        .bind(wg_port)
+        .bind(API_PORT)
+        .bind(private_key)
+        .bind(gate_public_key)
+        .bind(preshared_key)
+        .bind(token)
+        .bind(join.encode())
+        .bind(now + JOIN_SECONDS)
+        .bind(now)
+        .execute(&state.db)
+        .await?;
+        *lock(&state.tunnel.heard) = Heard::default();
+    }
+    state.tunnel.wake();
+    Ok((StatusCode::CREATED, Json(view(&state).await?)))
+}
+
+/// Finds out again whether servers see their players' own addresses, and puts
+/// the Gate in the mode that works. It takes a few seconds, during which new
+/// connections may be turned away.
+#[utoipa::path(
+    post,
+    path = "/api/v1/gate/check",
+    responses(
+        (status = OK, body = GateView),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = CONFLICT, body = ProblemBody, description = "No Gate is connected, or it cannot be reached."),
     )
-    .bind(address)
-    .bind(gate.wg_port)
-    .bind(&gate.private_key)
-    .bind(&gate.gate_public_key)
-    .bind(&gate.preshared_key)
-    .bind(&gate.token)
-    .bind(gate.api_port)
-    .bind(if gate.nat { "nat" } else { "transparent" })
-    .bind(auth::now())
-    .execute(&state.db)
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
+)]
+async fn check_gate(State(state): State<AppState>, _: SignedIn) -> Result<Json<GateView>, Problem> {
+    {
+        let tunnel = &state.tunnel;
+        let _busy = tunnel.busy.lock().await;
+        let Some(gate) = tunnel.gate().await?.filter(|gate| gate.join.is_none()) else {
+            return Err(Problem::Conflict("No VPS is connected.".into()));
+        };
+        let checked = async {
+            tunnel.set_up(&gate, &gate.keys).await?;
+            let mode = tunnel.check(&gate).await?;
+            tunnel.tell(&gate, mode).await
+        };
+        match checked.await {
+            Ok((status, latency)) => {
+                *lock(&tunnel.heard) = Heard {
+                    status: Some(status),
+                    latency_ms: Some(latency),
+                    problem: None,
+                };
+            }
+            Err(error) => {
+                return Err(Problem::Conflict(
+                    format!("That could not be checked: {error:#}.").into(),
+                ));
+            }
+        }
+    }
+    Ok(Json(view(&state).await?))
 }
 
 /// Forgets the Gate and takes home's end of the tunnel down. Servers go back
-/// to being reached on the home network only.
+/// to being reached on the home network only. The VPS keeps its Gate program
+/// until `homewarp-gate leave` is run there.
 #[utoipa::path(
     delete,
     path = "/api/v1/gate",
@@ -373,13 +966,22 @@ async fn disconnect_gate(
     State(state): State<AppState>,
     _: SignedIn,
 ) -> Result<StatusCode, Problem> {
-    sqlx::query("DELETE FROM gate").execute(&state.db).await?;
-    let was_up = lock(&state.tunnel.up_for).take().is_some();
-    *lock(&state.tunnel.heard) = None;
-    if was_up {
-        tokio::task::spawn_blocking(take_down)
-            .await
-            .map_err(|error| Problem::Internal(error.into()))?;
+    let tunnel = &state.tunnel;
+    let _busy = tunnel.busy.lock().await;
+    // The Gate is told to forward nothing more, if it can still be told.
+    let up = lock(&tunnel.up_for).is_some();
+    if let Some(gate) = tunnel
+        .gate()
+        .await?
+        .filter(|gate| up && gate.join.is_none())
+    {
+        let nothing = Desired {
+            generation: auth::now().unsigned_abs(),
+            ..Desired::default()
+        };
+        let _ = ask::<Status, _>(&gate, &gate.keys, "PUT", "/v1/state", Some(&nothing)).await;
     }
+    sqlx::query("DELETE FROM gate").execute(&state.db).await?;
+    tunnel.take_down().await;
     Ok(StatusCode::NO_CONTENT)
 }

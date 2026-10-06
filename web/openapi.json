@@ -8,7 +8,7 @@
   "paths": {
     "/api/v1/gate": {
       "get": {
-        "summary": "The Gate, and how the tunnel to it is doing.",
+        "summary": "The Gate, how the tunnel to it is doing, and every port it forwards. The\none request the Network page needs, and the one the Gate's pill asks again.",
         "operationId": "get_gate",
         "responses": {
           "200": {
@@ -32,22 +32,29 @@
           }
         }
       },
-      "put": {
-        "summary": "Connects this home to a Gate that is already running. The tunnel comes up\nwithin a few seconds; asking again shows how it went.",
-        "operationId": "connect_gate",
+      "post": {
+        "summary": "Starts connecting a VPS: makes the keys of a tunnel to it and answers with\nthe one command to run there. The command counts for a quarter of an hour.\nCore dials the VPS from now until then, and the tunnel is up within a few\nseconds of the command being run; asking for the Gate again shows it.",
+        "operationId": "enrol_gate",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GateSettings"
+                "$ref": "#/components/schemas/NewGate"
               }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "The Gate is kept, and the tunnel is on its way up."
+          "201": {
+            "description": "The command is ready, and the VPS is awaited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateView"
+                }
+              }
+            }
           },
           "401": {
             "description": "Nobody is signed in.",
@@ -59,8 +66,18 @@
               }
             }
           },
+          "409": {
+            "description": "A Gate is connected already.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "Something given will not do.",
+            "description": "The address or the port will not do.",
             "content": {
               "application/json": {
                 "schema": {
@@ -72,7 +89,7 @@
         }
       },
       "delete": {
-        "summary": "Forgets the Gate and takes home's end of the tunnel down. Servers go back\nto being reached on the home network only.",
+        "summary": "Forgets the Gate and takes home's end of the tunnel down. Servers go back\nto being reached on the home network only. The VPS keeps its Gate program\nuntil `homewarp-gate leave` is run there.",
         "operationId": "disconnect_gate",
         "responses": {
           "204": {
@@ -80,6 +97,43 @@
           },
           "401": {
             "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gate/check": {
+      "post": {
+        "summary": "Finds out again whether servers see their players' own addresses, and puts\nthe Gate in the mode that works. It takes a few seconds, during which new\nconnections may be turned away.",
+        "operationId": "check_gate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No Gate is connected, or it cannot be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -964,59 +1018,71 @@
         ],
         "description": "What a page that follows a server is sent, over its socket."
       },
-      "GateSettings": {
+      "ExtraPort": {
         "type": "object",
-        "description": "What it takes to reach a Gate that is already running.",
+        "description": "A further port of a server: voice chat, say, or the port it is queried on.",
         "required": [
-          "address",
-          "wg_port",
-          "private_key",
-          "gate_public_key",
-          "preshared_key",
-          "token",
-          "api_port"
+          "port"
         ],
         "properties": {
-          "address": {
-            "type": "string",
-            "description": "The VPS's public address or name."
-          },
-          "api_port": {
+          "port": {
             "type": "integer",
             "format": "int32",
             "minimum": 0
           },
-          "gate_public_key": {
-            "type": "string"
-          },
-          "nat": {
-            "type": "boolean",
-            "description": "Have servers see the Gate's address and not their players' own: for a\nhome where the way back through the tunnel cannot be made to work."
-          },
-          "preshared_key": {
-            "type": "string"
-          },
-          "private_key": {
-            "type": "string",
-            "description": "Home's own key for the tunnel, the public half of which the Gate has."
-          },
-          "token": {
-            "type": "string"
-          },
-          "wg_port": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
+          "protocol": {
+            "$ref": "#/components/schemas/PortProtocol"
           }
         }
       },
+      "ForwardedPort": {
+        "type": "object",
+        "description": "A port of a server, which a connected Gate forwards.",
+        "required": [
+          "port",
+          "protocol",
+          "server_id",
+          "server"
+        ],
+        "properties": {
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/PortProtocol"
+          },
+          "server": {
+            "type": "string",
+            "description": "The server's name."
+          },
+          "server_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "GateState": {
+        "type": "string",
+        "description": "Where a Gate stands.",
+        "enum": [
+          "none",
+          "waiting",
+          "expired",
+          "connected"
+        ]
+      },
       "GateView": {
         "type": "object",
-        "description": "The Gate as the Network page shows it.",
+        "description": "The Gate, and how the tunnel to it is doing.",
         "required": [
-          "connected",
-          "transparent",
-          "forwards"
+          "state",
+          "reachable",
+          "player_addresses",
+          "received_bytes",
+          "sent_bytes",
+          "ports"
         ],
         "properties": {
           "address": {
@@ -1026,14 +1092,20 @@
             ],
             "description": "The VPS's public address: what players type."
           },
-          "connected": {
-            "type": "boolean",
-            "description": "Whether a Gate has been connected at all."
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "While a VPS is awaited: what to run on it, as root."
           },
-          "forwards": {
-            "type": "integer",
-            "description": "How many ports the Gate forwards.",
-            "minimum": 0
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When that command stops counting, in Unix seconds."
           },
           "handshake_age_seconds": {
             "type": [
@@ -1041,8 +1113,35 @@
               "null"
             ],
             "format": "int64",
-            "description": "How long ago the Gate was heard from over the tunnel. None if it never was.",
+            "description": "How long ago the Gate last heard from home over the tunnel.",
             "minimum": 0
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long the way to the Gate and back takes, in milliseconds.",
+            "minimum": 0
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the check of that found, where it needs saying."
+          },
+          "player_addresses": {
+            "$ref": "#/components/schemas/PlayerAddresses",
+            "description": "Whether servers see their players' own addresses."
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ForwardedPort"
+            },
+            "description": "Every port of every server: what a connected Gate forwards."
           },
           "problem": {
             "type": [
@@ -1051,9 +1150,30 @@
             ],
             "description": "Why the Gate could not be reached, when it could not."
           },
-          "transparent": {
+          "reachable": {
             "type": "boolean",
-            "description": "Whether servers see their players' own addresses, and not the Gate's."
+            "description": "Whether the Gate answered through the tunnel when it was last asked."
+          },
+          "received_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Through the tunnel since the Gate last set it up, as the Gate counts.",
+            "minimum": 0
+          },
+          "sent_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/GateState"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version of the Gate program on the VPS."
           }
         }
       },
@@ -1099,6 +1219,28 @@
           }
         }
       },
+      "NewGate": {
+        "type": "object",
+        "description": "What it takes to start connecting a VPS.",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The VPS's public IPv4 address, or a name for it."
+          },
+          "wg_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The UDP port its WireGuard is to listen on. 51820 if none is given.",
+            "minimum": 0
+          }
+        }
+      },
       "NewServer": {
         "allOf": [
           {
@@ -1116,6 +1258,24 @@
               }
             }
           }
+        ]
+      },
+      "PlayerAddresses": {
+        "type": "string",
+        "description": "Whether servers see their players' own addresses, as the self-probe found it.",
+        "enum": [
+          "preserved",
+          "hidden",
+          "unchecked"
+        ]
+      },
+      "PortProtocol": {
+        "type": "string",
+        "description": "Which protocols a port is published for at home and forwarded for by the Gate.",
+        "enum": [
+          "tcp",
+          "udp",
+          "both"
         ]
       },
       "Power": {
@@ -1165,6 +1325,8 @@
           "memory_mb",
           "cpu_percent",
           "port",
+          "protocol",
+          "ports",
           "state",
           "console",
           "variables",
@@ -1209,7 +1371,18 @@
           "port": {
             "type": "integer",
             "format": "int64",
-            "description": "Where players reach it on the home machine, over TCP and UDP."
+            "description": "Where players reach it, on the home machine and on a connected VPS."
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtraPort"
+            },
+            "description": "The further ports it has."
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/PortProtocol",
+            "description": "Which protocols that port is open for."
           },
           "state": {
             "$ref": "#/components/schemas/State"
@@ -1274,8 +1447,19 @@
           "port": {
             "type": "integer",
             "format": "int32",
-            "description": "Published on the home machine, for TCP and UDP.",
+            "description": "Published on the home machine, and forwarded by a connected VPS.",
             "minimum": 0
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtraPort"
+            },
+            "description": "Further ports, each published and forwarded as the first is."
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/PortProtocol",
+            "description": "Which protocols that port is open for. Both, if none is named."
           },
           "variables": {
             "type": "object",

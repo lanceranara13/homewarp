@@ -24,6 +24,14 @@ use crate::Console;
 /// What an install script may use while it runs.
 const INSTALL_MEMORY: i64 = 1024 * 1024 * 1024;
 const PIDS: i64 = 512;
+/// Where servers look names up. Left to Docker they would ask the home's own
+/// resolver, which is as a rule the router, and a server is kept from every
+/// address on the home network. Wings gives its servers these two as well.
+const RESOLVERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
+
+fn resolvers() -> Option<Vec<String>> {
+    Some(RESOLVERS.map(str::to_owned).to_vec())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -278,6 +286,7 @@ impl Engine {
                     format!("{}:/mnt/install:ro", install.scratch.display()),
                 ]),
                 network_mode: Some(server.network.clone()),
+                dns: resolvers(),
                 memory: Some(INSTALL_MEMORY),
                 memory_swap: Some(INSTALL_MEMORY),
                 pids_limit: Some(PIDS),
@@ -367,6 +376,7 @@ impl Engine {
                 binds: Some(vec![format!("{}:/home/container", server.dir.display())]),
                 port_bindings: Some(published),
                 network_mode: Some(server.network.clone()),
+                dns: resolvers(),
                 memory: Some(server.memory_limit()),
                 memory_swap: Some(server.memory_limit()),
                 // Docker counts in billionths of a core.

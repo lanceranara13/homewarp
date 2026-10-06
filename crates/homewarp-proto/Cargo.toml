@@ -1,6 +1,6 @@
 [package]
 name = "homewarp-proto"
-description = "What Core and the Gate say to each other: desired state and status. Types only."
+description = "What Core and the Gate say to each other: desired state, status and the join token. Types only."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true

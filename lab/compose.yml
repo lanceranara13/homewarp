@@ -1,5 +1,6 @@
 # The lab's parties (see run.sh). Both networks are internal: nothing here can
 # reach the homelab's LAN or the real internet, and nothing outside can reach in.
+# The lab does reach images' packages while it is built, and nothing after.
 name: homewarp-lab
 
 x-node: &node
@@ -33,22 +34,36 @@ services:
     command: ["/lab/listen.sh"]
     networks: { homelan: { ipv4_address: 192.168.50.30 } }
 
-  # The home server: a real Docker daemon in its own network namespace.
+  # The home's line: one public address, with the home LAN hidden behind it.
+  router:
+    <<: *node
+    depends_on: [gate]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    networks:
+      inet: { ipv4_address: 203.0.113.20 }
+      homelan: { ipv4_address: 192.168.50.2 }
+
+  # The home server: a real Docker daemon in its own network namespace, on the
+  # home LAN only. run.sh gives it the router as its way out.
   home:
     build: { context: ., dockerfile: home.Dockerfile }
     privileged: true
     stop_grace_period: 5s
     command: ["dockerd", "--host=unix:///var/run/docker.sock", "--firewall-backend=${HOME_FW:-iptables}"]
     volumes: [home-docker:/var/lib/docker]
-    networks:
-      inet: { ipv4_address: 203.0.113.20 }
-      homelan: { ipv4_address: 192.168.50.20 }
+    networks: { homelan: { ipv4_address: 192.168.50.20 } }
 
 networks:
   inet:
     internal: true
     ipam: { config: [{ subnet: 203.0.113.0/24 }] }
+  # Not a bridge: on an internal bridge Docker drops every packet whose address
+  # is not the bridge's own subnet's, and what home sends to the internet by way
+  # of the router is just that. An internal macvlan network is a wire between
+  # its containers and nothing else, with no firewall of the homelab's on it.
   homelan:
+    driver: macvlan
     internal: true
     ipam: { config: [{ subnet: 192.168.50.0/24 }] }
 

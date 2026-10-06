@@ -27,7 +27,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
 use utoipa::ToSchema;
 
-use crate::servers;
+use crate::servers::{self, ExtraPort, PortProtocol};
 
 /// The bridge servers sit on. Its subnet is outside what Docker hands out by itself.
 const NETWORK: &str = "homewarp-br";
@@ -141,6 +141,10 @@ pub(crate) struct Definition {
     pub(crate) memory_mb: u32,
     pub(crate) cpu_percent: u32,
     pub(crate) port: u16,
+    /// Which protocols that port is open for.
+    pub(crate) protocol: PortProtocol,
+    /// The further ports the server has.
+    pub(crate) ports: Vec<ExtraPort>,
     pub(crate) variables: Vec<(String, String)>,
     pub(crate) eula: bool,
     pub(crate) installed: bool,
@@ -736,6 +740,23 @@ impl Runtime {
     /// The server as Docker needs to know it.
     fn spec(&self, server: &Definition) -> Spec {
         let host_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let first = ExtraPort {
+            port: server.port,
+            protocol: server.protocol,
+        };
+        let mut ports = Vec::new();
+        for one in std::iter::once(&first).chain(&server.ports) {
+            let protocols: &[Protocol] = match one.protocol {
+                PortProtocol::Tcp => &[Protocol::Tcp],
+                PortProtocol::Udp => &[Protocol::Udp],
+                PortProtocol::Both => &[Protocol::Tcp, Protocol::Udp],
+            };
+            ports.extend(protocols.iter().map(|protocol| Port {
+                host_ip,
+                port: one.port,
+                protocol: *protocol,
+            }));
+        }
         Spec {
             id: server.uuid.clone(),
             dir: self.data.join("servers").join(&server.uuid),
@@ -744,14 +765,7 @@ impl Runtime {
             variables: server.variables.clone(),
             memory_mb: server.memory_mb,
             cpu_percent: server.cpu_percent,
-            // An egg does not say which protocol its port speaks, so both.
-            ports: [Protocol::Tcp, Protocol::Udp]
-                .map(|protocol| Port {
-                    host_ip,
-                    port: server.port,
-                    protocol,
-                })
-                .to_vec(),
+            ports,
             uid: USER,
             gid: USER,
             network: NETWORK.to_owned(),
