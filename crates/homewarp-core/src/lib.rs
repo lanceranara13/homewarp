@@ -9,6 +9,7 @@ mod clock;
 mod db;
 mod door;
 mod files;
+mod guard;
 mod limits;
 mod panel;
 mod passkeys;

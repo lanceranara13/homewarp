@@ -328,6 +328,61 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   got=$(burst)
   if [ "$got" -ge 18 ]; then ok "with which twenty at once get through as before ($got)"; else fail "of twenty at once, only $got got through after the limit was set back"; fi
 
+  echo "== the VPS itself: hardened on trial, and undone by itself unless it is kept"
+  guard_is() { core GET /gate/guard | field "$1"; }
+  guard_has() {  # which list, which kind
+    core GET /gate/guard | python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]][sys.argv[2]])' "$1" "$2"
+  }
+  # Something of the VPS's own that listens before it is hardened: an SSH of its, say.
+  dc exec -d gate sh -c 'SVC=2301 /lab/listen.sh'
+  sleep 1
+  check "control: what listens on the VPS is reached" "$(reach client "$GATE_IP" 2301)" "reached $CLIENT_IP"
+  check "there is no guard, and the Gate says what listens there" "$(guard_is state) $(guard_has listening tcp)" "off [2301, $API_PORT]"
+  core PUT /gate/guard >/dev/null
+  check "hardened, on trial" "$(guard_is state)" "trial"
+  check "open is what was listening, and the tunnel's own port" "$(guard_has open tcp) $(guard_has open udp)" "[2301, $API_PORT] [51820]"
+  # And something that begins to listen after.
+  dc exec -d gate sh -c 'SVC=2302 /lab/listen.sh'
+  sleep 1
+  check "what was listening is still reached" "$(reach client "$GATE_IP" 2301)" "reached $CLIENT_IP"
+  blocked "what began to listen afterwards is not" client "$GATE_IP" 2302
+  check "and the panel says which that is" "$(guard_has shut tcp)" "[2302]"
+  check "players get through as before" "$(seen tcp)" "$CLIENT_IP"
+  check "and so does home, to its Gate" "$(gate_is reachable)" "True"
+  check "the VPS can still be pinged" "$(dc exec -T client sh -c "ping -c 1 -W 2 $GATE_IP >/dev/null 2>&1 && echo yes")" "yes"
+  # Nobody keeps it: its minute runs out.
+  for _ in $(seq 80); do [ "$(guard_is state)" = off ] && break; sleep 1; done
+  check "not kept, it is undone by the VPS itself within its minute" "$(guard_is state)" "off"
+  check "and what it shut is reached again" "$(reach client "$GATE_IP" 2302)" "reached $CLIENT_IP"
+  check "nothing of it is written down" "$(dc exec -T gate sh -c 'ls /run/hw | grep -c guard' || true)" "0"
+
+  echo "== the VPS itself: kept"
+  core PUT /gate/guard >/dev/null
+  core POST /gate/guard/keep >/dev/null
+  check "kept" "$(guard_is state) $(guard_has open tcp)" "kept [2301, 2302, $API_PORT]"
+  dc exec -d gate sh -c 'SVC=2303 /lab/listen.sh'
+  sleep 1
+  blocked "what begins to listen now is shut" client "$GATE_IP" 2303
+  if [ "$(guard_is dropped)" -ge 1 ]; then ok "the Gate counts what it drops: $(guard_is dropped) packets"; else fail "the Gate counted nothing dropped"; fi
+  # Its minute over, it is still there.
+  dc exec -T gate pkill homewarp-gate
+  sleep 1
+  start_gate
+  for _ in $(seq 20); do [ "$(guard_is state 2>/dev/null)" = kept ] && break; sleep 1; done
+  check "started again, the Gate comes back with its guard" "$(guard_is state)" "kept"
+  blocked "and what it shut is still shut" client "$GATE_IP" 2303
+  check "what is open is still reached" "$(reach client "$GATE_IP" 2301)" "reached $CLIENT_IP"
+  # A certificate's question is asked on port 80, where nothing listened when the VPS was hardened.
+  check "the Gate takes an answer to a certificate's question" "$(gate_asked PUT "/v1/challenge/guarded-Token" '{"answer":"guarded-Token.mark"}')" "200"
+  check "and the guard lets whoever asks in to it" "$(dc exec -T client curl -s -m 5 "http://$GATE_IP/.well-known/acme-challenge/guarded-Token")" "guarded-Token.mark"
+  check "the answer taken away" "$(gate_asked DELETE "/v1/challenge/guarded-Token")" "204"
+  check "the port is shut again" "$(status client "http://$GATE_IP/.well-known/acme-challenge/guarded-Token")" "000"
+  check "hardened again, what listens now is open" "$(core PUT /gate/guard | field state) $(reach client "$GATE_IP" 2303)" "trial reached $CLIENT_IP"
+  core DELETE /gate/guard >/dev/null
+  check "the guard taken away, on trial as it was" "$(guard_is state)" "off"
+  dc exec -T gate sh -c 'pkill -f "TCP4-LISTEN:230"; true'
+  check "and nothing of it is left in the Gate's rules" "$(dc exec -T gate nft list table inet homewarp | grep -c guard || true)" "0"
+
   echo "== control: without the reply mark nothing comes back, so the return path is what carries it"
   dc exec -T home nft flush chain inet homewarp mark_in
   dc exec -T home nft add rule inet homewarp mark_in iifname homewarp0 ct state new ct mark set 0x4857

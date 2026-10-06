@@ -35,6 +35,7 @@ export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
 type SettingsChange = components['schemas']['SettingsChange']
 export type Panel = components['schemas']['PanelView']
+export type VpsGuard = components['schemas']['VpsGuard']
 export type Passkeys = components['schemas']['Passkeys']
 export type MakeOptions = components['schemas']['MakeOptions']
 export type NewPasskey = components['schemas']['NewPasskey']
@@ -511,6 +512,30 @@ export async function checkGate(): Promise<Gate> {
 export async function disconnectGate(): Promise<void> {
   const { error, response } = await signedIn(() => api.DELETE('/api/v1/gate'))
   if (!response.ok) fail(error)
+}
+
+/** The guard on the VPS itself, and what is listening there. Only the owner may ask. */
+export async function getGuard(): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/gate/guard'))
+  return data ?? fail(error)
+}
+
+/** Hardens the VPS, on trial: it is undone by itself in a minute unless it is kept. */
+export async function hardenVps(): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/gate/guard'))
+  return data ?? fail(error)
+}
+
+/** Keeps a guard that is on trial. */
+export async function keepGuard(): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/gate/guard/keep'))
+  return data ?? fail(error)
+}
+
+/** Takes the guard off the VPS, kept or on trial. */
+export async function unhardenVps(): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.DELETE('/api/v1/gate/guard'))
+  return data ?? fail(error)
 }
 
 /** The name the panel is reached by from the internet, and the certificate for it. Only the owner may ask. */

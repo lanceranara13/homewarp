@@ -9,6 +9,7 @@ import { bytes } from '../format'
 import { EVERY_GATE, addressOf, gateLook, gateQuery, isChanging } from '../gate'
 import { useOwner } from '../session'
 import { PanelAddress } from './PanelAddress'
+import { VpsGuard } from './VpsGuard'
 
 const PROTOCOLS: Record<PortProtocol, string> = { tcp: 'TCP', udp: 'UDP', both: 'TCP and UDP' }
 
@@ -97,6 +98,7 @@ export function NetworkPage() {
         )}
         <Ports gate={gate} />
         {owner && <PanelAddress gate={gate} />}
+        {owner && connected && gate.reachable && <VpsGuard />}
         {connected && <Disconnect address={gate.address ?? ''} />}
       </main>
     </>

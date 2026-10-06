@@ -152,6 +152,45 @@ pub struct Answering {
     pub directory: String,
 }
 
+/// What stays open on the VPS itself while it is guarded: the ports that
+/// something there listens on, for anyone on the internet to reach.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Open {
+    #[serde(default)]
+    pub tcp: Vec<u16>,
+    #[serde(default)]
+    pub udp: Vec<u16>,
+}
+
+/// Where the guard on the VPS itself stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardState {
+    /// There is none: what the VPS lets in is the VPS's own affair.
+    Off,
+    /// In place for a minute, and undone by the Gate itself unless it is told
+    /// within that minute to stay (`POST /v1/guard/keep`).
+    Trial,
+    /// In place and written down: a restart comes back with it.
+    Kept,
+}
+
+/// The guard on the VPS itself, and what is listening there (`GET /v1/guard`).
+/// `PUT /v1/guard` with an [`Open`] puts one in place on trial, and
+/// `DELETE /v1/guard` takes it away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guard {
+    pub state: GuardState,
+    /// What it keeps open. Nothing where there is none.
+    pub open: Open,
+    /// On trial: how many seconds are left of the minute.
+    pub seconds_left: Option<u64>,
+    /// What is listening on the VPS now, where the internet can reach it.
+    pub listening: Open,
+    /// How many packets it has dropped since it was put in place.
+    pub dropped: u64,
+}
+
 /// What a VPS is handed to become a home's Gate (PLAN.md §5.5): one line of
 /// text, made by Core and given to `homewarp-gate join`.
 ///

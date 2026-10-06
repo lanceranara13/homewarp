@@ -17,6 +17,7 @@
 //! `homewarp-gate join <token>` enrols a VPS, `homewarp-gate leave` undoes
 //! that, and `homewarp-gate run` is what the service it installs runs.
 
+mod guard;
 mod install;
 
 use std::{
@@ -37,8 +38,8 @@ use axum::{
     routing::{get, post, put},
 };
 use homewarp_net::{
-    Link, ProbeForward, apply, bring_up, counted, gate_ruleset, gate_ruleset_uncounted, has_table,
-    heard, new_keypair,
+    Link, ProbeForward, apply, bring_up, counted, gate_ruleset, gate_ruleset_uncounted, guarded,
+    has_table, heard, new_keypair,
 };
 use homewarp_proto::{
     Answer, AnsweredBy, Answering, Desired, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status,
@@ -135,6 +136,8 @@ struct Gate {
     probe: Mutex<Option<Probing>>,
     /// What serves the answers on port 80, while this Gate does that itself.
     answering: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The guard on the VPS itself, where its owner has asked for one.
+    guard: Mutex<Option<guard::Guarding>>,
 }
 
 fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -150,7 +153,20 @@ impl Gate {
             true => gate_ruleset,
             false => gate_ruleset_uncounted,
         };
-        Ok(rules(&config.wan, config.home_address, desired, probe)?)
+        let rules = rules(&config.wan, config.home_address, desired, probe)?;
+        let Some(mut open) = lock(&self.guard).as_ref().map(|guard| guard.open.clone()) else {
+            return Ok(rules);
+        };
+        // While this Gate answers a certificate authority's questions itself,
+        // the port it answers on is open, whatever was listening when the
+        // guard was asked for.
+        if lock(&self.answering)
+            .as_ref()
+            .is_some_and(|serving| !serving.is_finished())
+        {
+            open.tcp.push(80);
+        }
+        Ok(guarded(&rules, &config.wan, &open)?)
     }
 
     /// Puts the table for `desired` in the kernel: with a count of what goes
@@ -246,6 +262,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
         desired.generation
     );
 
+    let kept = guard::kept(&dir)?;
     let at = SocketAddr::from((config.address, config.api_port));
     let gate = Arc::new(Gate {
         dir,
@@ -254,6 +271,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
         next: Mutex::default(),
         probe: Mutex::default(),
         answering: Mutex::default(),
+        guard: Mutex::new(kept),
     });
     // Answers that a Gate which stopped left behind are to questions long over.
     let _ = fs::remove_dir_all(CHALLENGES);
@@ -267,6 +285,11 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
         .route("/v1/rotate/commit", post(commit))
         .route("/v1/probe", post(probe))
         .route("/v1/challenge/{token}", put(answer).delete(unanswer))
+        .route(
+            "/v1/guard",
+            get(guard::get).put(guard::put).delete(guard::remove),
+        )
+        .route("/v1/guard/keep", post(guard::keep))
         .with_state(gate);
     // The kernel is left as it is on the way out: forwarding does not stop
     // because this process does.
@@ -622,8 +645,13 @@ async fn answer(
     for open in [RUN, CHALLENGES] {
         fs::set_permissions(open, fs::Permissions::from_mode(0o755)).map_err(failed)?;
     }
+    let by = serve_answers(&gate);
+    // A guard on the VPS has to let the authority in to what this Gate now serves.
+    if by == AnsweredBy::Gate && lock(&gate.guard).is_some() {
+        gate.apply_again().map_err(failed)?;
+    }
     Ok(Json(Answering {
-        by: serve_answers(&gate),
+        by,
         directory: CHALLENGES.to_owned(),
     }))
 }
@@ -646,8 +674,16 @@ async fn unanswer(
         _ => {}
     }
     let none_left = fs::read_dir(CHALLENGES).map_or(true, |mut answers| answers.next().is_none());
-    if none_left && let Some(serving) = lock(&gate.answering).take() {
+    let stopped = match none_left {
+        true => lock(&gate.answering).take(),
+        false => None,
+    };
+    if let Some(serving) = stopped {
         serving.abort();
+        // And a guard shuts the port again.
+        if lock(&gate.guard).is_some() {
+            gate.apply_again().map_err(failed)?;
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }

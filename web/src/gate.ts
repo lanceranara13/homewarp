@@ -1,6 +1,6 @@
 import { queryOptions, useQuery } from '@tanstack/react-query'
 
-import { getGate, getPanel, type Gate } from './api/client'
+import { getGate, getGuard, getPanel, type Gate } from './api/client'
 
 /**
  * How often an open page asks after the Gate, in milliseconds: as often as
@@ -21,6 +21,13 @@ export const panelQuery = queryOptions({
   queryKey: ['panel'],
   queryFn: getPanel,
   staleTime: 2_000,
+})
+
+/** The guard on the VPS itself. Only the owner's page asks, and only while a VPS is connected. */
+export const guardQuery = queryOptions({
+  queryKey: ['gate', 'guard'],
+  queryFn: getGuard,
+  staleTime: 1_000,
 })
 
 /** Whether the Gate is in the middle of something that the next few seconds will change. */

@@ -620,6 +620,194 @@
         }
       }
     },
+    "/api/v1/gate/guard": {
+      "get": {
+        "summary": "The guard on the VPS itself, and what is listening there.",
+        "operationId": "get_guard",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VpsGuard"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No VPS is connected, or its Gate cannot be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Hardens the VPS: from now on, what arrives at the VPS itself from the\ninternet is dropped, but for what is listening there at this moment, and\nnew SSH connections from one address are held to a few a minute. What is\nforwarded to servers is not touched.",
+        "description": "It is on trial. In a minute the VPS undoes it by itself, unless it has been\nkept by then.",
+        "operationId": "harden",
+        "responses": {
+          "200": {
+            "description": "In place, on trial.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VpsGuard"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No VPS is connected, or its Gate cannot be reached or would not.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Takes the guard away, kept or on trial.",
+        "operationId": "unharden",
+        "responses": {
+          "200": {
+            "description": "There is no guard now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VpsGuard"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No VPS is connected, or its Gate cannot be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gate/guard/keep": {
+      "post": {
+        "summary": "Keeps a guard that is on trial. The VPS writes it down, and comes back\nwith it after a restart.",
+        "operationId": "keep_guard",
+        "responses": {
+          "200": {
+            "description": "It stays.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VpsGuard"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There is no guard to keep: its minute was over. Or the Gate cannot be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "health",
@@ -4892,6 +5080,32 @@
           "both"
         ]
       },
+      "Ports": {
+        "type": "object",
+        "description": "Ports, by the two kinds there are.",
+        "required": [
+          "tcp",
+          "udp"
+        ],
+        "properties": {
+          "tcp": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "udp": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        }
+      },
       "Power": {
         "type": "string",
         "description": "What a person can ask of a server.",
@@ -5782,6 +5996,58 @@
             "type": "string"
           }
         }
+      },
+      "VpsGuard": {
+        "type": "object",
+        "description": "The guard on the VPS itself.",
+        "required": [
+          "state",
+          "open",
+          "listening",
+          "shut",
+          "dropped"
+        ],
+        "properties": {
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many packets the guard has dropped since it was put in place.",
+            "minimum": 0
+          },
+          "listening": {
+            "$ref": "#/components/schemas/Ports",
+            "description": "What is listening on the VPS now, where the internet can reach it.\nThis is what hardening would keep open."
+          },
+          "open": {
+            "$ref": "#/components/schemas/Ports",
+            "description": "What it keeps open on the VPS itself. Nothing where there is no guard."
+          },
+          "seconds_left": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "On trial: how many seconds are left before it is undone by itself.",
+            "minimum": 0
+          },
+          "shut": {
+            "$ref": "#/components/schemas/Ports",
+            "description": "What is listening now and is shut all the same: it began to listen\nafter the guard was put in place."
+          },
+          "state": {
+            "$ref": "#/components/schemas/VpsGuardState"
+          }
+        }
+      },
+      "VpsGuardState": {
+        "type": "string",
+        "description": "Where the guard stands.",
+        "enum": [
+          "off",
+          "trial",
+          "kept"
+        ]
       }
     }
   }

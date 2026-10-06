@@ -28,8 +28,8 @@ use homewarp_net::{
     new_keypair, new_preshared_key, probe_packets, route_replies, take_down,
 };
 use homewarp_proto::{
-    Answer, Answering, Desired, Forward, JoinToken, Mode, Probe, ProbeRequest, Protocol, Rotate,
-    Rotated, Status, Through,
+    Answer, Answering, Desired, Forward, Guard, JoinToken, Mode, Open, Probe, ProbeRequest,
+    Protocol, Rotate, Rotated, Status, Through,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::SqlitePool;
@@ -242,13 +242,32 @@ impl Tunnel {
         self.gate()
             .await?
             .filter(|gate| gate.join.is_none())
-            .context("No VPS is connected, and the panel's name leads to one. Connect a VPS first")
+            .context("No VPS is connected")
+    }
+
+    /// Asks the Gate how the guard on the VPS itself stands, or to change it.
+    pub(crate) async fn guard(
+        &self,
+        method: &str,
+        path: &str,
+        open: Option<&Open>,
+    ) -> anyhow::Result<Guard> {
+        let gate = self.connected().await?;
+        match ask(&gate, &gate.keys, method, path, open).await {
+            Ok((guard, _)) => Ok(guard),
+            Err(Unanswered::Refused(404 | 405, _)) => bail!(
+                "The Gate on the VPS is older than this Homewarp and has no guard. Put the new one there"
+            ),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Has the Gate put the answer to a certificate authority's question
     /// where the VPS's port 80 serves it.
     pub(crate) async fn answer(&self, token: &str, answer: &str) -> anyhow::Result<Answering> {
-        let gate = self.connected().await?;
+        let gate = self.connected().await.context(
+            "The panel's name leads to a VPS, where a certificate's question is answered",
+        )?;
         let asked = Answer {
             answer: answer.to_owned(),
         };
@@ -378,10 +397,23 @@ impl Tunnel {
     /// of it went through while no Core was listening is not known.
     async fn count(&self, traffic: &[Through]) -> anyhow::Result<()> {
         let hour = auth::now() / 3600;
+        // Only the ports this Core asked to have forwarded. A Gate is not
+        // taken at its word for which those are: one that named every port
+        // there is would be given a row for each, every hour.
+        let asked: Vec<(u16, Protocol)> = lock(&self.told)
+            .as_ref()
+            .map(|told| {
+                let forwards = told.forwards.iter();
+                forwards
+                    .map(|forward| (forward.port, forward.protocol))
+                    .collect()
+            })
+            .unwrap_or_default();
         let more: Vec<(u16, &str, u64)> = {
             let mut counted = lock(&self.counted);
             traffic
                 .iter()
+                .filter(|now| asked.contains(&(now.port, now.protocol)))
                 .filter_map(|now| {
                     let more = match counted.insert((now.port, now.protocol), now.bytes) {
                         None => 0,
@@ -1208,4 +1240,44 @@ async fn disconnect_gate(
     tunnel.take_down().await;
     audit::record(&state.db, &who, None, "gate.disconnect", "").await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use homewarp_proto::{Desired, Forward, Protocol, Through};
+
+    use super::{Tunnel, lock};
+    use crate::db;
+
+    #[tokio::test]
+    async fn what_a_gate_counted_is_added_up_for_the_ports_it_was_asked_to_forward_and_no_others() {
+        let files = tempfile::tempdir().unwrap();
+        let db = db::open(&files.path().join("homewarp.db")).await.unwrap();
+        let tunnel = Tunnel::new(db.clone(), None);
+        *lock(&tunnel.told) = Some(Desired {
+            generation: 1,
+            forwards: vec![Forward {
+                port: 25565,
+                protocol: Protocol::Tcp,
+            }],
+            ..Desired::default()
+        });
+        let through = |port, bytes| Through {
+            port,
+            protocol: Protocol::Tcp,
+            bytes,
+        };
+        // The first count of a port is where counting starts from.
+        tunnel.count(&[through(25565, 1000)]).await.unwrap();
+        // A Gate that says a great deal went through ports nobody asked it for.
+        let mut said: Vec<Through> = (1..=2000).map(|port| through(port, 5000)).collect();
+        said.push(through(25565, 1400));
+        tunnel.count(&said).await.unwrap();
+        tunnel.count(&said).await.unwrap();
+        let rows: Vec<(u16, i64)> = sqlx::query_as("SELECT port, bytes FROM traffic")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows, [(25565, 400)]);
+    }
 }

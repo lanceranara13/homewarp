@@ -18,7 +18,7 @@ use defguard_wireguard_rs::{
     InterfaceConfiguration, Kernel, WGApi, WireguardInterfaceApi, key::Key, net::IpAddrMask,
     peer::Peer,
 };
-use homewarp_proto::{Desired, Mode, NEW_PER_SECOND, Protocol, Through};
+use homewarp_proto::{Desired, Mode, NEW_PER_SECOND, Open, Protocol, Through};
 
 /// What both ends call the tunnel's interface.
 pub const INTERFACE: &str = "homewarp0";
@@ -188,6 +188,73 @@ table inet homewarp {{
     )
     .expect("writing to a String does not fail");
     Ok(rules)
+}
+
+/// How many new SSH connections a minute one address may open to a guarded
+/// VPS. A person opens a few; what guesses at passwords opens thousands.
+const SSH_PER_MINUTE: u32 = 12;
+
+/// The Gate's table with a guard on the VPS itself added to it (PLAN.md §6):
+/// what arrives at the VPS itself from the internet is dropped, but for the
+/// ports in `open`, and new SSH connections from one address are held to a
+/// few a minute. `rules` is what [`gate_ruleset`] made.
+///
+/// Only what arrives on `wan` for the machine itself is looked at. What is
+/// forwarded to servers never comes this way; nor does what arrives by the
+/// tunnel, or by any other interface the VPS has. A connection that is open
+/// stays open, the machine can still be pinged, and it can still be given an
+/// address by whoever gives it one.
+pub fn guarded(rules: &str, wan: &str, open: &Open) -> Result<String, Error> {
+    if !named_well(wan) {
+        return Err(Error::Interface(wan.to_owned()));
+    }
+    let elements = |ports: &[u16]| {
+        let mut ports = ports.to_vec();
+        ports.sort_unstable();
+        ports.dedup();
+        let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+        // nft has no way to write a list of nothing.
+        match ports.is_empty() {
+            true => String::new(),
+            false => format!(" elements = {{ {} }}", ports.join(", ")),
+        }
+    };
+    let guard = format!(
+        r#"
+  set guard_tcp {{ type inet_service;{tcp} }}
+  set guard_udp {{ type inet_service;{udp} }}
+  set guard_ssh {{ type ipv4_addr; size 65535; flags dynamic,timeout; timeout 10m; }}
+  set guard_ssh6 {{ type ipv6_addr; size 65535; flags dynamic,timeout; timeout 10m; }}
+  counter guard_dropped {{ packets 0 bytes 0 }}
+
+  chain guard {{
+    type filter hook input priority filter - 5; policy accept;
+    iifname != "{wan}" accept
+    ct state established,related accept
+    meta l4proto {{ icmp, ipv6-icmp }} accept
+    udp dport {{ 68, 546 }} accept
+    tcp dport 22 ct state new add @guard_ssh {{ ip saddr limit rate over {SSH_PER_MINUTE}/minute burst {SSH_PER_MINUTE} packets }} counter name "guard_dropped" drop
+    tcp dport 22 ct state new add @guard_ssh6 {{ ip6 saddr limit rate over {SSH_PER_MINUTE}/minute burst {SSH_PER_MINUTE} packets }} counter name "guard_dropped" drop
+    tcp dport @guard_tcp accept
+    udp dport @guard_udp accept
+    counter name "guard_dropped" drop
+  }}
+"#,
+        tcp = elements(&open.tcp),
+        udp = elements(&open.udp),
+    );
+    // Put in ahead of the brace that closes the table.
+    let (table, _) = rules
+        .trim_end()
+        .rsplit_once('}')
+        .ok_or_else(|| Error::Refused("there is no table to add a guard to".to_owned()))?;
+    Ok(format!("{table}{guard}}}\n"))
+}
+
+/// How many packets the guard of [`guarded`] has dropped since the table was
+/// last put in the kernel. None where there is no guard.
+pub fn guard_dropped() -> u64 {
+    counter("guard_dropped").unwrap_or(0)
 }
 
 /// One end of the tunnel, as the kernel is to have it.
@@ -376,7 +443,7 @@ table inet homewarp {{{counter}
     type filter hook forward priority filter - 1; policy accept;
     iifname "homewarp0" oifname "{bridge}" ct status dnat accept{panel}
     iifname "homewarp0" counter drop
-    iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
+    iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
     oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
   }}
 }}
@@ -473,7 +540,7 @@ table inet homewarp_keep {{
   }}
   chain forward {{
     type filter hook forward priority filter - 1; policy accept;
-    iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
+    iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
   }}
 }}
 "#
@@ -494,8 +561,13 @@ pub fn has_keep_table() -> bool {
 /// How many packets have arrived from the tunnel for the port of the probe
 /// that [`home_ruleset`] was last given.
 pub fn probe_packets() -> Result<u64, Error> {
+    counter("probe")
+}
+
+/// How many packets a counter of this end's table has counted.
+fn counter(name: &str) -> Result<u64, Error> {
     let done = Command::new("nft")
-        .args(["list", "counter", "inet", "homewarp", "probe"])
+        .args(["list", "counter", "inet", "homewarp", name])
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .output()?;
@@ -636,6 +708,59 @@ mod tests {
                 .collect(),
             new_per_second: None,
         }
+    }
+
+    #[test]
+    fn a_guard_shuts_the_vps_itself_but_for_what_is_open_and_touches_nothing_else() {
+        use homewarp_proto::Open;
+
+        let plain = gate_ruleset(
+            "eth0",
+            HOME,
+            &desired(Mode::Transparent, &[(25565, Protocol::Tcp)]),
+            None,
+        )
+        .unwrap();
+        let open = Open {
+            tcp: vec![443, 22, 80, 80],
+            udp: vec![51820],
+        };
+        let guarded = super::guarded(&plain, "eth0", &open).unwrap();
+        // Everything that was there is there still, and the table is whole.
+        assert!(guarded.starts_with(plain.trim_end().strip_suffix('}').unwrap()));
+        assert_eq!(guarded.matches('{').count(), guarded.matches('}').count());
+        assert!(guarded.ends_with("}\n"));
+        assert!(
+            guarded.contains("set guard_tcp { type inet_service; elements = { 22, 80, 443 } }")
+        );
+        assert!(guarded.contains("set guard_udp { type inet_service; elements = { 51820 } }"));
+        // Only what arrives on the public interface for the machine itself.
+        let chain = guarded.split_once("chain guard {").unwrap().1;
+        let order = [
+            "type filter hook input priority filter - 5; policy accept;",
+            "iifname != \"eth0\" accept",
+            "ct state established,related accept",
+            "meta l4proto { icmp, ipv6-icmp } accept",
+            "tcp dport 22 ct state new add @guard_ssh { ip saddr limit rate over 12/minute burst 12 packets }",
+            "tcp dport @guard_tcp accept",
+            "udp dport @guard_udp accept",
+            "counter name \"guard_dropped\" drop\n  }",
+        ];
+        let mut rest = chain;
+        for rule in order {
+            let (_, after) = rest
+                .split_once(rule)
+                .unwrap_or_else(|| panic!("{rule} is missing or out of order"));
+            rest = after;
+        }
+        // Nothing open at all is still a table nft reads.
+        let shut = super::guarded(&plain, "eth0", &Open::default()).unwrap();
+        assert!(shut.contains("set guard_tcp { type inet_service; }"));
+        assert!(matches!(
+            super::guarded(&plain, "eth0\" accept; #", &open),
+            Err(Error::Interface(_))
+        ));
+        assert!(super::guarded("no table here", "eth0", &open).is_err());
     }
 
     #[test]
@@ -822,7 +947,7 @@ mod tests {
         assert!(rules.starts_with("table inet homewarp_keep\ndelete table inet homewarp_keep\n"));
         assert!(!rules.contains("homewarp0"));
         assert!(rules.contains(
-            "iifname \"homewarp-br\" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ct state new counter drop"
+            "iifname \"homewarp-br\" ip daddr { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } ct state new counter drop"
         ));
         assert!(rules.contains("iifname \"homewarp-br\" ct state established,related accept"));
         assert!(rules.contains("iifname \"homewarp-br\" counter drop"));
