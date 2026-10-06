@@ -25,7 +25,7 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    accounts, audit, auth, backups,
+    accounts, audit, auth, backups, catalogue,
     door::Client,
     files, guard,
     limits::Limiter,
@@ -172,6 +172,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(panel::routes())
         .merge(passkeys::routes())
         .merge(guard::routes())
+        .merge(catalogue::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.

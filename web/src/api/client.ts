@@ -7,6 +7,7 @@ import type { components, paths } from './schema'
 export type Session = components['schemas']['Session']
 export type TemplateSummary = components['schemas']['TemplateSummary']
 export type Template = components['schemas']['Template']
+export type Catalogue = components['schemas']['Catalogue']
 export type ServerSummary = components['schemas']['ServerSummary']
 export type Server = components['schemas']['Server']
 export type ServerState = components['schemas']['State']
@@ -181,6 +182,24 @@ export async function getTemplate(id: number): Promise<Template | null> {
 }
 
 /** Sends an egg's text; the answer is the template Homewarp made of it. */
+/** An egg's text, fetched by Homewarp from the address it is published at. Nothing is imported by this. */
+export async function fetchEgg(url: string): Promise<string> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/templates/fetch', { body: { url } }))
+  return data ? data.egg : fail(error)
+}
+
+/** The eggs there are to be had, as the list was last fetched. Empty until it has been. */
+export async function getCatalogue(): Promise<Catalogue> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/catalogue'))
+  return data ?? fail(error)
+}
+
+/** Fetches the list afresh from where the eggs are published. */
+export async function refreshCatalogue(): Promise<Catalogue> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/catalogue'))
+  return data ?? fail(error)
+}
+
 export async function importTemplate(egg: string): Promise<Template> {
   const { data, error } = await signedIn(() => api.POST('/api/v1/templates', { body: { egg } }))
   return data ?? fail(error)

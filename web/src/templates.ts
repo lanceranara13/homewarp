@@ -1,6 +1,6 @@
 import { queryOptions } from '@tanstack/react-query'
 
-import { getTemplate, listTemplates } from './api/client'
+import { getCatalogue, getTemplate, listTemplates } from './api/client'
 
 /**
  * Templates change only when someone imports or removes one, and both drop
@@ -24,3 +24,10 @@ export function templateQuery(id: number) {
     staleTime: FRESH_FOR,
   })
 }
+
+/** The eggs there are to be had, as the list was last fetched. It changes only when it is fetched again. */
+export const catalogueQuery = queryOptions({
+  queryKey: ['catalogue'],
+  queryFn: getCatalogue,
+  staleTime: 5 * 60_000,
+})

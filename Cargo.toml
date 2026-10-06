@@ -25,6 +25,11 @@ defguard_wireguard_rs = "0.12"
 flate2 = "1"
 futures-util = "0.3"
 getrandom = "0.4"
+# What Core fetches from the internet on its owner's word is fetched with these,
+# over a connection Core has made itself. Both are here already, by way of the
+# certificate client.
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
 # Serves the panel over TLS on connections Core has already taken up itself.
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 # The panel's certificate, asked of an ACME authority. With ring for its
@@ -46,6 +51,8 @@ rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess
 rustix = { version = "1", features = ["fs", "process"] }
 # TLS for the panel, ended at home. ring again.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Whom this machine trusts on the internet: the list the system keeps.
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1"
 serde_json = { version = "1", features = ["preserve_order"] }

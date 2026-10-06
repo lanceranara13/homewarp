@@ -481,6 +481,88 @@
         }
       }
     },
+    "/api/v1/catalogue": {
+      "get": {
+        "summary": "The catalogue as it was last fetched. Empty until it has been.",
+        "operationId": "get_catalogue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalogue"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Fetches the catalogue afresh from where the eggs are published, and keeps\nit. A collection that could not be listed leaves the whole as it was.",
+        "operationId": "refresh_catalogue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalogue"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The catalogue could not be fetched.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/gate": {
       "get": {
         "summary": "The Gate, how the tunnel to it is doing, and every port it forwards. The\none request the Network page needs, and the one the Gate's pill asks again.",
@@ -3608,6 +3690,63 @@
         }
       }
     },
+    "/api/v1/templates/fetch": {
+      "post": {
+        "summary": "Fetches an egg's text from the address it is published at, for its owner\nto read and then import. Nothing is imported by this.",
+        "operationId": "fetch_egg",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EggAddress"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FetchedEgg"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That address is not one eggs are fetched from, or nothing could be fetched from it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/templates/{id}": {
       "get": {
         "operationId": "get_template",
@@ -4194,6 +4333,57 @@
           }
         }
       },
+      "Catalogue": {
+        "type": "object",
+        "description": "The catalogue as it was last fetched.",
+        "required": [
+          "eggs"
+        ],
+        "properties": {
+          "eggs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueEgg"
+            }
+          },
+          "fetched_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When, in Unix seconds. Nothing if it never was."
+          }
+        }
+      },
+      "CatalogueEgg": {
+        "type": "object",
+        "description": "One egg there is to be had.",
+        "required": [
+          "name",
+          "kind",
+          "folder",
+          "url"
+        ],
+        "properties": {
+          "folder": {
+            "type": "string",
+            "description": "Where in the collection: `java/paper`."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The collection it is in: `minecraft`, `games-steamcmd` and so on."
+          },
+          "name": {
+            "type": "string",
+            "description": "What it is called, as its file's name has it."
+          },
+          "url": {
+            "type": "string",
+            "description": "Where its text is fetched from."
+          }
+        }
+      },
       "CertificateView": {
         "type": "object",
         "description": "The certificate the panel is served with.",
@@ -4257,6 +4447,19 @@
             "format": "int64",
             "description": "What the server's files take of the disk.",
             "minimum": 0
+          }
+        }
+      },
+      "EggAddress": {
+        "type": "object",
+        "description": "Where an egg is to be fetched from.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "An address that begins with `https://`, by a name, on the usual port."
           }
         }
       },
@@ -4384,6 +4587,18 @@
           },
           "protocol": {
             "$ref": "#/components/schemas/PortProtocol"
+          }
+        }
+      },
+      "FetchedEgg": {
+        "type": "object",
+        "description": "An egg's text, as it was fetched. Nothing has been done with it.",
+        "required": [
+          "egg"
+        ],
+        "properties": {
+          "egg": {
+            "type": "string"
           }
         }
       },

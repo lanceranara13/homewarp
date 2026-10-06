@@ -54,6 +54,8 @@ const WORDS: Record<string, string> = {
   'sftp.sign_in': 'Signed in over SFTP',
   'sftp.sign_in_failed': 'Tried to sign in over SFTP, with the wrong password',
   'settings.change': 'Changed a setting',
+  'template.fetch': 'Fetched an egg',
+  'catalogue.fetch': 'Fetched the catalogue',
   'gate.connect': 'Started connecting a VPS',
   'gate.check': 'Checked the tunnel',
   'gate.disconnect': 'Disconnected the VPS',

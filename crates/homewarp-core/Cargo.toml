@@ -24,6 +24,8 @@ homewarp-net = { path = "../homewarp-net" }
 homewarp-proto = { path = "../homewarp-proto" }
 homewarp-runtime = { path = "../homewarp-runtime" }
 homewarp-template = { path = "../homewarp-template" }
+http-body-util.workspace = true
+hyper.workspace = true
 hyper-util.workspace = true
 instant-acme.workspace = true
 ring.workspace = true
@@ -31,6 +33,7 @@ russh.workspace = true
 russh-sftp.workspace = true
 rust-embed.workspace = true
 rustls.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true

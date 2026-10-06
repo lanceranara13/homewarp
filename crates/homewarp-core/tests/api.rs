@@ -1751,6 +1751,47 @@ async fn the_panel_is_given_a_name_by_its_owner_where_it_has_a_door_for_tls() {
 }
 
 #[tokio::test]
+async fn an_egg_is_fetched_only_from_an_address_on_the_internet_and_by_the_owner() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let cookie = Some(cookie.as_str());
+    let fetch = "/api/v1/templates/fetch";
+
+    // Refused before anything is connected to: there is no network here to try.
+    for (url, why) in [
+        ("http://example.com/egg.json", "https://"),
+        ("https://192.168.1.1/egg.json", "name a site"),
+        ("https://example.com:8443/egg.json", "usual port"),
+        (
+            "https://user:secret@example.com/egg.json",
+            "name and password",
+        ),
+        ("file:///etc/passwd", "https://"),
+        ("", "not an address"),
+    ] {
+        let answer = panel.post(fetch, json!({ "url": url }), cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{url}");
+        let error = answer.body["error"].as_str().unwrap();
+        assert!(error.contains(why), "{url}: {error}");
+    }
+    // The catalogue is empty until it has been fetched, and says so.
+    let catalogue = panel.get("/api/v1/catalogue", cookie).await;
+    assert_eq!(catalogue.status, StatusCode::OK);
+    assert_eq!(catalogue.body, json!({ "fetched_at": null, "eggs": [] }));
+
+    for path in [fetch, "/api/v1/catalogue"] {
+        let nobody = panel
+            .post(path, json!({ "url": "https://example.com/" }), None)
+            .await;
+        assert_eq!(nobody.status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    assert_eq!(
+        panel.get("/api/v1/catalogue", None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn a_sign_in_that_keeps_failing_has_to_wait() {
     let panel = panel().await;
     panel.set_up().await;
