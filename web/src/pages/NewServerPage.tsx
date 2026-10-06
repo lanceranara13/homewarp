@@ -1,9 +1,11 @@
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Link, getRouteApi, notFound, useNavigate } from '@tanstack/react-router'
-import { useId, type ReactNode } from 'react'
+import { X } from 'lucide-react'
+import { useId, useState, type ReactNode } from 'react'
 
-import { createServer, type ServerSettings, type Template } from '../api/client'
-import { Button, Field, PageBar, Problem, buttonClass } from '../components/ui'
+import { createServer, type PortProtocol, type ServerSettings, type Template } from '../api/client'
+import { Button, Field, PageBar, Problem, Steps, buttonClass } from '../components/ui'
+import { useGate } from '../gate'
 import { serverQuery, serversQuery } from '../servers'
 import { templateQuery, templatesQuery } from '../templates'
 
@@ -13,17 +15,15 @@ const route = getRouteApi('/shell/servers/new/$templateId')
 const FIRST_PORT = 25565
 
 /** The three steps of DESIGN.md. The third is the new server's own page, which shows its install. */
-function Steps({ at }: { at: 0 | 1 }) {
-  return (
-    <ol className="flex flex-wrap gap-x-6 gap-y-1 text-small">
-      {['Choose a game', 'Configure', 'Install'].map((step, index) => (
-        <li key={step} aria-current={index === at ? 'step' : undefined} className={index === at ? 'font-medium text-ink' : 'text-ink-subtle'}>
-          {index + 1}. {step}
-        </li>
-      ))}
-    </ol>
-  )
-}
+const STEPS = ['Choose a game', 'Configure', 'Install']
+
+const PROTOCOLS: { value: PortProtocol; label: string }[] = [
+  { value: 'both', label: 'TCP and UDP' },
+  { value: 'tcp', label: 'TCP' },
+  { value: 'udp', label: 'UDP' },
+]
+
+const SELECT = 'h-10 rounded-md border border-hairline-strong bg-surface-1 px-2 text-body text-ink md:h-8'
 
 /** Step one: which template the server is made from. */
 export function ChooseTemplatePage() {
@@ -33,7 +33,7 @@ export function ChooseTemplatePage() {
     <>
       <PageBar title="New server" crumb={<Link to="/">Servers</Link>} />
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
-        <Steps at={0} />
+        <Steps steps={STEPS} at={0} />
         {templates.length === 0 ? (
           <p>
             There is no template to make a server from yet.{' '}
@@ -82,8 +82,10 @@ export function NewServerPage() {
     },
   })
 
-  // The first port from Minecraft's own upward that no server has.
-  const taken = new Set(servers.map((server) => server.port))
+  // The first port from Minecraft's own upward that no server has. The servers' further ports
+  // are known once the Gate has answered; a clash with one of those is refused in words anyway.
+  const gate = useGate()
+  const taken = new Set([...servers.map((server) => server.port), ...(gate?.ports.map((published) => published.port) ?? [])])
   let port = FIRST_PORT
   while (taken.has(port)) port += 1
 
@@ -91,7 +93,7 @@ export function NewServerPage() {
     <>
       <PageBar title={template.name} crumb={<Link to="/servers/new">New server</Link>} />
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
-        <Steps at={1} />
+        <Steps steps={STEPS} at={1} />
         <ServerForm
           template={template}
           start={{ name: '', memory_mb: 2048, port }}
@@ -125,6 +127,12 @@ type ServerFormProps = {
 /** The form a server is made with, and changed with afterwards. */
 export function ServerForm({ template, start, submit, pending, problem, onSubmit, cancel }: ServerFormProps) {
   const id = useId()
+  // The further ports are rows that come and go, so they are kept here and not read off the form.
+  const [further, setFurther] = useState(() =>
+    (start.ports ?? []).map((one, key) => ({ key, port: String(one.port), protocol: one.protocol ?? ('both' as PortProtocol) })),
+  )
+  const changeFurther = (key: number, change: { port?: string; protocol?: PortProtocol }) =>
+    setFurther((rows) => rows.map((row) => (row.key === key ? { ...row, ...change } : row)))
   // What a person is meant to set comes first, with what has to be set because the template
   // leaves it empty. What the template sets for itself is tucked away.
   const comesFirst = (variable: Template['variables'][number]) =>
@@ -157,6 +165,8 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
           memory_mb: Number(typed('memory_mb')),
           cpu_percent: Number(typed('cpu_percent')) || 0,
           port: Number(typed('port')),
+          protocol: typed('protocol') as PortProtocol,
+          ports: further.filter((row) => row.port !== '').map((row) => ({ port: Number(row.port), protocol: row.protocol })),
           variables: Object.fromEntries(template.variables.map(({ env }) => [env, typed(`variable.${env}`)])),
           eula: form.get('eula') === 'on',
         })
@@ -168,12 +178,7 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
           <label htmlFor={`${id}-image`} className="text-caption text-ink-subtle">
             Version
           </label>
-          <select
-            id={`${id}-image`}
-            name="image"
-            defaultValue={start.image ?? template.images[0]?.image}
-            className="h-10 rounded-md border border-hairline-strong bg-surface-1 px-2 text-body text-ink md:h-8"
-          >
+          <select id={`${id}-image`} name="image" defaultValue={start.image ?? template.images[0]?.image} className={SELECT}>
             {template.images.map(({ label, image }) => (
               <option key={image} value={image}>
                 {label}
@@ -201,7 +206,7 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
         min={1024}
         max={65535}
         defaultValue={start.port}
-        hint="Where players reach it on this machine. No two servers have the same one."
+        hint="Where players reach it, here and at a connected VPS. No two servers have the same one."
       />
       {asked.map(field)}
       {template.features.includes('eula') && (
@@ -229,6 +234,63 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
             defaultValue={start.cpu_percent ?? 0}
             hint="150 is a core and a half. 0 is no limit."
           />
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor={`${id}-protocol`} className="text-caption text-ink-subtle">
+              What the port is open for
+            </label>
+            <select id={`${id}-protocol`} name="protocol" defaultValue={start.protocol ?? 'both'} className={SELECT}>
+              {PROTOCOLS.map(({ value, label }) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <div className="text-small text-ink-subtle">A template does not say which its game speaks, so it starts as both.</div>
+          </div>
+          <fieldset className="flex flex-col gap-1.5">
+            <legend className="mb-1.5 text-caption text-ink-subtle">Further ports</legend>
+            {further.map((row) => (
+              <div key={row.key} className="flex gap-2">
+                <input
+                  type="number"
+                  aria-label="Port"
+                  min={1024}
+                  max={65535}
+                  value={row.port}
+                  onChange={(event) => changeFurther(row.key, { port: event.target.value })}
+                  className="h-10 w-28 rounded-md border border-hairline-strong bg-surface-1 px-2.5 font-mono text-mono text-ink md:h-8"
+                />
+                <select
+                  aria-label="What it is open for"
+                  value={row.protocol}
+                  onChange={(event) => changeFurther(row.key, { protocol: event.target.value as PortProtocol })}
+                  className={SELECT}
+                >
+                  {PROTOCOLS.map(({ value, label }) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <Button variant="ghost" title="Remove this port" onClick={() => setFurther((rows) => rows.filter((other) => other.key !== row.key))}>
+                  <X aria-hidden size={16} />
+                  <span className="sr-only">Remove this port</span>
+                </Button>
+              </div>
+            ))}
+            <div>
+              <Button
+                onClick={() =>
+                  setFurther((rows) => [...rows, { key: Math.max(-1, ...rows.map((row) => row.key)) + 1, port: '', protocol: 'udp' }])
+                }
+              >
+                Add a port
+              </Button>
+            </div>
+            <div className="text-small text-ink-subtle">
+              For a game that listens on more than one: voice chat, a port it is queried on. Each is opened as the first is.
+            </div>
+          </fieldset>
           {tucked.map(field)}
         </div>
       </details>

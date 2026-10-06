@@ -144,34 +144,55 @@ async function copy(text: string): Promise<boolean> {
   return copied
 }
 
-const STATES: Record<ServerState, { word: string; tone: string; mark: 'dot' | 'pulse' | 'ring' | 'spinner' | 'alert' }> = {
-  installing: { word: 'Installing', tone: 'bg-state-installing/12 text-state-installing', mark: 'spinner' },
-  install_failed: { word: 'Install failed', tone: 'bg-state-crashed/12 text-state-crashed', mark: 'alert' },
-  offline: { word: 'Offline', tone: 'bg-state-offline/12 text-state-offline', mark: 'ring' },
-  starting: { word: 'Starting', tone: 'bg-state-starting/12 text-state-starting', mark: 'pulse' },
-  running: { word: 'Running', tone: 'bg-state-running/12 text-state-running', mark: 'dot' },
-  stopping: { word: 'Stopping', tone: 'bg-state-starting/12 text-state-starting', mark: 'pulse' },
-  crashed: { word: 'Crashed', tone: 'bg-state-crashed/12 text-state-crashed', mark: 'alert' },
+/** The five states of DESIGN.md. Each has a colour and a mark of its own, so that neither is ever alone. */
+export type Tone = 'running' | 'starting' | 'crashed' | 'installing' | 'offline'
+
+const TONES: Record<Tone, { ink: string; tint: string; mark: 'dot' | 'pulse' | 'ring' | 'spinner' | 'alert' }> = {
+  running: { ink: 'text-state-running', tint: 'bg-state-running/12', mark: 'dot' },
+  starting: { ink: 'text-state-starting', tint: 'bg-state-starting/12', mark: 'pulse' },
+  crashed: { ink: 'text-state-crashed', tint: 'bg-state-crashed/12', mark: 'alert' },
+  installing: { ink: 'text-state-installing', tint: 'bg-state-installing/12', mark: 'spinner' },
+  offline: { ink: 'text-state-offline', tint: 'bg-state-offline/12', mark: 'ring' },
 }
 
-/** What a server is doing: a mark and a word, never colour alone (DESIGN.md, Status pill). */
-export function StatusPill({ state }: { state: ServerState }) {
-  const { word, tone, mark } = STATES[state]
+/** A state's mark in its colour, for where its word stands beside it and not inside a pill. */
+export function StateMark({ tone }: { tone: Tone }) {
+  const { ink, mark } = TONES[tone]
+  if (mark === 'spinner') return <LoaderCircle aria-hidden className={`size-3 shrink-0 animate-spin motion-reduce:animate-none ${ink}`} />
+  if (mark === 'alert') return <CircleAlert aria-hidden className={`size-3 shrink-0 ${ink}`} />
   return (
-    <span className={`inline-flex h-5.5 shrink-0 items-center gap-1.5 rounded-full pr-2 pl-1.5 text-caption ${tone}`}>
-      {mark === 'spinner' ? (
-        <LoaderCircle aria-hidden className="size-3 animate-spin motion-reduce:animate-none" />
-      ) : mark === 'alert' ? (
-        <CircleAlert aria-hidden className="size-3" />
-      ) : (
-        <span
-          aria-hidden
-          className={`size-2 rounded-full ${mark === 'ring' ? 'border-[1.5px] border-current' : 'bg-current'} ${mark === 'pulse' ? 'animate-pulse motion-reduce:animate-none' : ''}`}
-        />
-      )}
-      {word}
+    <span
+      aria-hidden
+      className={`size-2 shrink-0 rounded-full ${ink} ${mark === 'ring' ? 'border-[1.5px] border-current' : 'bg-current'} ${mark === 'pulse' ? 'animate-pulse motion-reduce:animate-none' : ''}`}
+    />
+  )
+}
+
+/** A state, said with a mark and a word, never colour alone (DESIGN.md, Status pill). */
+export function Pill({ tone, children }: { tone: Tone; children: ReactNode }) {
+  const { ink, tint } = TONES[tone]
+  return (
+    <span className={`inline-flex h-5.5 shrink-0 items-center gap-1.5 rounded-full pr-2 pl-1.5 text-caption ${ink} ${tint}`}>
+      <StateMark tone={tone} />
+      {children}
     </span>
   )
+}
+
+const STATES: Record<ServerState, { word: string; tone: Tone }> = {
+  installing: { word: 'Installing', tone: 'installing' },
+  install_failed: { word: 'Install failed', tone: 'crashed' },
+  offline: { word: 'Offline', tone: 'offline' },
+  starting: { word: 'Starting', tone: 'starting' },
+  running: { word: 'Running', tone: 'running' },
+  stopping: { word: 'Stopping', tone: 'starting' },
+  crashed: { word: 'Crashed', tone: 'crashed' },
+}
+
+/** What a server is doing. */
+export function StatusPill({ state }: { state: ServerState }) {
+  const { word, tone } = STATES[state]
+  return <Pill tone={tone}>{word}</Pill>
 }
 
 /**
@@ -194,6 +215,19 @@ export function PageBar({ title, crumb, children }: { title: string; crumb?: Rea
       </div>
       {children}
     </header>
+  )
+}
+
+/** The steps of something done in order, with the one that is open marked (DESIGN.md, Key screens). */
+export function Steps({ steps, at }: { steps: string[]; at: number }) {
+  return (
+    <ol className="flex flex-wrap gap-x-6 gap-y-1 text-small">
+      {steps.map((step, index) => (
+        <li key={step} aria-current={index === at ? 'step' : undefined} className={index === at ? 'font-medium text-ink' : 'text-ink-subtle'}>
+          {index + 1}. {step}
+        </li>
+      ))}
+    </ol>
   )
 }
 

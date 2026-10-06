@@ -3,18 +3,19 @@ import { Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { Blocks, Ellipsis, LayoutGrid, LogOut, ScrollText, Settings, Waypoints, type LucideIcon } from 'lucide-react'
 import { DropdownMenu, Popover } from 'radix-ui'
 
+import { gateLook, useGate } from '../gate'
 import { sessionQuery, useSignOut } from '../session'
 import { DonationHeart, HeartMessage } from './DonationHeart'
-import { Button, Mark } from './ui'
+import { Button, Mark, StateMark } from './ui'
 
 /**
  * The five destinations of DESIGN.md. One without `to` is not built yet: it is
  * shown, so the shape of the panel is there from the start, but it leads nowhere.
  */
-const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates' }[] = [
+const DESTINATIONS: { label: string; icon: LucideIcon; to?: '/' | '/templates' | '/network' }[] = [
   { label: 'Servers', icon: LayoutGrid, to: '/' },
   { label: 'Templates', icon: Blocks, to: '/templates' },
-  { label: 'Network', icon: Waypoints },
+  { label: 'Network', icon: Waypoints, to: '/network' },
   { label: 'Activity', icon: ScrollText },
   { label: 'Settings', icon: Settings },
 ]
@@ -65,6 +66,7 @@ export function AppShell() {
           )}
         </nav>
         <div className="mt-auto flex flex-col gap-1">
+          <GateMark />
           <DonationHeart />
           <AccountMenu username={username} />
         </div>
@@ -76,6 +78,23 @@ export function AppShell() {
 
       <BottomBar username={username} />
     </div>
+  )
+}
+
+/**
+ * How the tunnel is doing, on every page: it is the one thing that affects
+ * every server (DESIGN.md, App shell). It leads to the Network page. Nothing
+ * waits for it: it is asked for beside the page and painted when it answers.
+ */
+function GateMark() {
+  const { word, tone } = gateLook(useGate())
+  return (
+    <Link to="/network" title={word} className={ROW_LIVE}>
+      <span className="flex w-5 shrink-0 justify-center">
+        <StateMark tone={tone} />
+      </span>
+      <span className="sr-only truncate wide:not-sr-only">{word}</span>
+    </Link>
   )
 }
 

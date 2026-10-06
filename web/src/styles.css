@@ -35,7 +35,7 @@
   --color-on-danger: #ffffff;
   --color-heart: #f0559a;
   --color-overlay: rgb(0 0 0 / 0.6);
-  /* Colour means state: these appear where a server is, and nowhere else. */
+  /* Colour means state: these appear where a server or the tunnel is, and nowhere else. */
   --color-state-running: #3dd68c;
   --color-state-starting: #f5b73d;
   --color-state-crashed: #ff6369;

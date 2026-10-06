@@ -15,6 +15,10 @@ export type ServerSettings = components['schemas']['ServerSettings']
 export type Power = components['schemas']['Power']
 export type ServerEvent = components['schemas']['Event']
 export type Usage = components['schemas']['Usage']
+export type Gate = components['schemas']['GateView']
+export type PortProtocol = components['schemas']['PortProtocol']
+export type ExtraPort = components['schemas']['ExtraPort']
+type NewGate = components['schemas']['NewGate']
 type SetupRequest = components['schemas']['SetupRequest']
 type LoginRequest = components['schemas']['LoginRequest']
 
@@ -146,5 +150,28 @@ export function followServer(id: number): WebSocket {
 
 export async function removeServer(id: number): Promise<void> {
   const { error, response } = await signedIn(() => api.DELETE('/api/v1/servers/{id}', { params: { path: { id } } }))
+  if (!response.ok) fail(error)
+}
+
+/** The Gate, how the tunnel to it is doing, and every port of every server. */
+export async function getGate(): Promise<Gate> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/gate'))
+  return data ?? fail(error)
+}
+
+/** Starts connecting a VPS. The answer carries the one command to run there. */
+export async function connectGate(body: NewGate): Promise<Gate> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/gate', { body }))
+  return data ?? fail(error)
+}
+
+/** Has Homewarp find out again whether servers see their players' own addresses. It takes a few seconds. */
+export async function checkGate(): Promise<Gate> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/gate/check'))
+  return data ?? fail(error)
+}
+
+export async function disconnectGate(): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/gate'))
   if (!response.ok) fail(error)
 }

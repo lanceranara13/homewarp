@@ -16,6 +16,7 @@ import {
   type Usage,
 } from '../api/client'
 import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill, buttonClass } from '../components/ui'
+import { addressOf, useGate } from '../gate'
 import { EVERY, serverQuery, serversQuery } from '../servers'
 import { templateQuery } from '../templates'
 import { ServerForm } from './NewServerPage'
@@ -40,6 +41,8 @@ export function ServerPage() {
   if (!server) throw notFound()
   const state = followed?.state ?? server.state
   const running = state === 'starting' || state === 'running'
+  // Wanted, not needed: the chip is painted with the address at home, and takes the VPS's once it is known.
+  const gate = useGate()
 
   return (
     <>
@@ -56,7 +59,7 @@ export function ServerPage() {
         <div className="flex flex-wrap items-start gap-3">
           <div className="flex min-h-10 flex-wrap items-center gap-3 md:min-h-8">
             <StatusPill state={state} />
-            <CopyChip text={`${window.location.hostname}:${server.port}`} />
+            <CopyChip text={addressOf(gate, server.port)} />
           </div>
           <div className="ml-auto">
             <PowerControls id={server.id} state={state} />
@@ -74,6 +77,8 @@ export function ServerPage() {
           <code className="font-mono wrap-anywhere">{server.image}</code>
           {` · ${server.memory_mb} MB`}
           {server.cpu_percent > 0 && ` · ${server.cpu_percent} % of a core`}
+          {server.ports.length > 0 &&
+            ` · also on ${server.ports.map((further) => `${further.port}${!further.protocol || further.protocol === 'both' ? '' : `/${further.protocol}`}`).join(', ')}`}
         </p>
       </main>
     </>

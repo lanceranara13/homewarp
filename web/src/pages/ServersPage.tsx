@@ -3,11 +3,14 @@ import { Link } from '@tanstack/react-router'
 import { LayoutGrid, Plus } from 'lucide-react'
 
 import { CopyChip, PageBar, StatusPill, buttonClass } from '../components/ui'
+import { addressOf, useGate } from '../gate'
 import { EVERY, serversQuery } from '../servers'
 
 /** The landing page: every server, what it is doing and where players reach it. */
 export function ServersPage() {
   const { data: servers } = useSuspenseQuery({ ...serversQuery, refetchInterval: EVERY.list })
+  // Wanted, not needed: the cards are painted with the address at home, and take the VPS's once it is known.
+  const gate = useGate()
   // The page's one primary action: in the bar once there are servers, in the empty state until then.
   const newLink = (
     <Link to="/servers/new" className={buttonClass('primary')}>
@@ -47,7 +50,7 @@ export function ServersPage() {
                   <StatusPill state={server.state} />
                 </div>
                 <div className="relative self-start">
-                  <CopyChip text={`${window.location.hostname}:${server.port}`} />
+                  <CopyChip text={addressOf(gate, server.port)} />
                 </div>
               </li>
             ))}
