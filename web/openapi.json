@@ -263,6 +263,89 @@
         }
       }
     },
+    "/api/v1/servers/{id}/command": {
+      "post": {
+        "summary": "Types one line into the console of a server that is starting or running.",
+        "operationId": "command_server",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The line is on its way to the server."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The server is not running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That is not one line.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Homewarp cannot reach Docker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/servers/{id}/power": {
       "post": {
         "summary": "Starts, stops or kills a server, or installs one again whose install failed.\nThe answer comes once the request is on its way, not once it is carried out.",
@@ -597,6 +680,128 @@
   },
   "components": {
     "schemas": {
+      "CommandRequest": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "One line, as it would be typed into the server's console."
+          }
+        }
+      },
+      "Event": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Where things stand. It comes first, and again for a page that has\nfallen too far behind to be caught up line by line.",
+            "required": [
+              "state",
+              "first",
+              "lines",
+              "kind"
+            ],
+            "properties": {
+              "first": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The number of the first of `lines`.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "snapshot"
+                ]
+              },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "state": {
+                "$ref": "#/components/schemas/State"
+              },
+              "usage": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Usage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One more line of the console.",
+            "required": [
+              "number",
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "line"
+                ]
+              },
+              "number": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "state",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "state"
+                ]
+              },
+              "state": {
+                "$ref": "#/components/schemas/State"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "About once a second while the server runs.",
+            "required": [
+              "usage",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "usage"
+                ]
+              },
+              "usage": {
+                "$ref": "#/components/schemas/Usage"
+              }
+            }
+          }
+        ],
+        "description": "What a page that follows a server is sent, over its socket."
+      },
       "Health": {
         "type": "object",
         "required": [
@@ -1102,6 +1307,33 @@
           },
           "user_viewable": {
             "type": "boolean"
+          }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "description": "How much of the machine a running server is using.",
+        "required": [
+          "cpu_percent",
+          "memory_bytes",
+          "memory_limit_bytes"
+        ],
+        "properties": {
+          "cpu_percent": {
+            "type": "number",
+            "format": "float",
+            "description": "Of one core: 150 is a core and a half."
+          },
+          "memory_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_limit_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The most it may use before it is stopped.",
+            "minimum": 0
           }
         }
       },

@@ -465,6 +465,61 @@ async fn a_server_is_asked_for_in_full_before_anything_is_made() {
 }
 
 #[tokio::test]
+async fn what_is_typed_into_a_console_is_one_line() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let type_in = |command: &str| {
+        panel.post(
+            "/api/v1/servers/1/command",
+            json!({ "command": command }),
+            Some(&cookie),
+        )
+    };
+
+    // A second command must not ride in behind the first.
+    for not_a_line in ["say hi\nstop", "", "\n", &"x".repeat(1001)] {
+        let refused = type_in(not_a_line).await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(refused.body["error"].as_str().unwrap().contains("one line"));
+    }
+    // A line as a terminal sends it, with its line ending. No Docker to type it into here.
+    assert_eq!(
+        type_in("say hi\r\n").await.status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let nobody = panel
+        .post(
+            "/api/v1/servers/1/command",
+            json!({ "command": "stop" }),
+            None,
+        )
+        .await;
+    assert_eq!(nobody.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_console_is_followed_only_from_this_site_and_signed_in() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let follow = |origin: &'static str, cookie: &str| {
+        let request = Request::get("/api/v1/servers/1/console")
+            .header(HOST, "192.168.1.250:3600")
+            .header(ORIGIN, origin)
+            .header(COOKIE, cookie);
+        panel.send(request.body(Body::empty()).unwrap())
+    };
+
+    let elsewhere = follow("http://evil.example", &cookie).await;
+    assert_eq!(elsewhere.status, StatusCode::FORBIDDEN);
+    let nobody = follow("http://192.168.1.250:3600", "").await;
+    assert_eq!(nobody.status, StatusCode::UNAUTHORIZED);
+    // From here and signed in it is let through, as far as being told that an
+    // ordinary request is not how a socket is opened.
+    let here = follow("http://192.168.1.250:3600", &cookie).await;
+    assert_eq!(here.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn servers_are_for_someone_signed_in() {
     let panel = panel().await;
     let cookie = panel.set_up().await;

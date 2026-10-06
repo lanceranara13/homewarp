@@ -12,6 +12,8 @@ export type Server = components['schemas']['Server']
 export type ServerState = components['schemas']['State']
 export type NewServer = components['schemas']['NewServer']
 export type Power = components['schemas']['Power']
+export type ServerEvent = components['schemas']['Event']
+export type Usage = components['schemas']['Usage']
 type SetupRequest = components['schemas']['SetupRequest']
 type LoginRequest = components['schemas']['LoginRequest']
 
@@ -116,6 +118,23 @@ export async function powerServer(id: number, action: Power): Promise<void> {
     api.POST('/api/v1/servers/{id}/power', { params: { path: { id } }, body: { action } }),
   )
   if (!response.ok) fail(error)
+}
+
+/** Types one line into a server's console. */
+export async function commandServer(id: number, command: string): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/command', { params: { path: { id } }, body: { command } }),
+  )
+  if (!response.ok) fail(error)
+}
+
+/**
+ * Opens the socket a page follows a server by. Each message on it is a
+ * `ServerEvent` in JSON: first where things stand, then what happens.
+ */
+export function followServer(id: number): WebSocket {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  return new WebSocket(`${scheme}://${window.location.host}/api/v1/servers/${id}/console`)
 }
 
 export async function removeServer(id: number): Promise<void> {

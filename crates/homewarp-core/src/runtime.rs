@@ -11,17 +11,19 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
+    pin::pin,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use anyhow::{Context, ensure};
+use futures_util::StreamExt;
 use homewarp_runtime::{
     Engine, InstallScript, Network, Port, Protocol, Server as Spec, ServerDir, strip_ansi,
 };
 use homewarp_template::{Parser, Stop, Template, properties, substitute};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use utoipa::ToSchema;
 
 use crate::servers;
@@ -33,6 +35,8 @@ const SUBNET: &str = "10.213.80.0/24";
 const USER: u32 = 4857;
 /// How much of a console is kept for a page that opens later.
 const KEPT_LINES: usize = 500;
+/// How far a page may fall behind before it is started again from where things stand.
+const BACKLOG: usize = 1024;
 
 /// What a server is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -74,6 +78,43 @@ pub(crate) enum Power {
     Kill,
     /// Runs the install script again, after it failed.
     Install,
+}
+
+/// How much of the machine a running server is using.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, ToSchema)]
+pub(crate) struct Usage {
+    /// Of one core: 150 is a core and a half.
+    cpu_percent: f32,
+    memory_bytes: u64,
+    /// The most it may use before it is stopped.
+    memory_limit_bytes: u64,
+}
+
+/// What a page that follows a server is sent, over its socket.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Event {
+    /// Where things stand. It comes first, and again for a page that has
+    /// fallen too far behind to be caught up line by line.
+    Snapshot {
+        state: State,
+        /// The number of the first of `lines`.
+        first: u64,
+        lines: Vec<String>,
+        usage: Option<Usage>,
+    },
+    /// One more line of the console.
+    Line {
+        number: u64,
+        text: String,
+    },
+    State {
+        state: State,
+    },
+    /// About once a second while the server runs.
+    Usage {
+        usage: Usage,
+    },
 }
 
 /// A server as the database has it, with its template read.
@@ -126,21 +167,36 @@ fn shown(line: &str) -> String {
 struct Seen {
     state: State,
     lines: VecDeque<String>,
+    /// How many lines there have been, those no longer kept among them.
+    count: u64,
+    usage: Option<Usage>,
 }
 
+/// What a server's task has seen, and the way it tells the pages that follow
+/// the server. It tells them while it still holds the lock, so that a page is
+/// told things in the order they happened and misses nothing after it joins.
 #[derive(Clone)]
-struct Watch(Arc<Mutex<Seen>>);
+struct Watch {
+    seen: Arc<Mutex<Seen>>,
+    events: broadcast::Sender<Event>,
+}
 
 impl Watch {
     fn new(state: State) -> Self {
-        Self(Arc::new(Mutex::new(Seen {
+        let seen = Seen {
             state,
             lines: VecDeque::new(),
-        })))
+            count: 0,
+            usage: None,
+        };
+        Self {
+            seen: Arc::new(Mutex::new(seen)),
+            events: broadcast::channel(BACKLOG).0,
+        }
     }
 
     fn seen(&self) -> MutexGuard<'_, Seen> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn state(&self) -> State {
@@ -148,23 +204,58 @@ impl Watch {
     }
 
     fn set(&self, state: State) {
-        self.seen().state = state;
+        let mut seen = self.seen();
+        seen.state = state;
+        // What is not running uses nothing.
+        if !matches!(state, State::Starting | State::Running | State::Stopping) {
+            seen.usage = None;
+        }
+        // An error here says that no page is following, which is the usual case.
+        let _ = self.events.send(Event::State { state });
     }
 
     /// Adds a line to the console, dropping the oldest once it is full.
     fn say(&self, line: impl Into<String>) {
+        let text = line.into();
         let mut seen = self.seen();
         if seen.lines.len() == KEPT_LINES {
             seen.lines.pop_front();
         }
-        seen.lines.push_back(line.into());
+        seen.lines.push_back(text.clone());
+        let number = seen.count;
+        seen.count += 1;
+        let _ = self.events.send(Event::Line { number, text });
     }
+
+    fn measure(&self, usage: Usage) {
+        self.seen().usage = Some(usage);
+        let _ = self.events.send(Event::Usage { usage });
+    }
+
+    /// Where things stand, and everything from here on, with nothing between.
+    fn follow(&self) -> (Event, broadcast::Receiver<Event>) {
+        let seen = self.seen();
+        let snapshot = Event::Snapshot {
+            state: seen.state,
+            first: seen.count - seen.lines.len() as u64,
+            lines: seen.lines.iter().cloned().collect(),
+            usage: seen.usage,
+        };
+        (snapshot, self.events.subscribe())
+    }
+}
+
+/// What reaches a server's task.
+enum Asked {
+    Power(Power),
+    /// A line typed into its console.
+    Typed(String),
 }
 
 /// The two ends other code holds of a server's task.
 struct Live {
     watch: Watch,
-    power: mpsc::Sender<Power>,
+    asked: mpsc::Sender<Asked>,
 }
 
 /// Every server's task, and the Docker daemon they share.
@@ -231,11 +322,31 @@ impl Runtime {
             (Power::Install, State::InstallFailed) => State::Installing,
             _ => return Err(Some(now)),
         };
-        live.power.try_send(power).map_err(|_| Some(now))?;
+        live.asked
+            .try_send(Asked::Power(power))
+            .map_err(|_| Some(now))?;
         // Changed here and not when the task gets to it, so that a second click
         // finds the first one already counted.
         live.watch.set(next);
         Ok(())
+    }
+
+    /// Types a line into a server's console. The errors are those of [`Runtime::ask`].
+    pub(crate) fn type_in(&self, id: i64, line: String) -> Result<(), Option<State>> {
+        let servers = self.servers();
+        let live = servers.get(&id).ok_or(None)?;
+        let now = live.watch.state();
+        if !matches!(now, State::Starting | State::Running) {
+            return Err(Some(now));
+        }
+        live.asked
+            .try_send(Asked::Typed(line))
+            .map_err(|_| Some(now))
+    }
+
+    /// Where a server stands, and everything that happens to it from here on.
+    pub(crate) fn follow(&self, id: i64) -> Option<(Event, broadcast::Receiver<Event>)> {
+        Some(self.servers().get(&id)?.watch.follow())
     }
 
     /// Forgets a server that is not running and deletes what it left: its
@@ -277,15 +388,15 @@ impl Runtime {
             (false, false) => State::InstallFailed,
             (false, true) => State::Offline,
         });
-        let (power, asked) = mpsc::channel(8);
+        let (asked, inbox) = mpsc::channel(16);
         self.servers().insert(
             server.id,
             Live {
                 watch: watch.clone(),
-                power,
+                asked,
             },
         );
-        tokio::spawn(Arc::clone(self).run(server, watch, asked, fresh));
+        tokio::spawn(Arc::clone(self).run(server, watch, inbox, fresh));
     }
 
     /// A server's task. It ends when the server is removed.
@@ -293,34 +404,34 @@ impl Runtime {
         self: Arc<Self>,
         mut server: Definition,
         watch: Watch,
-        mut asked: mpsc::Receiver<Power>,
+        mut inbox: mpsc::Receiver<Asked>,
         fresh: bool,
     ) {
         let spec = self.spec(&server);
         if fresh {
             if self.install(&mut server, &spec, &watch).await {
-                self.serve(&server, &spec, &watch, &mut asked, false).await;
+                self.serve(&server, &spec, &watch, &mut inbox, false).await;
             }
         } else if !server.installed {
             watch.say("Homewarp stopped while this server was being installed.");
         } else {
             match self.engine.is_running(&spec).await {
-                Ok(true) => self.serve(&server, &spec, &watch, &mut asked, true).await,
+                Ok(true) => self.serve(&server, &spec, &watch, &mut inbox, true).await,
                 Ok(false) => {}
                 Err(error) => {
                     watch.say(format!("Homewarp could not ask Docker about it: {error}"));
                 }
             }
         }
-        while let Some(power) = asked.recv().await {
-            match power {
-                Power::Install if !server.installed => {
+        while let Some(asked) = inbox.recv().await {
+            match asked {
+                Asked::Power(Power::Install) if !server.installed => {
                     if self.install(&mut server, &spec, &watch).await {
-                        self.serve(&server, &spec, &watch, &mut asked, false).await;
+                        self.serve(&server, &spec, &watch, &mut inbox, false).await;
                     }
                 }
-                Power::Start if server.installed => {
-                    self.serve(&server, &spec, &watch, &mut asked, false).await;
+                Asked::Power(Power::Start) if server.installed => {
+                    self.serve(&server, &spec, &watch, &mut inbox, false).await;
                 }
                 // Asked of a server that had ended by the time this was read.
                 _ => {}
@@ -386,7 +497,7 @@ impl Runtime {
         server: &Definition,
         spec: &Spec,
         watch: &Watch,
-        asked: &mut mpsc::Receiver<Power>,
+        inbox: &mut mpsc::Receiver<Asked>,
         found_running: bool,
     ) {
         let ended = async {
@@ -403,9 +514,16 @@ impl Runtime {
                 self.engine.start(spec).await?;
                 console
             };
+            // Fused, because it ends before the server's last lines have been read.
+            let mut usage = pin!(self.engine.usage(spec).fuse());
             let mut told_to_stop = false;
             loop {
                 tokio::select! {
+                    Some(now) = usage.next() => watch.measure(Usage {
+                        cpu_percent: now.cpu_percent,
+                        memory_bytes: now.memory_bytes,
+                        memory_limit_bytes: now.memory_limit_bytes,
+                    }),
                     line = console.next_line() => {
                         let Some(line) = line? else { break };
                         let line = shown(&line);
@@ -415,8 +533,9 @@ impl Runtime {
                         }
                         watch.say(line);
                     }
-                    power = asked.recv() => match power {
-                        Some(Power::Stop) if !told_to_stop => {
+                    asked = inbox.recv() => match asked {
+                        Some(Asked::Typed(line)) => console.send(&line).await?,
+                        Some(Asked::Power(Power::Stop)) if !told_to_stop => {
                             told_to_stop = true;
                             watch.set(State::Stopping);
                             match &server.template.stop {
@@ -424,7 +543,7 @@ impl Runtime {
                                 Stop::Signal(signal) => self.engine.signal(spec, signal).await?,
                             }
                         }
-                        Some(Power::Kill) => {
+                        Some(Asked::Power(Power::Kill)) => {
                             told_to_stop = true;
                             watch.set(State::Stopping);
                             self.engine.signal(spec, "SIGKILL").await?;

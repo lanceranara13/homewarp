@@ -9,15 +9,15 @@ use bollard::{
     Docker,
     errors::Error as DockerError,
     models::{
-        ContainerCreateBody, HostConfig, HostConfigLogConfig, Ipam, IpamConfig,
-        NetworkCreateRequest, PortBinding,
+        ContainerCreateBody, ContainerStatsResponse, HostConfig, HostConfigLogConfig, Ipam,
+        IpamConfig, NetworkCreateRequest, PortBinding,
     },
     query_parameters::{
         AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-        KillContainerOptionsBuilder, RemoveContainerOptionsBuilder,
+        KillContainerOptionsBuilder, RemoveContainerOptionsBuilder, StatsOptionsBuilder,
     },
 };
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 
 use crate::Console;
 
@@ -121,6 +121,46 @@ impl Server {
     fn container(&self) -> String {
         format!("homewarp-{}", self.id)
     }
+}
+
+/// How much of the machine a running server is using.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Usage {
+    /// Of one core: 150 is a core and a half.
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+    /// The most it may use before the kernel stops it.
+    pub memory_limit_bytes: u64,
+}
+
+/// Works out a server's usage from what Docker reports. Processor time is
+/// reported as a running total, so a sample means something only beside the
+/// one before it, which is kept in `before`.
+fn measure(sample: &ContainerStatsResponse, before: &mut Option<(u64, u64)>) -> Option<Usage> {
+    let cpu = sample.cpu_stats.as_ref()?;
+    let used = cpu.cpu_usage.as_ref()?.total_usage?;
+    let passed = cpu.system_cpu_usage?;
+    let cores = cpu.online_cpus.unwrap_or(1).max(1);
+    let memory = sample.memory_stats.as_ref()?;
+    // As `docker stats` counts it: without the file cache, which the kernel
+    // gives back the moment something else needs the memory.
+    let cache = memory
+        .stats
+        .as_ref()
+        .and_then(|stats| stats.get("inactive_file"))
+        .copied()
+        .unwrap_or(0);
+    let memory_bytes = memory.usage?.saturating_sub(cache);
+    let (used_before, passed_before) = before.replace((used, passed))?;
+    if passed <= passed_before {
+        return None;
+    }
+    let share = used.saturating_sub(used_before) as f64 / (passed - passed_before) as f64;
+    Some(Usage {
+        cpu_percent: (share * f64::from(cores) * 100.0) as f32,
+        memory_bytes,
+        memory_limit_bytes: memory.limit.unwrap_or(0),
+    })
 }
 
 /// An egg's install script and where to put it.
@@ -376,6 +416,18 @@ impl Engine {
         }
     }
 
+    /// What the server is using, about once a second for as long as it is asked.
+    pub fn usage(&self, server: &Server) -> impl Stream<Item = Usage> + Send {
+        let options = StatsOptionsBuilder::new().stream(true).build();
+        let mut before = None;
+        self.docker
+            .stats(&server.container(), Some(options))
+            .filter_map(move |sample| {
+                let usage = sample.ok().and_then(|sample| measure(&sample, &mut before));
+                std::future::ready(usage)
+            })
+    }
+
     /// Sends a signal such as `SIGINT` to the server.
     pub async fn signal(&self, server: &Server, signal: &str) -> Result<(), Error> {
         let options = KillContainerOptionsBuilder::new().signal(signal).build();
@@ -486,7 +538,46 @@ fn small_log() -> HostConfigLogConfig {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::{Port, Protocol, Server};
+    use bollard::models::{
+        ContainerCpuStats, ContainerCpuUsage, ContainerMemoryStats, ContainerStatsResponse,
+    };
+
+    use super::{Port, Protocol, Server, measure};
+
+    /// A report from Docker with the totals of processor time so far.
+    fn report(used: u64, passed: u64, memory: u64, cache: u64) -> ContainerStatsResponse {
+        ContainerStatsResponse {
+            cpu_stats: Some(ContainerCpuStats {
+                cpu_usage: Some(ContainerCpuUsage {
+                    total_usage: Some(used),
+                    ..Default::default()
+                }),
+                system_cpu_usage: Some(passed),
+                online_cpus: Some(2),
+                ..Default::default()
+            }),
+            memory_stats: Some(ContainerMemoryStats {
+                usage: Some(memory),
+                limit: Some(1000),
+                stats: Some([("inactive_file".to_owned(), cache)].into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn measures_usage_between_one_report_and_the_next() {
+        let mut before = None;
+        // The first has nothing before it to be measured against.
+        assert_eq!(measure(&report(100, 1000, 500, 100), &mut before), None);
+        // A quarter of what both cores had to give is half a core.
+        let usage = measure(&report(600, 3000, 700, 200), &mut before).unwrap();
+        assert_eq!(usage.cpu_percent, 50.0);
+        assert_eq!((usage.memory_bytes, usage.memory_limit_bytes), (500, 1000));
+        // A report in which no time has passed says nothing.
+        assert_eq!(measure(&report(600, 3000, 700, 200), &mut before), None);
+    }
 
     fn server(memory_mb: u32) -> Server {
         Server {

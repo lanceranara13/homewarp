@@ -63,6 +63,9 @@
   --text-caption--font-weight: 500;
   --text-mono: 13px;
   --text-mono--line-height: 20px;
+  --text-stat: 20px;
+  --text-stat--line-height: 24px;
+  --text-stat--font-weight: 600;
 
   --radius-xs: 4px;
   --radius-sm: 6px;

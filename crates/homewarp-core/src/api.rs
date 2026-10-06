@@ -59,7 +59,12 @@ impl AppState {
 }
 
 #[derive(OpenApi)]
-#[openapi(info(title = "Homewarp", description = "The Homewarp panel's API."))]
+#[openapi(
+    info(title = "Homewarp", description = "The Homewarp panel's API."),
+    // What a server's socket sends. The socket is no part of this description,
+    // but the web client's types come from here all the same.
+    components(schemas(crate::runtime::Event))
+)]
 struct Document;
 
 fn api() -> OpenApiRouter<AppState> {
@@ -100,18 +105,32 @@ async fn same_origin(request: Request, next: Next) -> Response {
 }
 
 fn crosses_sites(request: &Request) -> bool {
-    if matches!(
+    !matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
-    ) {
-        return false;
+    ) && from_elsewhere(request.headers())
+}
+
+/// A request that no other site's page made. For what `same_origin` lets pass
+/// and should not: a WebSocket is opened with a GET, and a page anywhere may
+/// try to open one here.
+pub(crate) struct FromHere;
+
+impl<S: Send + Sync> FromRequestParts<S> for FromHere {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Problem> {
+        if from_elsewhere(&parts.headers) {
+            return Err(Problem::Forbidden("This request came from another site."));
+        }
+        Ok(Self)
     }
-    let header = |name| {
-        request
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-    };
+}
+
+/// Whether the browser says that the page which made this request is another
+/// site's. A request that names no origin is not a page's.
+fn from_elsewhere(headers: &HeaderMap) -> bool {
+    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
     header(ORIGIN).is_some_and(|origin| {
         let from = origin.split_once("://").map_or(origin, |(_, host)| host);
         Some(from) != header(HOST)

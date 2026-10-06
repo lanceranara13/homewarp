@@ -2,24 +2,31 @@
 //! (PLAN.md §5.6). What a server is made of is in the database and read here;
 //! what it is doing comes from its task in `runtime`.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::Context;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
+    response::Response,
+    routing::get,
 };
+use futures_util::{SinkExt, StreamExt};
 use homewarp_template::{Parser, rules};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use tokio::sync::broadcast::{self, error::RecvError};
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    api::{AppState, Problem, ProblemBody, SignedIn},
+    api::{AppState, FromHere, Problem, ProblemBody, SignedIn},
     auth,
-    runtime::{self, Definition, Power},
+    runtime::{self, Definition, Event, Power, Runtime},
     templates,
 };
 
@@ -30,6 +37,7 @@ const MOST_MEMORY: u32 = 1024 * 1024;
 /// Ports below this belong to the system.
 const LOWEST_PORT: u16 = 1024;
 const MOST_CPU: u32 = 25_600;
+const LONGEST_COMMAND: usize = 1000;
 
 const MISSING: Problem = Problem::NotFound("There is no such server.");
 const NO_DOCKER: Problem = Problem::Unavailable(
@@ -41,6 +49,9 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_servers, create_server))
         .routes(routes!(get_server, remove_server))
         .routes(routes!(power_server))
+        .routes(routes!(command_server))
+        // A WebSocket, which the API's description has no way to describe.
+        .route("/api/v1/servers/{id}/console", get(follow_server))
 }
 
 /// A server as the Servers page shows it.
@@ -100,6 +111,12 @@ struct NewServer {
 #[derive(Deserialize, ToSchema)]
 struct PowerRequest {
     action: Power,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct CommandRequest {
+    /// One line, as it would be typed into the server's console.
+    command: String,
 }
 
 /// Every server as the database has it, for the tasks that run them.
@@ -411,6 +428,103 @@ async fn power_server(
             )
             .into(),
         )),
+    }
+}
+
+/// Types one line into the console of a server that is starting or running.
+#[utoipa::path(
+    post,
+    path = "/api/v1/servers/{id}/command",
+    params(("id" = i64, Path, description = "The server's id.")),
+    request_body = CommandRequest,
+    responses(
+        (status = NO_CONTENT, description = "The line is on its way to the server."),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = NOT_FOUND, body = ProblemBody, description = "There is no such server."),
+        (status = CONFLICT, body = ProblemBody, description = "The server is not running."),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "That is not one line."),
+        (status = SERVICE_UNAVAILABLE, body = ProblemBody, description = "Homewarp cannot reach Docker."),
+    )
+)]
+async fn command_server(
+    State(state): State<AppState>,
+    _: SignedIn,
+    Path(id): Path<i64>,
+    Json(asked): Json<CommandRequest>,
+) -> Result<StatusCode, Problem> {
+    let line = asked.command.trim_end_matches(['\r', '\n']);
+    // A line break inside it would be a second command, slipped in behind the first.
+    if line.is_empty() || line.len() > LONGEST_COMMAND || line.contains(char::is_control) {
+        return Err(Problem::Invalid(
+            "A command is one line of up to 1000 characters.".into(),
+        ));
+    }
+    let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
+    match runtime.type_in(id, line.to_owned()) {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(None) => Err(MISSING),
+        Err(Some(now)) => Err(Problem::Conflict(
+            format!(
+                "This server is {}, so there is nothing to type into.",
+                now.in_words()
+            )
+            .into(),
+        )),
+    }
+}
+
+/// A server as it happens, over a WebSocket: first where things stand, then
+/// each line of its console, each change of state and each measure of what it
+/// uses, as an [`Event`] in JSON. The page sends nothing back.
+async fn follow_server(
+    _: FromHere,
+    _: SignedIn,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, Problem> {
+    let runtime = state.runtime.clone().ok_or(NO_DOCKER)?;
+    let (snapshot, events) = runtime.follow(id).ok_or(MISSING)?;
+    Ok(upgrade.on_upgrade(move |socket| follow(socket, runtime, id, snapshot, events)))
+}
+
+async fn follow(
+    socket: WebSocket,
+    runtime: Arc<Runtime>,
+    id: i64,
+    snapshot: Event,
+    mut events: broadcast::Receiver<Event>,
+) {
+    let (mut page, mut from_page) = socket.split();
+    let mut next = Some(snapshot);
+    loop {
+        if let Some(event) = next.take() {
+            let Ok(json) = serde_json::to_string(&event) else {
+                break;
+            };
+            if page.send(Message::Text(json.into())).await.is_err() {
+                break;
+            }
+        }
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(event) => next = Some(event),
+                // The page fell behind what the server prints: start it again
+                // from where things stand, rather than send it half a console.
+                Err(RecvError::Lagged(_)) => {
+                    let Some((snapshot, fresh)) = runtime.follow(id) else { break };
+                    events = fresh;
+                    next = Some(snapshot);
+                }
+                // The server has been removed.
+                Err(RecvError::Closed) => break,
+            },
+            // Read only so that the page's leaving is noticed.
+            message = from_page.next() => match message {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+        }
     }
 }
 

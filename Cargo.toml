@@ -13,7 +13,8 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 anyhow = "1"
 argon2 = "0.6"
-axum = "0.8"
+# `ws` for the socket a server's page follows it by.
+axum = { version = "0.8", features = ["ws"] }
 # Only the local socket: no HTTP or TLS transport to a remote daemon.
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 cap-std = "4"

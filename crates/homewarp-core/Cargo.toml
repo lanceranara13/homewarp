@@ -16,6 +16,7 @@ workspace = true
 anyhow.workspace = true
 argon2.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 getrandom.workspace = true
 homewarp-runtime = { path = "../homewarp-runtime" }
 homewarp-template = { path = "../homewarp-template" }
