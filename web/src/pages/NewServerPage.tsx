@@ -181,6 +181,7 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
           ports: further.filter((row) => row.port !== '').map((row) => ({ port: Number(row.port), protocol: row.protocol })),
           variables: Object.fromEntries(template.variables.map(({ env }) => [env, typed(`variable.${env}`)])),
           eula: form.get('eula') === 'on',
+          sleep_minutes: Number(typed('sleep_minutes')) || 0,
         })
       }}
     >
@@ -245,6 +246,15 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
             step={10}
             defaultValue={start.cpu_percent ?? 0}
             hint="150 is a core and a half. 0 is no limit."
+          />
+          <Field
+            label="Sleep after, in minutes with nobody on it"
+            name="sleep_minutes"
+            type="number"
+            min={0}
+            max={10080}
+            defaultValue={start.sleep_minutes ?? 0}
+            hint="For a Minecraft server, which says who is on it: stopped when nobody has been for this long, and started again when a player joins. 0 is never."
           />
           <div className="flex flex-col gap-1.5">
             <label htmlFor={`${id}-protocol`} className="text-caption text-ink-subtle">

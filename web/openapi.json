@@ -4493,6 +4493,16 @@
                   "type": "string"
                 }
               },
+              "players": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Players"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "state": {
                 "$ref": "#/components/schemas/State"
               },
@@ -4567,6 +4577,31 @@
               },
               "usage": {
                 "$ref": "#/components/schemas/Usage"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Who is on it, where the server says: a few times a minute while it\nruns, and nothing once it does not.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "players"
+                ]
+              },
+              "players": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Players"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           }
@@ -5286,6 +5321,35 @@
           "unchecked"
         ]
       },
+      "Players": {
+        "type": "object",
+        "description": "Who is on a server, as it says itself to anyone who asks.",
+        "required": [
+          "online",
+          "max",
+          "names"
+        ],
+        "properties": {
+          "max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many it lets on at once.",
+            "minimum": 0
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Some of their names. A server gives a sample, and a full one not even that."
+          },
+          "online": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "PortProtocol": {
         "type": "string",
         "description": "Which protocols a port is published for at home and forwarded for by the Gate.",
@@ -5508,6 +5572,7 @@
           "console",
           "variables",
           "eula",
+          "sleep_minutes",
           "permissions"
         ],
         "properties": {
@@ -5553,6 +5618,17 @@
             },
             "description": "What the account that asks may do with it, beyond looking at it."
           },
+          "players": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Players",
+                "description": "Who is on it, for a running server that says."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "port": {
             "type": "integer",
             "format": "int64",
@@ -5568,6 +5644,11 @@
           "protocol": {
             "$ref": "#/components/schemas/PortProtocol",
             "description": "Which protocols that port is open for."
+          },
+          "sleep_minutes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many minutes it may run with nobody on it before it is put to\nsleep, to be woken when a player joins. 0 is never."
           },
           "state": {
             "$ref": "#/components/schemas/State"
@@ -5646,6 +5727,12 @@
             "$ref": "#/components/schemas/PortProtocol",
             "description": "Which protocols that port is open for. Both, if none is named."
           },
+          "sleep_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Put to sleep after this many minutes with nobody on it, and woken when\na player joins. Nothing, or 0, is never. It needs a server that says\nwho is on it, which is one of Minecraft's.",
+            "minimum": 0
+          },
           "variables": {
             "type": "object",
             "description": "Values for the template's variables, by the name the server sees. One\nthat is not given takes the template's default.",
@@ -5680,6 +5767,17 @@
           },
           "name": {
             "type": "string"
+          },
+          "players": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Players",
+                "description": "Who is on it, for a running server that says."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "port": {
             "type": "integer",
@@ -5849,7 +5947,8 @@
           "running",
           "stopping",
           "crashed",
-          "restoring"
+          "restoring",
+          "asleep"
         ]
       },
       "StopBy": {

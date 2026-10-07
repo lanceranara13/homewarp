@@ -125,7 +125,7 @@ cmd_scratch() {
     home "had=\$(docker exec homewarp-scratch sh -c 'test -e /sys/class/net/homewarp0 && echo tunnel' 2>/dev/null || true)
           docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp homewarp-scratch-tls >/dev/null 2>&1 || true
           for id in \$(ls $data/servers 2>/dev/null); do
-            docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown >/dev/null 2>&1 || true
+            docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown homewarp-\$id-standin >/dev/null 2>&1 || true
           done
           if [ -n \"\$had\" ]; then
             docker run --rm --network host --cap-drop ALL --cap-add NET_ADMIN --entrypoint sh homewarp:dev -c \

@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use homewarp_core::{AppState, Authority, Client, Doored, Runtime, announce};
+use homewarp_core::{AppState, Authority, Client, Doored, Runtime, StandIn, announce};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, UnixListener, UnixStream},
@@ -29,6 +29,17 @@ async fn main() -> anyhow::Result<()> {
         Some("probe-listen") => {
             let port = arguments.next().unwrap_or_default().parse()?;
             return homewarp_core::probe_listen(port).await;
+        }
+        // What Core runs itself as, in a container, in place of a server that is
+        // asleep: `homewarp stand-in <port> <listed> <joining>`.
+        Some("stand-in") => {
+            let usage = "usage: homewarp stand-in <port> <listed> <joining>";
+            let port = arguments.next().context(usage)?.parse()?;
+            let saying = StandIn {
+                listed: arguments.next().context(usage)?,
+                joining: arguments.next().context(usage)?,
+            };
+            return homewarp_core::stand_in(port, saying).await;
         }
         // `homewarp two-steps-off <username>`: for an account that has lost its
         // authenticator app and its recovery codes. Run where the data is, as

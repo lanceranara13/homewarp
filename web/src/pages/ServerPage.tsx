@@ -10,6 +10,7 @@ import {
   powerServer,
   removeServer,
   type Permission,
+  type Players,
   type Power,
   type ServerEvent,
   type ServerSettings,
@@ -31,7 +32,7 @@ const KEPT_LINES = 1000
 const USES: ServerState[] = ['starting', 'running', 'stopping']
 
 /** What the socket has told a page about its server. */
-type Followed = { state: ServerState; lines: string[]; usage: Usage | null }
+type Followed = { state: ServerState; lines: string[]; usage: Usage | null; players: Players | null }
 
 /** What the socket has said, for the tab that shows it. Null while there is no socket. */
 const Live = createContext<Followed | null>(null)
@@ -52,6 +53,8 @@ export function ServerLayout() {
   // The loader turns away an address with no server behind it; this is one removed since.
   if (!server) throw notFound()
   const state = followed?.state ?? server.state
+  // Who is on it comes with what is fetched anyway: the first request, and then the socket.
+  const players = state === 'running' ? (followed ? followed.players : (server.players ?? null)) : null
   // Wanted, not needed: the chip is painted with the address at home, and takes the VPS's once it is known.
   const gate = useGate()
   const owner = useOwner()
@@ -66,6 +69,7 @@ export function ServerLayout() {
           <div className="flex min-h-10 flex-wrap items-center gap-3 md:min-h-8">
             <StatusPill state={state} />
             <CopyChip text={addressOf(gate, server.port)} />
+            {players && <PlayersOn players={players} />}
           </div>
           {/* What an account has not been let do is not put before it to be refused. */}
           {server.permissions.includes('power') && (
@@ -74,6 +78,12 @@ export function ServerLayout() {
             </div>
           )}
         </div>
+        {state === 'asleep' && (
+          <p className="max-w-140 text-small text-ink-subtle">
+            Nobody was on it, so Homewarp stopped it. It starts by itself when a player joins: the first to try is told to
+            come back in a minute. Stop keeps it down.
+          </p>
+        )}
         <Tabs serverId={serverId} may={server.permissions} owner={owner} />
         <main className="flex min-w-0 flex-1 flex-col gap-4">
           <Live value={followed}>
@@ -82,6 +92,17 @@ export function ServerLayout() {
         </main>
       </div>
     </>
+  )
+}
+
+/** How many are on a server, and who, as far as the server says. */
+function PlayersOn({ players }: { players: Players }) {
+  return (
+    <span className="text-small text-ink-subtle">
+      {players.online} of {players.max} on it
+      {players.names.length > 0 && `: ${players.names.join(', ')}`}
+      {players.online > players.names.length && players.names.length > 0 && ', and more'}
+    </span>
   )
 }
 
@@ -178,6 +199,10 @@ export function ConsoleTab() {
   const owner = useOwner()
   if (!server) throw notFound()
   const state = followed?.state ?? server.state
+  // Known of a server that has said who is on it, or sleeps because nobody was.
+  const minecraft = state === 'asleep' || (followed ? followed.players : server.players) != null
+  const gate = useGate()
+  const vps = gate?.state === 'connected' ? gate.address : null
 
   return (
     <>
@@ -206,7 +231,35 @@ export function ConsoleTab() {
         {server.ports.length > 0 &&
           ` · also on ${server.ports.map((further) => `${further.port}${!further.protocol || further.protocol === 'both' ? '' : `/${further.protocol}`}`).join(', ')}`}
       </p>
+      {owner && minecraft && vps && <JoinByName port={server.port} vps={vps} />}
     </>
+  )
+}
+
+/**
+ * For a Minecraft server behind a VPS: the two DNS records that let players
+ * join by a name of the owner's, with no port after it. Java Edition looks the
+ * second one up by itself, which is how many servers share one address.
+ */
+function JoinByName({ port, vps }: { port: number; vps: string }) {
+  // What leads a name to the VPS depends on what the VPS was connected by.
+  const leads = /^\d+\.\d+\.\d+\.\d+$/.test(vps) ? 'A    ' : vps.includes(':') ? 'AAAA ' : 'CNAME'
+  const to = leads === 'CNAME' ? `${vps}.` : vps
+  return (
+    <details className="max-w-140 text-small text-ink-subtle">
+      <summary className="cursor-pointer text-ink">Let players join by a name, without the port</summary>
+      <div className="mt-2 flex flex-col gap-2">
+        <p>
+          With a domain of your own, add these two records where its DNS is kept, with your name in place of
+          play.example.com. Players then join as play.example.com, and Minecraft: Java Edition finds the port by itself.
+          Each server can have a name of its own this way.
+        </p>
+        <pre className="overflow-x-auto rounded-md border border-hairline bg-surface-1 p-2.5 font-mono text-mono text-ink">
+          {`play.example.com.                  ${leads}  ${to}
+_minecraft._tcp.play.example.com.  SRV    0 5 ${port} play.example.com.`}
+        </pre>
+      </div>
+    </details>
   )
 }
 
@@ -260,14 +313,23 @@ export function ServerSettingsTab() {
 function told(before: Followed | null, event: ServerEvent): Followed | null {
   switch (event.kind) {
     case 'snapshot':
-      return { state: event.state, lines: event.lines, usage: event.usage ?? null }
+      return { state: event.state, lines: event.lines, usage: event.usage ?? null, players: event.players ?? null }
     case 'line':
       return before && { ...before, lines: [...before.lines.slice(1 - KEPT_LINES), event.text] }
     case 'state':
       // What is not running uses nothing, and is not told so in a message of its own.
-      return before && { ...before, state: event.state, usage: USES.includes(event.state) ? before.usage : null }
+      return (
+        before && {
+          ...before,
+          state: event.state,
+          usage: USES.includes(event.state) ? before.usage : null,
+          players: USES.includes(event.state) ? before.players : null,
+        }
+      )
     case 'usage':
       return before && { ...before, usage: event.usage }
+    case 'players':
+      return before && { ...before, players: event.players ?? null }
   }
 }
 
@@ -342,11 +404,12 @@ function PowerControls({ id, state }: { id: number; state: ServerState }) {
           </Button>
         ) : (
           <>
-            <Button variant="primary" disabled={!allowed('offline', 'crashed')} onClick={() => power.mutate('start')}>
+            <Button variant="primary" disabled={!allowed('offline', 'crashed', 'asleep')} onClick={() => power.mutate('start')}>
               <Play aria-hidden size={16} />
               Start
             </Button>
-            <Button disabled={!allowed('starting', 'running')} onClick={() => power.mutate('stop')}>
+            {/* Of one that is asleep, Stop ends the sleep: nothing wakes it after that. */}
+            <Button disabled={!allowed('starting', 'running', 'asleep')} onClick={() => power.mutate('stop')}>
               <Square aria-hidden size={16} />
               Stop
             </Button>

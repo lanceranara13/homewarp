@@ -215,6 +215,7 @@ const STATES: Record<ServerState, { word: string; tone: Tone }> = {
   stopping: { word: 'Stopping', tone: 'starting' },
   crashed: { word: 'Crashed', tone: 'crashed' },
   restoring: { word: 'Restoring', tone: 'installing' },
+  asleep: { word: 'Asleep', tone: 'offline' },
 }
 
 /** What a server is doing. */

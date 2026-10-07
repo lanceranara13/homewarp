@@ -30,6 +30,8 @@ const WORDS: Record<string, string> = {
   'server.start': 'Started it',
   'server.stop': 'Stopped it',
   'server.kill': 'Killed it',
+  'server.sleep': 'Put it to sleep',
+  'server.wake': 'Woke it for a player',
   'server.install': 'Installed it again',
   'server.command': 'Typed a command',
   'server.let_in': 'Let an account in',

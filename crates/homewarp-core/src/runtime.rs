@@ -9,7 +9,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     pin::pin,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -19,15 +19,18 @@ use std::{
 use anyhow::{Context, ensure};
 use futures_util::StreamExt;
 use homewarp_runtime::{
-    Engine, InstallScript, Listener, Network, Port, Protocol, Server as Spec, ServerDir, strip_ansi,
+    Console, Engine, InstallScript, Listener, Network, Port, Protocol, Server as Spec, ServerDir,
+    strip_ansi,
 };
-use homewarp_template::{Replacement, Stop, Template, config, substitute};
+use homewarp_template::{Parser, Replacement, Stop, Template, config, substitute};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
 use utoipa::ToSchema;
 
 use crate::{
+    audit,
+    minecraft::{self, Joined, Players},
     servers::{self, ExtraPort, PortProtocol},
     settings,
 };
@@ -49,6 +52,11 @@ const RESTARTS: u32 = 3;
 const FIRST_WAIT: Duration = Duration::from_secs(5);
 /// A server that stayed up this long was not in a round of crashes.
 const STEADY: Duration = Duration::from_secs(60);
+/// How often a running server is asked who is on it.
+const ASK_EVERY: Duration = Duration::from_secs(15);
+/// How many times a server that has begun to run may fail to say before it is
+/// taken for one that does not speak Minecraft, and asked no more.
+const UNANSWERED: u32 = 4;
 
 /// What a server is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -66,12 +74,18 @@ pub(crate) enum State {
     /// Its files are being put back from a backup. It has no process, and is
     /// not started, changed or removed until that is done.
     Restoring,
+    /// Stopped by Homewarp because nobody was on it. Something small listens
+    /// in its place, and it is started again when a player joins.
+    Asleep,
 }
 
 impl State {
     /// Whether the server has no process, and none on its way.
     pub(crate) fn is_idle(self) -> bool {
-        matches!(self, Self::Offline | Self::Crashed | Self::InstallFailed)
+        matches!(
+            self,
+            Self::Offline | Self::Crashed | Self::InstallFailed | Self::Asleep
+        )
     }
 
     /// For the sentence "This server is ...".
@@ -85,6 +99,7 @@ impl State {
             Self::Stopping => "stopping",
             Self::Crashed => "stopped after a crash",
             Self::Restoring => "having a backup put back",
+            Self::Asleep => "asleep",
         }
     }
 }
@@ -123,6 +138,7 @@ pub(crate) enum Event {
         first: u64,
         lines: Vec<String>,
         usage: Option<Usage>,
+        players: Option<Players>,
     },
     /// One more line of the console.
     Line {
@@ -136,6 +152,11 @@ pub(crate) enum Event {
     Usage {
         usage: Usage,
     },
+    /// Who is on it, where the server says: a few times a minute while it
+    /// runs, and nothing once it does not.
+    Players {
+        players: Option<Players>,
+    },
 }
 
 /// A server as the database has it, with its template read.
@@ -143,6 +164,7 @@ pub(crate) enum Event {
 pub(crate) struct Definition {
     pub(crate) id: i64,
     pub(crate) uuid: String,
+    pub(crate) name: String,
     pub(crate) template: Template,
     pub(crate) image: String,
     pub(crate) memory_mb: u32,
@@ -155,6 +177,25 @@ pub(crate) struct Definition {
     pub(crate) variables: Vec<(String, String)>,
     pub(crate) eula: bool,
     pub(crate) installed: bool,
+    /// How many minutes it may run with nobody on it before it is put to
+    /// sleep. 0 is never.
+    pub(crate) sleep_minutes: u32,
+    /// Whether it was asleep when Homewarp last wrote that down: read when
+    /// Homewarp starts, and nowhere after.
+    pub(crate) asleep: bool,
+}
+
+/// So many minutes, as a sentence says it.
+fn minutes(count: u32) -> String {
+    match count {
+        1 => "a minute".to_owned(),
+        count => format!("{count} minutes"),
+    }
+}
+
+/// The container that listens in place of a server that is asleep.
+fn stand_in_name(uuid: &str) -> String {
+    format!("homewarp-{uuid}-standin")
 }
 
 impl Definition {
@@ -217,6 +258,7 @@ struct Seen {
     /// How many lines there have been, those no longer kept among them.
     count: u64,
     usage: Option<Usage>,
+    players: Option<Players>,
 }
 
 /// What a server's task has seen, and the way it tells the pages that follow
@@ -235,6 +277,7 @@ impl Watch {
             lines: VecDeque::new(),
             count: 0,
             usage: None,
+            players: None,
         };
         Self {
             seen: Arc::new(Mutex::new(seen)),
@@ -253,12 +296,47 @@ impl Watch {
     fn set(&self, state: State) {
         let mut seen = self.seen();
         seen.state = state;
-        // What is not running uses nothing.
+        // What is not running uses nothing, and has nobody on it.
         if !matches!(state, State::Starting | State::Running | State::Stopping) {
             seen.usage = None;
+            seen.players = None;
         }
         // An error here says that no page is following, which is the usual case.
         let _ = self.events.send(Event::State { state });
+    }
+
+    /// Starting, if it was asleep. False if it was anything else by now, and
+    /// so left as it was.
+    fn wake(&self) -> bool {
+        let mut seen = self.seen();
+        if seen.state != State::Asleep {
+            return false;
+        }
+        seen.state = State::Starting;
+        let _ = self.events.send(Event::State {
+            state: State::Starting,
+        });
+        true
+    }
+
+    /// Offline, if it was asleep: for a sleep that nothing can stand in for.
+    fn give_up_sleep(&self) {
+        let mut seen = self.seen();
+        if seen.state == State::Asleep {
+            seen.state = State::Offline;
+            let _ = self.events.send(Event::State {
+                state: State::Offline,
+            });
+        }
+    }
+
+    /// Who the server says is on it. Told to the pages only when it changes.
+    fn count(&self, players: Option<Players>) {
+        let mut seen = self.seen();
+        if seen.players != players {
+            seen.players.clone_from(&players);
+            let _ = self.events.send(Event::Players { players });
+        }
     }
 
     /// Adds a line to the console, dropping the oldest once it is full.
@@ -287,6 +365,7 @@ impl Watch {
             first: seen.count - seen.lines.len() as u64,
             lines: seen.lines.iter().cloned().collect(),
             usage: seen.usage,
+            players: seen.players.clone(),
         };
         (snapshot, self.events.subscribe())
     }
@@ -317,6 +396,27 @@ enum Asked {
     Power(Power),
     /// A line typed into its console.
     Typed(String),
+    /// What it is made of was changed. That matters to a server that is
+    /// asleep, whose port something is listening on in its place.
+    Changed,
+}
+
+/// How a server's run came to its end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    Stopped,
+    Crashed,
+    /// Stopped by Homewarp, because nobody had been on it for long enough.
+    Slept,
+}
+
+/// Asks a running server who is on it, every so often, until this is dropped.
+struct Asking(tokio::task::JoinHandle<()>);
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// The two ends other code holds of a server's task.
@@ -384,6 +484,11 @@ impl Runtime {
         Some(self.servers().get(&id)?.watch.state())
     }
 
+    /// Who a running server says is on it. None for one that does not say.
+    pub(crate) fn players(&self, id: i64) -> Option<Players> {
+        self.servers().get(&id)?.watch.seen().players.clone()
+    }
+
     /// A server's state and what is kept of its console.
     pub(crate) fn seen(&self, id: i64) -> Option<(State, Vec<String>)> {
         let servers = self.servers();
@@ -398,8 +503,10 @@ impl Runtime {
         let live = servers.get(&id).ok_or(None)?;
         let now = live.watch.state();
         let next = match (power, now) {
-            (Power::Start, State::Offline | State::Crashed) => State::Starting,
+            (Power::Start, State::Offline | State::Crashed | State::Asleep) => State::Starting,
             (Power::Stop, State::Starting | State::Running) => State::Stopping,
+            // Stopped already. What ends is its sleep: nothing wakes it after this.
+            (Power::Stop, State::Asleep) => State::Offline,
             (Power::Kill, State::Starting | State::Running | State::Stopping) => State::Stopping,
             (Power::Install, State::InstallFailed) => State::Installing,
             _ => return Err(Some(now)),
@@ -439,6 +546,8 @@ impl Runtime {
         // Whether it is installed is the task's to say, not the form's.
         new.installed = made_of.installed;
         *made_of = new;
+        // Not delivered to a task that is busy, which reads it afresh anyway.
+        let _ = live.asked.try_send(Asked::Changed);
         Ok(())
     }
 
@@ -550,6 +659,7 @@ impl Runtime {
         let watch = Watch::new(match (fresh, server.installed) {
             (true, _) => State::Installing,
             (false, false) => State::InstallFailed,
+            (false, true) if server.asleep => State::Asleep,
             (false, true) => State::Offline,
         });
         let (asked, inbox) = mpsc::channel(16);
@@ -591,7 +701,7 @@ impl Runtime {
                 }
             }
         }
-        while let Some(asked) = inbox.recv().await {
+        while let Some(asked) = self.next(&made_of, &watch, &mut inbox).await {
             match asked {
                 Asked::Power(Power::Install) if !current(&made_of).installed => {
                     if self.install(&made_of, &watch).await {
@@ -601,10 +711,162 @@ impl Runtime {
                 Asked::Power(Power::Start) if current(&made_of).installed => {
                     self.keep_serving(&made_of, &watch, &mut inbox, false).await;
                 }
+                // Asked of one that was asleep, most likely: it is to stay down.
+                Asked::Power(Power::Stop) => self.write_down_sleep(server.id, false).await,
                 // Asked of a server that had ended by the time this was read.
                 _ => {}
             }
         }
+    }
+
+    /// What is asked of a server that is not running, when it is asked. One
+    /// that is asleep has a stand-in listening on its port meanwhile, and a
+    /// player who joins is as good as somebody asking for a start.
+    async fn next(
+        &self,
+        made_of: &Mutex<Definition>,
+        watch: &Watch,
+        inbox: &mut mpsc::Receiver<Asked>,
+    ) -> Option<Asked> {
+        let mut changes = watch.events.subscribe();
+        loop {
+            if watch.state() != State::Asleep {
+                tokio::select! {
+                    asked = inbox.recv() => match asked {
+                        Some(Asked::Changed) => continue,
+                        other => return other,
+                    },
+                    // It may be asleep again, once what held it has let go.
+                    _ = changes.recv() => continue,
+                }
+            }
+            let server = current(made_of);
+            tokio::select! {
+                ended = self.stand_in(&server) => match ended {
+                    Ok(Some(joined)) => {
+                        // Not while a backup is being put back: the player was
+                        // told to come again, and by then it may be asleep again.
+                        if watch.wake() {
+                            watch.say(format!(
+                                "{} joined from {}. Waking up.",
+                                joined.name, joined.from
+                            ));
+                            let detail = format!("{} from {}", joined.name, joined.from);
+                            audit::record_by_homewarp(&self.db, Some(server.id), "server.wake", &detail)
+                                .await;
+                            return Some(Asked::Power(Power::Start));
+                        }
+                    }
+                    Ok(None) => {
+                        watch.say("What listened in its place while it slept has ended. It is offline now.");
+                        watch.give_up_sleep();
+                        self.write_down_sleep(server.id, false).await;
+                    }
+                    Err(error) => {
+                        watch.say(format!(
+                            "Homewarp could not listen in its place while it slept, so it is offline now: {error:#}"
+                        ));
+                        watch.give_up_sleep();
+                        self.write_down_sleep(server.id, false).await;
+                    }
+                },
+                asked = inbox.recv() => {
+                    // Its port is wanted back, by the server or by a new stand-in.
+                    let _ = self.engine.end_listener(&stand_in_name(&server.uuid)).await;
+                    match asked {
+                        Some(Asked::Changed) => continue,
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Has this very program listen where a sleeping server would
+    /// ([`crate::minecraft::stand_in`]), to its end, and says who joined if it
+    /// ended because a player did.
+    async fn stand_in(&self, server: &Definition) -> anyhow::Result<Option<Joined>> {
+        let image = self.own_image().await?;
+        let program = std::env::current_exe().context("finding this program")?;
+        let name = stand_in_name(&server.uuid);
+        let listener = Listener {
+            name: &name,
+            network: NETWORK,
+            image: &image,
+            command: vec![
+                program.to_string_lossy().into_owned(),
+                "stand-in".to_owned(),
+                server.port.to_string(),
+                format!("{} is asleep. Join to wake it up.", server.name),
+                format!("{} is waking up. Join again in a minute.", server.name),
+            ],
+            port: server.port,
+            user: USER,
+        };
+        let mut joined = None;
+        let code = self
+            .engine
+            .listen(&listener, |line| {
+                if let Some(player) = minecraft::joined(line) {
+                    joined = Some(player);
+                }
+            })
+            .await?;
+        ensure!(code == 0, "it ended with exit code {code}");
+        Ok(joined)
+    }
+
+    /// Writes down whether a server is asleep, for a Homewarp that starts
+    /// again to find it so.
+    async fn write_down_sleep(&self, id: i64, asleep: bool) {
+        let written = sqlx::query("UPDATE servers SET asleep = ? WHERE id = ?")
+            .bind(asleep)
+            .bind(id)
+            .execute(&self.db)
+            .await;
+        if let Err(error) = written {
+            tracing::error!("whether server {id} is asleep could not be written down: {error}");
+        }
+    }
+
+    /// Starts asking a server that has begun to run who is on it. Not one
+    /// whose port is for UDP alone, which is not Minecraft's.
+    async fn ask_after(
+        &self,
+        server: &Definition,
+        spec: &Spec,
+        count: &mpsc::Sender<Option<Players>>,
+    ) -> Option<Asking> {
+        if server.protocol == PortProtocol::Udp {
+            return None;
+        }
+        // On the servers' own bridge, where it listens whatever is published.
+        let address = self.engine.address_of(spec).await.ok()??;
+        let at = SocketAddr::new(address, server.port);
+        let count = count.clone();
+        Some(Asking(tokio::spawn(async move {
+            loop {
+                let found = minecraft::players(at).await.ok();
+                if count.send(found).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(ASK_EVERY).await;
+            }
+        })))
+    }
+
+    /// Tells a server to stop, the way its template says a server is told.
+    async fn tell_to_stop(
+        &self,
+        server: &Definition,
+        spec: &Spec,
+        console: &mut Console,
+    ) -> anyhow::Result<()> {
+        match &server.template.stop {
+            Stop::Command(command) => console.send(command).await?,
+            Stop::Signal(signal) => self.engine.signal(spec, signal).await?,
+        }
+        Ok(())
     }
 
     /// Runs the template's install script. True if the server is installed now.
@@ -661,7 +923,7 @@ impl Runtime {
     }
 
     /// Starts the server, or takes over one found running, and stays with it
-    /// until it has ended. True if it ended in a crash.
+    /// until it has ended. Says how it ended.
     async fn serve(
         &self,
         server: &Definition,
@@ -669,7 +931,7 @@ impl Runtime {
         watch: &Watch,
         inbox: &mut mpsc::Receiver<Asked>,
         found_running: bool,
-    ) -> bool {
+    ) -> Ended {
         let ended = async {
             let mut console = if found_running {
                 watch.set(State::Running);
@@ -687,6 +949,17 @@ impl Runtime {
             // Fused, because it ends before the server's last lines have been read.
             let mut usage = pin!(self.engine.usage(spec).fuse());
             let mut told_to_stop = false;
+            // Who is on it: asked from when it runs, and no more once it is
+            // plain that it does not say.
+            let (count, mut counted) = mpsc::channel(1);
+            let mut asking = match found_running {
+                true => self.ask_after(server, spec, &count).await,
+                false => None,
+            };
+            let mut answered = false;
+            let mut unanswered = 0;
+            let mut empty_since: Option<Instant> = None;
+            let mut sleeping = false;
             loop {
                 tokio::select! {
                     Some(now) = usage.next() => watch.measure(Usage {
@@ -700,18 +973,50 @@ impl Runtime {
                         let done = &server.template.done;
                         if watch.state() == State::Starting && done.iter().any(|done| line.contains(done.as_str())) {
                             watch.set(State::Running);
+                            asking = self.ask_after(server, spec, &count).await;
                         }
                         watch.say(line);
+                    }
+                    Some(found) = counted.recv() => {
+                        if watch.state() != State::Running {
+                            continue;
+                        }
+                        let Some(players) = found else {
+                            // One that has answered before is busy, and is asked again.
+                            unanswered += 1;
+                            if !answered && unanswered >= UNANSWERED {
+                                asking = None;
+                            }
+                            continue;
+                        };
+                        answered = true;
+                        match players.online {
+                            0 => {
+                                empty_since.get_or_insert_with(Instant::now);
+                            }
+                            _ => empty_since = None,
+                        }
+                        watch.count(Some(players));
+                        let patience = Duration::from_secs(u64::from(server.sleep_minutes) * 60);
+                        let empty_for_long = empty_since.is_some_and(|since| since.elapsed() >= patience);
+                        if server.sleep_minutes > 0 && empty_for_long {
+                            sleeping = true;
+                            told_to_stop = true;
+                            asking = None;
+                            watch.say(format!(
+                                "Nobody has been on for {}. Homewarp is putting it to sleep, and wakes it when a player joins.",
+                                minutes(server.sleep_minutes)
+                            ));
+                            watch.set(State::Stopping);
+                            self.tell_to_stop(server, spec, &mut console).await?;
+                        }
                     }
                     asked = inbox.recv() => match asked {
                         Some(Asked::Typed(line)) => console.send(&line).await?,
                         Some(Asked::Power(Power::Stop)) if !told_to_stop => {
                             told_to_stop = true;
                             watch.set(State::Stopping);
-                            match &server.template.stop {
-                                Stop::Command(command) => console.send(command).await?,
-                                Stop::Signal(signal) => self.engine.signal(spec, signal).await?,
-                            }
+                            self.tell_to_stop(server, spec, &mut console).await?;
                         }
                         Some(Asked::Power(Power::Kill)) => {
                             told_to_stop = true;
@@ -729,22 +1034,27 @@ impl Runtime {
                     },
                 }
             }
+            drop(asking);
             let code = self.engine.wait(spec).await?;
             self.engine.remove(spec).await?;
-            anyhow::Ok((code, told_to_stop))
+            anyhow::Ok((code, told_to_stop, sleeping))
         }
         .await;
         match ended {
-            Ok((code, told_to_stop)) if told_to_stop || code == 0 => {
-                watch.set(State::Offline);
-                false
+            Ok((_, _, true)) => {
+                watch.set(State::Asleep);
+                Ended::Slept
             }
-            Ok((code, _)) => {
+            Ok((code, told_to_stop, _)) if told_to_stop || code == 0 => {
+                watch.set(State::Offline);
+                Ended::Stopped
+            }
+            Ok((code, ..)) => {
                 watch.say(format!(
                     "The server stopped by itself, with exit code {code}."
                 ));
                 watch.set(State::Crashed);
-                true
+                Ended::Crashed
             }
             // Not a crash of the server's: the same would happen again at once.
             Err(error) => {
@@ -752,7 +1062,7 @@ impl Runtime {
                 // Whatever was made of it must not be left running unwatched.
                 let _ = self.engine.remove(spec).await;
                 watch.set(State::Crashed);
-                false
+                Ended::Stopped
             }
         }
     }
@@ -773,11 +1083,21 @@ impl Runtime {
             let server = current(made_of);
             let spec = self.spec(&server);
             let began = Instant::now();
-            if !self
+            // Whatever it was before, it is not asleep while it runs.
+            self.write_down_sleep(server.id, false).await;
+            match self
                 .serve(&server, &spec, watch, inbox, found_running)
                 .await
             {
-                return;
+                Ended::Crashed => {}
+                Ended::Stopped => return,
+                Ended::Slept => {
+                    self.write_down_sleep(server.id, true).await;
+                    let detail = format!("nobody on for {}", minutes(server.sleep_minutes));
+                    audit::record_by_homewarp(&self.db, Some(server.id), "server.sleep", &detail)
+                        .await;
+                    return;
+                }
             }
             found_running = false;
             if began.elapsed() >= STEADY {

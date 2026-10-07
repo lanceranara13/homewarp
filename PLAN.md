@@ -1641,6 +1641,65 @@ Each phase ends with something that works on the homelab.
 - Player lists, mod/plugin browser, S3 backups, webhooks.
 - Import servers from an existing Pelican/Pterodactyl node.
 - Multiple Gates (regions) and multiple home nodes.
+- *Begun 2026-10-07. Done:*
+  - *Who is on a server, and sleep and wake* (Minecraft, Java Edition).
+    - *Asked as a game's list of servers asks.* Core speaks the opening of Minecraft's
+      protocol and no more (`minecraft.rs`): the handshake, the list's question and its
+      answer. A running server is asked every fifteen seconds, on the servers' own
+      bridge, and what it says of its players goes to the page with everything else the
+      page is told, over the socket it has already: no request is added. A server that
+      has not answered four times from when it began to run is one of another game, and
+      is asked no more. Nothing in an egg says which game it is, so nothing is guessed
+      from one.
+    - *Sleep.* A server may be given a number of minutes (Settings, Advanced). Empty
+      for that long, it is stopped the way its template stops it, and is then *asleep*:
+      a state of its own, written down, so that a Homewarp that starts again finds it so.
+    - *Wake.* While it sleeps, Core's own program listens on its port in a container of
+      the tightest kind (no files, no capabilities, 64 MB), as the probe of the tunnel
+      does. A game's list is told that the server sleeps. A player who joins is told to
+      come back in a minute, and the stand-in ends, saying who it was; Core starts the
+      server and writes down the name and the address. Asking wakes nothing, and
+      neither does anything that is not the first packet of a login with a name in it.
+    - *Stop, of one that is asleep, keeps it down:* the stand-in goes, and nothing wakes
+      it after that. Start wakes it by hand.
+    - *Not Bedrock, and not other games.* Bedrock speaks over UDP, where there is no
+      connection to see the beginning of. A game that cannot be asked who is on it
+      cannot be known to be empty.
+    - *In the lab,* with a server of the lab's own that answers as Minecraft does, and
+      through the Gate: left running while somebody is on it; asleep a minute after the
+      last one left; a game's list told so; Stop keeps it down; a Homewarp that starts
+      again finds it asleep and stands in again; a join wakes it, and the player's own
+      address is what is written down.
+    - *On the real machines* (2026-10-07, a throwaway copy on the homelab): Velocity from
+      the catalogue, which is Minecraft's protocol in somebody else's program and needs
+      no EULA. Core's count agreed with `mcstatus`, a program that only asks (0 of 500).
+      Asleep after its minute, `mcstatus` was told "Lobby is asleep. Join to wake it
+      up.", and `minecraft-protocol`, which logs in as a game does, was told it was
+      waking, and Velocity came up. Then the same through the VPS at its public
+      address, where what was written down was home's own address as the internet sees
+      it. In a browser: the count on the list and on the server's page, the pill, the
+      setting, Stop. Both machines were left as found.
+  - *The DNS records for a name without a port.* A Minecraft server behind a VPS shows
+    the two records (an address for the name, and `_minecraft._tcp` for the port) that
+    let players join as `play.example.com`. It is how many servers share one address
+    without anything standing between the player and the server.
+  - *A config file that is set line by line is not made empty* (found with Velocity's
+    egg, on the homelab). Its `velocity.toml` is set by replacing the line that begins
+    `bind = `. The file is not there before the first start, Homewarp made it, empty,
+    as Wings does, and Velocity, finding a file, never wrote its own: it came up on
+    port 25565 whatever the server's port was, at every start. Such a file is left for
+    the server to make now, and said so in the console; from the second start the port
+    is in it. Files that are set key by key are made as before, with their keys.
+- *Not done, and why:*
+  - *Answering for a server that is stopped, and from the Gate while home is away.*
+    The stand-in could say "offline" as well as "asleep", at the price of a container
+    for every stopped server. From the Gate it would be a port of the Gate's own, which
+    a VPS's firewall shuts until it is asked: one more opening, for a courtesy.
+  - *Hostname routing, and PROXY protocol with it.* A program that reads the name a
+    player typed has to stand between the player and the server, and the server then
+    sees the program's address and not the player's, unless it is one that reads the
+    PROXY header (Paper and Velocity do, others do not). The DNS records above give a
+    name to each server without that.
 
 ## 12. Risks
 

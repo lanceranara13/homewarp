@@ -27,6 +27,7 @@ use crate::{
     accounts::{self, Permission},
     api::{AppState, FromHere, Owner, Problem, ProblemBody, SignedIn},
     audit, auth,
+    minecraft::Players,
     runtime::{self, Definition, Event, Power, Runtime},
     templates,
 };
@@ -41,6 +42,8 @@ const MOST_CPU: u32 = 25_600;
 /// More than any game asks for, and few enough to refuse a mistake.
 const MOST_PORTS: usize = 16;
 const LONGEST_COMMAND: usize = 1000;
+/// A week, in minutes.
+const MOST_SLEEP: u32 = 7 * 24 * 60;
 
 pub(crate) const MISSING: Problem = Problem::NotFound("There is no such server.");
 const NO_DOCKER: Problem = Problem::Unavailable(
@@ -160,6 +163,8 @@ struct ServerSummary {
     /// Where players reach it on the home machine.
     port: i64,
     memory_mb: i64,
+    /// Who is on it, for a running server that says.
+    players: Option<Players>,
 }
 
 /// A server in full, with the end of its console.
@@ -189,6 +194,11 @@ struct Server {
     variables: BTreeMap<String, String>,
     /// Whether the game's EULA was agreed to for it.
     eula: bool,
+    /// How many minutes it may run with nobody on it before it is put to
+    /// sleep, to be woken when a player joins. 0 is never.
+    sleep_minutes: i64,
+    /// Who is on it, for a running server that says.
+    players: Option<Players>,
     /// What the account that asks may do with it, beyond looking at it.
     permissions: Vec<Permission>,
 }
@@ -217,6 +227,11 @@ struct ServerSettings {
     /// Whoever asks agrees to the EULA of the game, for a game that has one.
     #[serde(default)]
     eula: bool,
+    /// Put to sleep after this many minutes with nobody on it, and woken when
+    /// a player joins. Nothing, or 0, is never. It needs a server that says
+    /// who is on it, which is one of Minecraft's.
+    #[serde(default)]
+    sleep_minutes: u32,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -237,6 +252,7 @@ struct Checked {
     ports: Vec<ExtraPort>,
     variables: Vec<(String, String)>,
     eula: bool,
+    sleep_minutes: u32,
 }
 
 impl Checked {
@@ -284,6 +300,7 @@ impl Checked {
         Definition {
             id,
             uuid,
+            name: self.name,
             template,
             image: self.image,
             memory_mb: self.memory_mb,
@@ -294,6 +311,9 @@ impl Checked {
             variables: self.variables,
             eula: self.eula,
             installed,
+            sleep_minutes: self.sleep_minutes,
+            // What is made or changed is not running, and not asleep either.
+            asleep: false,
         }
     }
 }
@@ -327,6 +347,12 @@ fn check(
     let cpu_percent = settings.cpu_percent.unwrap_or(0);
     if cpu_percent > MOST_CPU {
         return invalid("A processor limit is 25600 % at the most.".to_owned());
+    }
+    if settings.sleep_minutes > MOST_SLEEP {
+        return invalid(
+            "A server is put to sleep after a week with nobody on it at the latest: 10080 minutes."
+                .to_owned(),
+        );
     }
     let image = match settings.image {
         Some(asked) if template.images.iter().any(|image| image.image == asked) => asked,
@@ -373,6 +399,7 @@ fn check(
         ports: settings.ports,
         variables,
         eula: settings.eula,
+        sleep_minutes: settings.sleep_minutes,
     })
 }
 
@@ -417,11 +444,15 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
         String,
         i64,
         i64,
+        String,
+        i64,
+        i64,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT servers.id, servers.uuid, templates.definition, servers.image, servers.memory_mb,
                 servers.cpu_percent, servers.port, servers.protocol, servers.ports,
-                servers.variables, servers.eula, servers.installed
+                servers.variables, servers.eula, servers.installed, servers.name,
+                servers.sleep_minutes, servers.asleep
          FROM servers JOIN templates ON templates.id = servers.template_id",
     )
     .fetch_all(db)
@@ -441,10 +472,16 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
                 variables,
                 eula,
                 installed,
+                name,
+                sleep_minutes,
+                asleep,
             )| {
                 Ok(Definition {
                     id,
                     uuid,
+                    name,
+                    sleep_minutes: sleep_minutes.try_into()?,
+                    asleep: asleep != 0,
                     template: serde_json::from_str(&template)
                         .context("reading a stored template")?,
                     image,
@@ -470,6 +507,10 @@ fn state_of(state: &AppState, id: i64) -> runtime::State {
         .as_ref()
         .and_then(|runtime| runtime.state(id))
         .unwrap_or(runtime::State::Offline)
+}
+
+fn players_of(state: &AppState, id: i64) -> Option<Players> {
+    state.runtime.as_ref()?.players(id)
 }
 
 /// Every server, by name. The one request the Servers page needs.
@@ -505,6 +546,7 @@ async fn list_servers(
             state: state_of(&state, id),
             port,
             memory_mb,
+            players: players_of(&state, id),
         })
         .collect();
     Ok(Json(servers))
@@ -547,8 +589,8 @@ async fn create_server(
     let id = sqlx::query(
         "INSERT INTO servers
              (uuid, name, template_id, image, memory_mb, cpu_percent, port, protocol, ports,
-              variables, eula, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              variables, eula, sleep_minutes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&uuid)
     .bind(&checked.name)
@@ -561,6 +603,7 @@ async fn create_server(
     .bind(checked.ports_json()?)
     .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
     .bind(checked.eula)
+    .bind(checked.sleep_minutes)
     .bind(created_at)
     .execute(&state.db)
     .await
@@ -583,6 +626,8 @@ async fn create_server(
         console: Vec::new(),
         variables: checked.variables.iter().cloned().collect(),
         eula: checked.eula,
+        sleep_minutes: checked.sleep_minutes.into(),
+        players: None,
         permissions: Permission::ALL.to_vec(),
     };
     runtime.add(checked.definition(id, uuid, template, false));
@@ -643,7 +688,7 @@ async fn change_server(
     sqlx::query(
         "UPDATE servers
          SET name = ?, image = ?, memory_mb = ?, cpu_percent = ?, port = ?, protocol = ?,
-             ports = ?, variables = ?, eula = ?
+             ports = ?, variables = ?, eula = ?, sleep_minutes = ?
          WHERE id = ?",
     )
     .bind(&checked.name)
@@ -655,6 +700,7 @@ async fn change_server(
     .bind(checked.ports_json()?)
     .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
     .bind(checked.eula)
+    .bind(checked.sleep_minutes)
     .bind(id)
     .execute(&state.db)
     .await
@@ -704,11 +750,13 @@ async fn get_server(
         i64,
         String,
         i64,
+        i64,
     );
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.name, servers.template_id, templates.name, servers.image,
                 servers.memory_mb, servers.cpu_percent, servers.port, servers.protocol,
-                servers.ports, servers.created_at, servers.variables, servers.eula
+                servers.ports, servers.created_at, servers.variables, servers.eula,
+                servers.sleep_minutes
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
@@ -728,6 +776,7 @@ async fn get_server(
         created_at,
         variables,
         eula,
+        sleep_minutes,
     ) = found.ok_or(MISSING)?;
     let variables: Vec<(String, String)> = serde_json::from_str(&variables)
         .context("reading a server's variables")
@@ -756,6 +805,8 @@ async fn get_server(
         console,
         variables: variables.into_iter().collect(),
         eula: eula != 0,
+        sleep_minutes,
+        players: players_of(&state, id),
         permissions,
     }))
 }

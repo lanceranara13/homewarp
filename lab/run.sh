@@ -50,6 +50,7 @@ PORT=25565      # the game's port, tcp + udp, published by Docker
 IPERF=25566     # iperf3 in a server of its own, published by Docker
 CLOSED=25567    # open in the game container, not published
 VOICE=25568     # a further port of the game's, for udp alone
+MC=25570        # a server that speaks Minecraft, and is put to sleep
 SVC=2222        # listen.sh on home, nas and client
 
 dc()   { docker compose -p homewarp-lab --progress quiet "$@"; }
@@ -384,6 +385,68 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
     sleep 1
   done
   if [ "$(counted)" -gt "$before" ]; then ok "home has added it to the hour: $(counted) bytes in the last day"; else fail "home added nothing to the $before bytes it had"; fi
+
+  echo "== sleep: a server nobody is on is stopped, and a player who joins wakes it"
+  core POST /templates "$(egg 'Lab minecraft' 'PORT={{SERVER_PORT}} exec /lab/mc.sh')" >/dev/null
+  mc=$(core POST /servers "{\"name\":\"sleepy\",\"template_id\":3,\"memory_mb\":128,\"port\":$MC,\"protocol\":\"tcp\",\"sleep_minutes\":1}" | field id)
+  sleepy() { core GET "/servers/$mc" | field "$1"; }
+  until_sleepy() {  # state, seconds
+    for _ in $(seq "$2"); do [ "$(sleepy state)" = "$1" ] && return 0; sleep 1; done
+    return 1
+  }
+  on_it() { core GET "/servers/$mc" | python3 -c 'import json, sys; players = json.load(sys.stdin)["players"]; print(players and "%s of %s" % (players["online"], players["max"]))'; }
+  until_on() {  # what on_it says, seconds
+    for _ in $(seq "$2"); do [ "$(on_it)" = "$1" ] && return 0; sleep 1; done
+    return 1
+  }
+  in_sleepy() { dc exec -T home sh -c "docker exec \$(docker ps -q --filter publish=$MC) $1"; }
+  # What a game sends the VPS, as printf writes it: a handshake, and then its
+  # list's question or the first packet of a login. What comes back, without
+  # the bytes that frame it, which leaves the text.
+  asks='\007\000\057\001x\143\335\001\001\000'
+  joins='\007\000\057\001x\143\335\002\014\000\012Lab_Player'
+  minecraft() {
+    dc exec -T client sh -c "printf '$1' | socat -t 3 - TCP:$GATE_IP:$MC,connect-timeout=3 2>/dev/null | tr -d '\000-\037\177-\377'" || true
+  }
+  until_sleepy running 60 || true
+  until_on '0 of 20' 30 || true
+  check "it runs, and Core has asked who is on it, as a game's list of servers asks" "$(sleepy state), $(on_it)" "running, 0 of 20"
+  in_sleepy 'touch /home/container/someone'
+  until_on '1 of 20' 40 || true
+  check "somebody comes on, and Core knows" "$(on_it)" "1 of 20"
+  sleep 80
+  check "with somebody on it, it is left running past its minute" "$(sleepy state)" "running"
+  in_sleepy 'rm /home/container/someone'
+  until_sleepy asleep 120 || true
+  check "a minute after the last one left, it is asleep" "$(sleepy state)" "asleep"
+  for _ in $(seq 20); do [ -n "$(dc exec -T home docker ps -q --filter publish=$MC)" ] && break; sleep 1; done
+  check "what listens in its place is Core's own program, on the server's port" "$(dc exec -T home docker ps --no-trunc --filter publish=$MC --format '{{.Names}} {{.Command}}' | grep -c -- '-standin .*stand-in')" "1"
+  check "a game's list is told that it sleeps, through the VPS" "$(minecraft "$asks" | grep -c 'sleepy is asleep. Join to wake it up.')" "1"
+  check "and asking wakes nothing" "$(sleepy state)" "asleep"
+  core POST "/servers/$mc/power" '{"action":"stop"}' >/dev/null
+  sleep 3
+  check "stopped by its owner, it is offline, and nothing listens in its place" "$(sleepy state) $(dc exec -T home docker ps -q --filter publish=$MC | wc -l)" "offline 0"
+  check "so a player who joins then wakes nothing" "$(minecraft "$joins" | wc -c) $(sleepy state)" "0 offline"
+  core POST "/servers/$mc/power" '{"action":"start"}' >/dev/null
+  until_sleepy asleep 150 || true
+  check "started again and left alone, it is asleep again" "$(sleepy state)" "asleep"
+  dc exec -T home sh -c 'pkill homewarp; true'
+  start_core
+  check "a Homewarp that starts again finds it asleep" "$(sleepy state)" "asleep"
+  check "and players get through as before" "$(seen_again 45)" "$CLIENT_IP"
+  for _ in $(seq 20); do [ -n "$(dc exec -T home docker ps -q --filter publish=$MC)" ] && break; sleep 1; done
+  sleep 1
+  told=$(minecraft "$joins")
+  check "a player who joins through the VPS is told that it is waking" "$(echo "$told" | grep -c 'sleepy is waking up. Join again in a minute.')" "1"
+  until_sleepy running 60 || true
+  check "and it is: started by Homewarp, with nobody at the panel" "$(sleepy state)" "running"
+  check "Core wrote down who woke it, by the player's own address" "$(core GET /activity | python3 -c 'import json, sys; print(next((entry["detail"] for entry in json.load(sys.stdin) if entry["action"] == "server.wake"), None))')" "Lab_Player from $CLIENT_IP"
+  check "and each time it was put to sleep" "$(core GET /activity | python3 -c 'import json, sys; print(sum(entry["action"] == "server.sleep" for entry in json.load(sys.stdin)))')" "2"
+  core POST "/servers/$mc/power" '{"action":"stop"}' >/dev/null
+  until_sleepy offline 30 || true
+  core DELETE "/servers/$mc" >/dev/null
+  for _ in $(seq 15); do [ "$(gate_says | field forwards)" = 5 ] && break; sleep 1; done
+  check "removed, its port is forwarded no more" "$(gate_says | field forwards)" "5"
 
   echo "== the limit on new connections: how many one address may open in a second"
   # How many of twenty connections opened at the same moment are answered.

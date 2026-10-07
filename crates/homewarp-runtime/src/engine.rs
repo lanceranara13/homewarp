@@ -405,6 +405,33 @@ impl Engine {
         self.run_to_end(listener.name, body, on_line).await
     }
 
+    /// Ends a [`Listener`] that is still listening, by the name it was given.
+    /// What ran it is then told that it ended.
+    pub async fn end_listener(&self, name: &str) -> Result<(), Error> {
+        self.remove_container(name).await
+    }
+
+    /// The address a running server has on its network. None if it is not running.
+    pub async fn address_of(&self, server: &Server) -> Result<Option<IpAddr>, Error> {
+        let found = match self
+            .docker
+            .inspect_container(&server.container(), None)
+            .await
+        {
+            Ok(found) => found,
+            Err(DockerError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => return Ok(None),
+            Err(other) => return Err(other.into()),
+        };
+        Ok(found
+            .network_settings
+            .and_then(|settings| settings.networks)
+            .and_then(|mut networks| networks.remove(&server.network))
+            .and_then(|network| network.ip_address)
+            .and_then(|address| address.parse().ok()))
+    }
+
     /// The image the container with this id was made from, by its own id, which
     /// goes on naming it whatever its tags are moved to. None if the daemon
     /// knows no such container.
@@ -543,7 +570,7 @@ impl Engine {
     /// Removes every container the server with this id may have left behind,
     /// its install's among them. Its files stay.
     pub async fn forget(&self, id: &str) -> Result<(), Error> {
-        for kind in ["", "-install", "-chown"] {
+        for kind in ["", "-install", "-chown", "-standin"] {
             self.remove_container(&format!("homewarp-{id}{kind}"))
                 .await?;
         }

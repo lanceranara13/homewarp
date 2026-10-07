@@ -54,8 +54,13 @@ export function ServersPage() {
                   </div>
                   <StatusPill state={server.state} />
                 </div>
-                <div className="relative self-start">
+                <div className="relative flex flex-wrap items-center gap-3 self-start">
                   <CopyChip text={addressOf(gate, server.port)} />
+                  {server.players && (
+                    <span className="text-small text-ink-subtle">
+                      {server.players.online} of {server.players.max} on it
+                    </span>
+                  )}
                 </div>
               </li>
             ))}
