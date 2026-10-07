@@ -194,10 +194,10 @@ function Vps({
           {gate.problem && <Problem>{gate.problem}</Problem>}
           {recommended && <p className="text-small text-ink-subtle">A new server would take this one: {recommended}.</p>}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4">
-            <Figure label="There and back">{gate.latency_ms == null ? '—' : `${gate.latency_ms} ms`}</Figure>
-            <Figure label="Busy">{gate.load_percent == null ? '—' : `${gate.load_percent} %`}</Figure>
+            <Figure label="Ping">{gate.latency_ms == null ? '—' : `${gate.latency_ms} ms`}</Figure>
+            <Figure label="CPU usage">{gate.load_percent == null ? '—' : `${gate.load_percent} %`}</Figure>
             <Figure label="Servers">{gate.servers}</Figure>
-            <Figure label="Traffic, last day">{bytes(gate.traffic_bytes)}</Figure>
+            <Figure label="Data, last 24 h">{bytes(gate.traffic_bytes)}</Figure>
           </dl>
           {owner && <TrafficChart samples={samples} slots={slots} labels={['To servers', 'To players']} compact />}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-small">
@@ -348,7 +348,7 @@ function Ports({ network }: { network: Network }) {
                 <th className={cell}>Protocol</th>
                 <th className={cell}>Server</th>
                 {several && <th className={cell}>Through</th>}
-                {connected && <th className={`${cell} text-right`}>Traffic, last day</th>}
+                {connected && <th className={`${cell} text-right`}>Data, last 24 h</th>}
               </tr>
             </thead>
             <tbody>
