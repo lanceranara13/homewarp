@@ -18,7 +18,7 @@ script will refuse what the new key signed, which is what they should do.
 ## The release
 
 ```sh
-RELEASES=https://example.com/homewarp bash scripts/dev.sh release
+RELEASES=https://lanceranara13.github.io/homewarp bash scripts/dev.sh release
 ```
 
 `RELEASES` is where the folder will be reached. It is written into the install
@@ -32,7 +32,7 @@ an emulator to see that they start, and puts together `/home/lance/homewarp/rele
 ```
 install.sh                 Homewarp at home, in one line
 install-gate.sh            the Gate on a VPS, in one line
-0.0.0/
+1.0.0/
   homewarp-x86_64          Core, with the web interface inside
   homewarp-arm64
   homewarp-gate-x86_64     the Gate
@@ -41,8 +41,9 @@ install-gate.sh            the Gate on a VPS, in one line
   SHA256SUMS.sig           that list, signed with the key
 ```
 
-The version is the one in `Cargo.toml`. A second release of the same version
-replaces the first.
+The version is the one in `Cargo.toml`, which is set and committed before the
+release is made (`web/openapi.json` says it too). A second release of the same
+version replaces the first.
 
 ## Serving it
 
@@ -51,12 +52,32 @@ Any web server that serves files will do, at the address that was given as
 takes on trust, and HTTPS is what that trust rests on. Copy the whole folder,
 the two scripts and the version's folder with them.
 
+Homewarp's own are served by GitHub Pages, from the branch `gh-pages` of this
+repository, which holds the release folder and nothing of the source. A new
+release is laid over what is there and pushed:
+
+```sh
+git worktree add ../homewarp-pages gh-pages
+ssh home 'tar -C /home/lance/homewarp/release -cf - .' | tar -C ../homewarp-pages -xf -
+git -C ../homewarp-pages add -A
+git -C ../homewarp-pages commit -m "Release 1.0.0"
+git -C ../homewarp-pages push
+git worktree remove ../homewarp-pages
+```
+
+Older versions' folders stay, and the two scripts at the top are the newest
+release's: they name its version. The branch has a `.gitattributes` that keeps
+git from changing a line ending, since a file that differs by one byte is not
+the file that was signed, and a `.nojekyll` so that Pages serves the files as
+they are. Pages takes a minute to show a push. The commit the release was built
+from is tagged (`git tag v1.0.0`, `git push origin v1.0.0`).
+
 ## Checking it
 
 What an installer does can be done by hand:
 
 ```sh
-cd release/0.0.0
+cd release/1.0.0
 openssl pkey -in ../../release.key -pubout -out /tmp/release.pub
 openssl pkeyutl -verify -pubin -inkey /tmp/release.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
 sha256sum -c SHA256SUMS
@@ -72,4 +93,5 @@ turn to see each refused.
 - **Nothing updates by itself.** Running the install line again is the update.
 - **No image in a registry.** The installer builds the image on the machine,
   from the program and Alpine's packages for `nft` and `ip`.
-- **The licence** is not decided (PLAN.md §13), and a public release waits for it.
+- **Nothing asks whether there is a newer release.** An installed Homewarp
+  knows where its releases are, and does not look there.

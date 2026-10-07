@@ -4,9 +4,10 @@ Two machines, one line on each. The first is the machine at home that will run
 the servers. The second is a small VPS that players reach, and it is optional:
 without one, servers are reached on the home network only.
 
-`RELEASES` below stands for the address a release is served from. There is no
-public one yet: until there is, a release is made and served by whoever builds
-Homewarp ([releasing.md](releasing.md)).
+Releases are served from `https://lanceranara13.github.io/homewarp`, which is
+the address in the lines below. Whoever builds Homewarp themselves makes and
+serves a release of their own ([releasing.md](releasing.md)), and puts its
+address there instead.
 
 ## At home
 
@@ -15,7 +16,7 @@ It needs Linux on x86-64 or ARM64, Docker with the Compose plugin, `curl` and
 containers with is its owner's choice.
 
 ```sh
-curl -fsSL RELEASES/install.sh | sudo sh
+curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo sh
 ```
 
 That fetches Homewarp for the machine's processor, checks it (see *What is
@@ -48,7 +49,11 @@ Said before the line, these change what it does:
 | `HOMEWARP_TLS_PORT` | `8443` |
 | `HOMEWARP_NAME` | `homewarp`: what the containers are called |
 
-For example `curl -fsSL RELEASES/install.sh | sudo HOMEWARP_PORT=8080 sh`.
+For example:
+
+```sh
+curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo HOMEWARP_PORT=8080 sh
+```
 
 **To update**, run the same line again. The newest release takes the place of
 the one that is running, and `data/` is left as it is. Servers that are running
@@ -68,7 +73,7 @@ VPS and counts for a quarter of an hour: **Network**, then **Connect a VPS**.
 It looks like this:
 
 ```sh
-curl -fsSL RELEASES/install-gate.sh | sh -s -- eyJrIjoi…
+curl -fsSL https://lanceranara13.github.io/homewarp/install-gate.sh | sh -s -- eyJrIjoi…
 ```
 
 It fetches the Gate for the VPS's processor, checks it, and makes the VPS the

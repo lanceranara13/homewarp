@@ -8,8 +8,9 @@
 > anywhere over TLS that is ended at home (tried on the owner's VPS with
 > `homewarp.apixels.net`); sign-ins are limited and take a second step or a passkey; the
 > VPS itself can be hardened on trial. §6 has the security model held against the code.
-> Phase 6 is done but for a public release, which waits for the owner (an address and a
-> signing key; the licence is AGPL-3.0-or-later since 2026-10-07), and for updating by itself. Of Phase 7, "Later", five things
+> Phase 6 is done but for updating by itself: 1.0.0 was released on 2026-10-07, signed
+> with the owner's key and served from `https://lanceranara13.github.io/homewarp` (the
+> licence is AGPL-3.0-or-later since the same day). Of Phase 7, "Later", five things
 > are built and tried (who is on a Minecraft server, sleep and wake, notices, mods from
 > Modrinth, a store elsewhere for backups) and four are not, each with its reason.
 
@@ -1630,9 +1631,16 @@ Each phase ends with something that works on the homelab.
   fifteen (Phase 0). Under a minute of machine. The rest is typing, and agreeing to
   Mojang's EULA, which nobody does for the owner. Not yet done with a person and a
   stopwatch.
+- *A public release, 1.0.0 (2026-10-07).* Signed with the owner's key, which is on the
+  homelab and nowhere in the repository, and served by GitHub Pages from the branch
+  `gh-pages` at `https://lanceranara13.github.io/homewarp`; the commit it was built
+  from is tagged `v1.0.0`. Fetched back from that address, the four programs matched
+  the list and the list its signature. Tried once from there as anyone would: the home
+  line put a second Homewarp on the homelab in seven seconds, and the line its panel
+  gave put the Gate on the owner's VPS, which opened its firewall and started. Both
+  were then taken away again, and whether that panel showed the VPS as connected was
+  not looked at. How a release is published is in `docs/releasing.md`.
 - *Not done, and why:*
-  - *A public release.* The licence is decided (§13). It waits for an address to serve it
-    from, and for the owner's own signing key. Both are the owner's.
   - *Updating by itself.* Running the line again is the update. A Core that replaces
     the container it runs in, and a Gate that takes a new program through the tunnel,
     are each a piece of work with its own ways of going wrong.

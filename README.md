@@ -11,10 +11,9 @@ VPS that passes players through an encrypted tunnel. It is free and open
 source, and reads the "eggs" the Pterodactyl and Pelican community already
 publishes for hundreds of games.
 
-> **Status: early, and not released yet.** Everything described here is built
-> and has been tried on real machines, but there is no public release to
-> install from. Until there is, you build a release yourself
-> ([docs/releasing.md](docs/releasing.md)). Expect rough edges.
+> **Status: early.** Everything described here is built and has been tried on
+> real machines, and 1.0.0 is the first release to install from. Expect rough
+> edges.
 
 ![The Servers page](docs/screenshots/servers.png)
 
@@ -126,14 +125,14 @@ to give servers names of their own.
 
 ## Installing
 
-Each machine takes one line. `RELEASES` is the address a release is served
-from; there is no public one yet, so for now it is wherever you put the release
-you built ([docs/releasing.md](docs/releasing.md)).
+Each machine takes one line. Releases are served from
+`https://lanceranara13.github.io/homewarp`; a release you built yourself is
+served from wherever you put it ([docs/releasing.md](docs/releasing.md)).
 
 At home:
 
 ```sh
-curl -fsSL RELEASES/install.sh | sudo sh
+curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo sh
 ```
 
 It fetches Homewarp for the machine's processor, checks its signature and
@@ -243,8 +242,7 @@ design is [DESIGN.md](DESIGN.md).
 
 ## What is not built
 
-- A public release, and updating by itself: for now an update is the install
-  line run again.
+- Updating by itself: for now an update is the install line run again.
 - Many Minecraft servers behind one port by hostname. The DNS records the
   panel shows give each server a name without it.
 - An importer that reads another panel's database
