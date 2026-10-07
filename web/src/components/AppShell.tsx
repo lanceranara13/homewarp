@@ -1,6 +1,6 @@
 import { useSuspenseQuery } from '@tanstack/react-query'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
-import { Blocks, Ellipsis, LayoutGrid, LogOut, ScrollText, Settings, Waypoints, type LucideIcon } from 'lucide-react'
+import { Blocks, Ellipsis, LayoutGrid, LogOut, ScrollText, Settings, Waypoints, Webhook, type LucideIcon } from 'lucide-react'
 import { DropdownMenu, Popover } from 'radix-ui'
 
 import { gateLook, useNetwork } from '../gate'
@@ -11,17 +11,18 @@ import { Button, FLOATING, MENU_ITEM, Mark, StateMark } from './ui'
 type Destination = {
   label: string
   icon: LucideIcon
-  to: '/' | '/templates' | '/network' | '/activity' | '/settings'
+  to: '/' | '/templates' | '/network' | '/activity' | '/webhooks' | '/settings'
   /** For the owner alone: what is about the machine and not about one server. */
   owners?: true
 }
 
-/** The five destinations of DESIGN.md. An account that is not the owner's has two of them. */
+/** The six destinations of DESIGN.md. An account that is not the owner's has two of them. */
 const DESTINATIONS: Destination[] = [
   { label: 'Servers', icon: LayoutGrid, to: '/' },
   { label: 'Templates', icon: Blocks, to: '/templates', owners: true },
   { label: 'Network', icon: Waypoints, to: '/network', owners: true },
   { label: 'Activity', icon: ScrollText, to: '/activity', owners: true },
+  { label: 'Webhooks', icon: Webhook, to: '/webhooks', owners: true },
   { label: 'Settings', icon: Settings, to: '/settings' },
 ]
 

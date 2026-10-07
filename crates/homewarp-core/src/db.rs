@@ -45,6 +45,7 @@ mod tests {
         include_str!("../migrations/0013_says_offline.sql"),
     ];
     const SEVERAL: &str = include_str!("../migrations/0014_gates.sql");
+    const WEBHOOKS: &str = include_str!("../migrations/0015_webhooks.sql");
 
     /// A database as an older Homewarp left it, with two servers in it.
     async fn older(files: &tempfile::TempDir) -> SqlitePool {
@@ -202,5 +203,96 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(waiting, (text("vps.example.com"), Some(text("join"))));
+    }
+
+    /// The webhooks there are once the one address that could be told has become the first.
+    async fn webhooks(
+        pool: &SqlitePool,
+    ) -> Vec<(String, String, bool, Option<String>, Option<i64>)> {
+        sqlx::raw_sql(SEVERAL).execute(pool).await.unwrap();
+        sqlx::raw_sql(WEBHOOKS).execute(pool).await.unwrap();
+        let left: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM settings WHERE key LIKE 'webhook%'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(left.0, 0);
+        sqlx::query_as("SELECT name, url, everything, last_problem, last_at FROM webhooks")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_one_address_that_was_told_comes_through_as_the_first_webhook() {
+        let text = str::to_owned;
+        // None was set: there is none, and what else was set stays.
+        let files = tempfile::tempdir().unwrap();
+        let pool = older(&files).await;
+        sqlx::raw_sql(r#"INSERT INTO settings (key, value) VALUES ('resolvers', '["9.9.9.9"]')"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(webhooks(&pool).await, []);
+        let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept.0, 1);
+
+        // One that was told of what happens by itself is told of that, by name.
+        let files = tempfile::tempdir().unwrap();
+        let pool = older(&files).await;
+        sqlx::raw_sql(
+            r#"INSERT INTO settings (key, value) VALUES
+                   ('webhook', '{"url":"https://discord.com/api/webhooks/1/x","everything":false}'),
+                   ('webhook_last', '{"at":7,"problem":"discord.com did not take it (404)."}')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            webhooks(&pool).await,
+            [(
+                text("Notices"),
+                text("https://discord.com/api/webhooks/1/x"),
+                false,
+                Some(text("discord.com did not take it (404).")),
+                Some(7),
+            )]
+        );
+        let events: (String,) = sqlx::query_as("SELECT events FROM webhooks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let events: Vec<String> = serde_json::from_str(&events.0).unwrap();
+        assert_eq!(events.len(), 12);
+        for event in &events {
+            let by_itself = crate::notify::EVENTS
+                .iter()
+                .any(|(name, by_itself)| name == event && *by_itself);
+            assert!(by_itself, "{event}");
+        }
+
+        // One that was told of everything still is, and has been sent nothing yet.
+        let files = tempfile::tempdir().unwrap();
+        let pool = older(&files).await;
+        sqlx::raw_sql(
+            r#"INSERT INTO settings (key, value) VALUES
+                   ('webhook', '{"url":"https://hooks.slack.com/services/1/y","everything":true}')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            webhooks(&pool).await,
+            [(
+                text("Notices"),
+                text("https://hooks.slack.com/services/1/y"),
+                true,
+                None,
+                None,
+            )]
+        );
     }
 }

@@ -103,8 +103,9 @@ only.
 - Reachable from anywhere by a name of your own, over TLS that ends at home:
   the VPS passes it on and cannot read it. The certificate is asked for and
   renewed by Homewarp.
-- Notices to a Discord or Slack channel when something happens while you are
-  away: a crash, a server asleep or woken, a VPS that stopped answering.
+- Webhooks: a Discord or Slack channel told when something happens while you
+  are away (a crash, a server asleep or woken, a VPS that stopped answering),
+  as many as you like, each told of what you choose.
 - A copy of every backup in a bucket elsewhere (Amazon S3, Cloudflare R2,
   Backblaze B2, MinIO), so a lost disk is not a lost world.
 - Updates from the panel: it looks for a newer release, checks it against the
@@ -198,7 +199,7 @@ To take a VPS away again: `homewarp-gate leave` on the VPS, as root.
 | Back up every night | the server's **Schedules** tab |
 | Let a friend manage one server | the server's **Users** tab |
 | Copy backups somewhere else | **Settings**, *A store elsewhere for backups* |
-| Be told of crashes | **Settings**, *Notices* |
+| Be told of crashes | **Webhooks** |
 | Turn on two-step sign-in or add a passkey | **Settings** |
 
 Moving a server over from Pterodactyl or Pelican, and getting one back from a

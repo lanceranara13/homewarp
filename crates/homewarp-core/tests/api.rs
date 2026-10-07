@@ -1685,13 +1685,13 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
     let first = panel.get(settings, cookie).await;
     assert_eq!(
         first.body,
-        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30, "notices": null, "store": null })
+        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30, "store": null })
     );
     // Kept each once, as addresses are written.
     let quad9 = json!({ "resolvers": ["9.9.9.9", " 9.9.9.9 ", "149.112.112.112"] });
     let changed = panel.put(settings, quad9, cookie).await;
     assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
-    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30, "notices": null, "store": null });
+    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30, "store": null });
     assert_eq!(changed.body, kept);
 
     for (wrong, said) in [
@@ -1742,18 +1742,19 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
 }
 
 #[tokio::test]
-async fn where_notices_go_is_the_owners_to_say_and_is_not_given_back() {
+async fn webhooks_are_the_owners_to_make_and_their_addresses_are_not_given_back() {
     let panel = panel().await;
     let cookie = panel.set_up().await;
     let cookie = Some(cookie.as_str());
-    let settings = "/api/v1/settings";
-    let notices = "/api/v1/settings/notices";
-    let test = "/api/v1/settings/notices/test";
+    let webhooks = "/api/v1/webhooks";
 
-    // With no address there is nobody to tell.
-    let nobody = panel.post(test, json!({}), cookie).await;
-    assert_eq!(nobody.status, StatusCode::CONFLICT, "{}", nobody.body);
-    assert_eq!(nobody.body["error"], "There is no address to tell.");
+    // None yet, and everything that is written down to choose from.
+    let first = panel.get(webhooks, cookie).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(first.body["webhooks"], json!([]));
+    let events = first.body["events"].as_array().unwrap();
+    assert!(events.contains(&json!({ "name": "server.crash", "by_itself": true })));
+    assert!(events.contains(&json!({ "name": "server.start", "by_itself": false })));
 
     // An address is one on the internet, by a name, over https.
     for (wrong, why) in [
@@ -1762,64 +1763,133 @@ async fn where_notices_go_is_the_owners_to_say_and_is_not_given_back() {
         ("https://localhost/hook", "name a site"),
         ("https://example.com:8443/hook", "usual port"),
         ("discord.com/api/webhooks/1/x", "https://"),
+        ("", "Give the address"),
     ] {
-        let answer = panel.put(notices, json!({ "url": wrong }), cookie).await;
+        let asked = json!({ "name": "Discord", "url": wrong, "everything": true });
+        let answer = panel.post(webhooks, asked, cookie).await;
         assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{wrong}");
         let said = answer.body["error"].as_str().unwrap();
         assert!(said.contains(why), "{wrong}: {said}");
     }
+    // And a webhook has a name, and something it is told of that is written down.
+    let secret = "https://hooks.example.invalid/services/T000/B000/s3cretT0kenAbCd";
+    for (wrong, why) in [
+        (
+            json!({ "name": " ", "url": secret, "everything": true }),
+            "Give the webhook a name.",
+        ),
+        (
+            json!({ "name": "Discord", "url": secret }),
+            "Choose what it is to be told of.",
+        ),
+        (
+            json!({ "name": "Discord", "url": secret, "events": ["server.dance"] }),
+            "server.dance is not something Homewarp writes down.",
+        ),
+    ] {
+        let answer = panel.post(webhooks, wrong, cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{why}");
+        assert_eq!(answer.body["error"], why);
+    }
     assert_eq!(
-        panel.get(settings, cookie).await.body["notices"],
-        json!(null)
+        panel.get(webhooks, cookie).await.body["webhooks"],
+        json!([])
     );
 
     // Kept, it is shown by its site and its last few characters, and no more.
-    let secret = "https://hooks.example.invalid/services/T000/B000/s3cretT0kenAbCd";
-    let set = panel.put(notices, json!({ "url": secret }), cookie).await;
-    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
-    let shown =
-        json!({ "address": "hooks.example.invalid/…AbCd", "everything": false, "last": null });
-    assert_eq!(set.body["notices"], shown);
-    let asked = panel.get(settings, cookie).await;
-    assert_eq!(asked.body["notices"], shown);
+    // What it is told of is kept each once, in the order it is listed in.
+    let asked = json!({
+        "name": " Crashes ", "url": secret,
+        "events": ["server.wake", "server.crash", "server.crash"]
+    });
+    let made = panel.post(webhooks, asked, cookie).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    let id = made.body["id"].as_i64().unwrap();
+    let shown = json!({
+        "id": id, "name": "Crashes", "address": "hooks.example.invalid/\u{2026}AbCd",
+        "everything": false, "events": ["server.crash", "server.wake"], "last": null
+    });
+    assert_eq!(made.body, shown);
+    let asked = panel.get(webhooks, cookie).await;
+    assert_eq!(asked.body["webhooks"], json!([shown]));
     assert!(!asked.body.to_string().contains("s3cret"));
     // Nor is it written down whole.
     let activity = panel.get("/api/v1/activity", cookie).await;
-    assert_eq!(activity.body[0]["action"], "settings.change");
+    assert_eq!(activity.body[0]["action"], "webhook.create");
     assert_eq!(
         activity.body[0]["detail"],
-        "notices: to hooks.example.invalid/…AbCd, of what happens by itself"
+        "Crashes: to hooks.example.invalid/\u{2026}AbCd, of 2 things"
     );
     assert!(!activity.body.to_string().contains("s3cret"));
 
     // A site that is not there does not take one, and how that went is kept.
-    let sent = panel.post(test, json!({}), cookie).await;
+    let one = format!("{webhooks}/{id}");
+    let test = format!("{one}/test");
+    let sent = panel.post(&test, json!({}), cookie).await;
     assert_eq!(sent.status, StatusCode::CONFLICT, "{}", sent.body);
     let why = sent.body["error"].as_str().unwrap().to_owned();
     assert!(why.contains("hooks.example.invalid"), "{why}");
-    let after = panel.get(settings, cookie).await;
-    assert_eq!(after.body["notices"]["last"]["problem"], why);
+    let after = panel.get(webhooks, cookie).await;
+    assert_eq!(after.body["webhooks"][0]["last"]["problem"], why);
 
-    // Another address in its place, and for everything. That it was changed is
-    // itself something this one is told, so how its last notice went is not asked here.
-    let other = json!({ "url": "https://chat.example.invalid/hooks/zyxw9876", "everything": true });
-    let changed = panel.put(notices, other, cookie).await;
+    // Changed with no address given, it keeps the one it has.
+    let renamed = json!({ "name": "One thing", "events": ["server.crash"] });
+    let changed = panel.put(&one, renamed, cookie).await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    assert_eq!(changed.body["name"], "One thing");
     assert_eq!(
-        changed.body["notices"]["address"],
-        "chat.example.invalid/…9876"
+        changed.body["address"],
+        "hooks.example.invalid/\u{2026}AbCd"
     );
-    assert_eq!(changed.body["notices"]["everything"], true);
+    assert_eq!(changed.body["events"], json!(["server.crash"]));
+    assert_eq!(changed.body["last"]["problem"], why);
+    let activity = panel.get("/api/v1/activity", cookie).await;
+    assert_eq!(activity.body[0]["action"], "webhook.change");
+    assert_eq!(
+        activity.body[0]["detail"],
+        "One thing: to hooks.example.invalid/\u{2026}AbCd, of 1 thing"
+    );
+    // Another address in its place, and for everything. That it was changed is
+    // itself something this one is told, so how that went is not asked here.
+    let other = json!({ "name": "All of it", "url": "https://chat.example.invalid/hooks/zyxw9876", "everything": true });
+    let changed = panel.put(&one, other, cookie).await;
+    assert_eq!(changed.body["address"], "chat.example.invalid/\u{2026}9876");
+    assert_eq!(changed.body["everything"], true);
+    assert_eq!(changed.body["events"], json!([]));
+
+    // A second beside it, and each is its own.
+    let second = json!({ "name": "Second", "url": secret, "events": ["gate.lost"] });
+    let second = panel.post(webhooks, second, cookie).await;
+    assert_eq!(second.status, StatusCode::CREATED, "{}", second.body);
+    let both = panel.get(webhooks, cookie).await;
+    assert_eq!(both.body["webhooks"].as_array().unwrap().len(), 2);
 
     // Taken away again.
-    let removed = panel.delete(notices, cookie).await;
-    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
-    assert_eq!(removed.body["notices"], json!(null));
+    let removed = panel.delete(&one, cookie).await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT, "{}", removed.body);
+    let left = panel.get(webhooks, cookie).await;
+    assert_eq!(left.body["webhooks"].as_array().unwrap().len(), 1);
+    assert_eq!(left.body["webhooks"][0]["name"], "Second");
+    for answer in [
+        panel.delete(&one, cookie).await,
+        panel.post(&test, json!({}), cookie).await,
+        panel
+            .put(&one, json!({ "name": "Gone", "everything": true }), cookie)
+            .await,
+    ] {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.body);
+        assert_eq!(answer.body["error"], "There is no such webhook.");
+    }
 
     // And none of it is anybody's but the owner's.
     for answer in [
-        panel.put(notices, json!({ "url": secret }), None).await,
-        panel.delete(notices, None).await,
-        panel.post(test, json!({}), None).await,
+        panel.get(webhooks, None).await,
+        panel
+            .post(webhooks, json!({ "name": "x", "url": secret }), None)
+            .await,
+        panel.put(&one, json!({ "name": "x" }), None).await,
+        panel.delete(&one, None).await,
+        panel.post(&test, json!({}), None).await,
     ] {
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     }

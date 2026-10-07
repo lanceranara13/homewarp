@@ -39,6 +39,7 @@ use crate::{
     tunnel::Tunnel,
     ui,
     updates::{self, Updates},
+    webhooks,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -202,6 +203,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(catalogue::routes())
         .merge(mods::routes())
         .merge(updates::routes())
+        .merge(webhooks::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.

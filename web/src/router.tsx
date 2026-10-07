@@ -18,6 +18,7 @@ import {
   settingsQuery,
   twoStepsQuery,
   updateQuery,
+  webhooksQuery,
   type SettingsGroup,
 } from './accounts'
 import { AppShell } from './components/AppShell'
@@ -40,6 +41,7 @@ import { SettingsPage } from './pages/SettingsPage'
 import { SetupPage } from './pages/SetupPage'
 import { TemplatePage } from './pages/TemplatePage'
 import { TemplatesPage } from './pages/TemplatesPage'
+import { WebhooksPage } from './pages/WebhooksPage'
 import { backupsQuery, schedulesQuery, serverQuery, serversQuery } from './servers'
 import { sessionQuery } from './session'
 import { templateQuery, templatesQuery } from './templates'
@@ -355,6 +357,18 @@ const activityRoute = createRoute({
   component: ActivityPage,
 })
 
+/** Where Homewarp tells what happens to it, and of what: the owner's to say. */
+const webhooksRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/webhooks',
+  beforeLoad: ({ context }) => ownersOnly(context),
+  staticData: { reads: (queryClient) => void queryClient.prefetchQuery(webhooksQuery) },
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(webhooksQuery)
+  },
+  component: WebhooksPage,
+})
+
 /** Which group of the Settings page an address means. None is the account's own, which the page opens on. */
 function groupFrom(search: Record<string, unknown>): { group?: SettingsGroup } {
   const group = SETTINGS_GROUPS.find(({ name }) => name === search.group)?.name
@@ -400,6 +414,7 @@ const routeTree = rootRoute.addChildren([
       serverSettingsRoute,
     ]),
     activityRoute,
+    webhooksRoute,
     settingsRoute,
     templatesRoute,
     importTemplateRoute,

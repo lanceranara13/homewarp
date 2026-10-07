@@ -302,8 +302,8 @@ page gutter 24 (16 on mobile), section spacing 32.
 │ ◫ Templates  │                     page content                             │
 │ ⇄ Network    │                     max-width 1200, centred                  │
 │ ≡ Activity   │                                                              │
+│ ↬ Webhooks   │                                                              │
 │ ⚙ Settings   │                                                              │
-│              │                                                              │
 │              │                                                              │
 ├──────────────┤                                                              │
 │ ● Gate 23 ms │                                                              │
@@ -313,7 +313,7 @@ page gutter 24 (16 on mobile), section spacing 32.
      232px
 ```
 
-- **Five destinations, no nesting.** Sidebar collapses to 56px icons (`[`).
+- **Six destinations, no nesting.** Sidebar collapses to 56px icons (`[`).
 - The **Gate pill** is pinned bottom-left on every page: the tunnel's health is the
   one thing that affects everything, so it is always in view. Click → Network.
 - Top bar: page title or breadcrumb on the left; search / command palette and the
@@ -526,6 +526,7 @@ Each node is a small card with its own status pill.
 | **Templates** | Installed templates; browse catalogue; import an egg file or URL. |
 | **Network** | Every VPS and the tunnel to it, traffic now, forwarded ports, the panel's own address. |
 | **Activity** | Audit log and system events, filterable by server and user. |
+| **Webhooks** | The addresses that are told what happens (Discord, Slack and their like), and what each is told of. |
 | **Settings** | Account, Security, Users, Backups, System, Updates. |
 
 ### Inside a server
@@ -729,7 +730,7 @@ Quick reference when generating UI for Homewarp:
 - Accent `#8F7CFF` for links, focus rings, selected nav and active tab underline only.
 - Server state: running `#3DD68C`, starting `#F5B73D`, crashed `#FF6369`,
   installing `#5EB0EF`, offline `#8A919E` — always a dot plus a word.
-- Layout: 232px sidebar with five items, 48px top bar, content max-width 1200px.
+- Layout: 232px sidebar with six items, 48px top bar, content max-width 1200px.
 - No shadows except on menus, dialogs and the command palette.
 
 Example prompts:

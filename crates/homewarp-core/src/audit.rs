@@ -62,6 +62,11 @@ async fn write(
     action: &'static str,
     detail: &str,
 ) {
+    // What is written down is what a webhook can be told of: a new name belongs in that list too.
+    debug_assert!(
+        notify::known(action),
+        "{action} is not listed in notify::EVENTS"
+    );
     // One line: what a detail is made of is typed by people, and by servers.
     let detail: String = detail
         .chars()
@@ -85,12 +90,11 @@ async fn write(
     if let Err(error) = written {
         tracing::error!("{action} by {username} could not be written down: {error}");
     }
-    // And told to the owner's address, where there is one and this is something it is told of.
+    // And told to the webhooks that are told of such a thing.
     notify::tell(
         db,
         notify::Happened {
             by: username.to_owned(),
-            by_itself: user_id.is_none(),
             server_id: server,
             action,
             detail,

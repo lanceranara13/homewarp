@@ -8,6 +8,7 @@ import {
   listActivity,
   listPasskeys,
   listServerUsers,
+  listWebhooks,
   type Permission,
 } from './api/client'
 
@@ -54,6 +55,13 @@ export const twoStepsQuery = queryOptions({
 export const settingsQuery = queryOptions({
   queryKey: ['settings'],
   queryFn: getSettings,
+  staleTime: 5_000,
+})
+
+/** The addresses that are told what happens, and everything one can be told of. Only the owner's page asks. */
+export const webhooksQuery = queryOptions({
+  queryKey: ['webhooks'],
+  queryFn: listWebhooks,
   staleTime: 5_000,
 })
 

@@ -1753,6 +1753,13 @@ Each phase ends with something that works on the homelab.
       VPS connected to a throwaway copy, its Gate stopped and started, which arrived as
       lost and as back. Discord itself was not tried: there is no webhook of the
       owner's here to try it with.
+    - *After 1.1.1 they are webhooks, on a page of their own* (the owner's ask,
+      2026-10-07: a tab above Settings called Webhooks, set up as Pelican's are).
+      There may be twenty, each with a name, an address and
+      what it is told of: every line of the Activity page, or the ones ticked from the
+      list of everything that is written down. Each has what waits for it sent by
+      itself, so one whose site is down holds up no other. The one address a Homewarp
+      had comes through as the first webhook, told of what it was told of.
   - *Mods and plugins, from Modrinth* (a Minecraft server's Mods tab).
     - *What it does:* searches Modrinth for what the server runs (one of twelve
       loaders, and a version of Minecraft if one is given), lists a project's newest

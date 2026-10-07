@@ -40,7 +40,10 @@ export type ScheduleSettings = components['schemas']['ScheduleSettings']
 export type Task = components['schemas']['Task']
 export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
-export type NoticesChange = components['schemas']['NoticesChange']
+export type Webhook = components['schemas']['WebhookView']
+export type Webhooks = components['schemas']['Webhooks']
+export type Happening = components['schemas']['Happening']
+export type WebhookSettings = components['schemas']['WebhookSettings']
 export type StoreChange = components['schemas']['StoreChange']
 type SettingsChange = components['schemas']['SettingsChange']
 export type Panel = components['schemas']['PanelView']
@@ -492,21 +495,32 @@ export async function changeSettings(body: SettingsChange): Promise<Settings> {
   return data ?? fail(error)
 }
 
-/** Has Homewarp tell an address what happens to it. The answer is the settings as they are kept. */
-export async function setNotices(body: NoticesChange): Promise<Settings> {
-  const { data, error } = await signedIn(() => api.PUT('/api/v1/settings/notices', { body }))
+/** The addresses that are told what happens to this Homewarp, and everything one can be told of. Only the owner may ask. */
+export async function listWebhooks(): Promise<Webhooks> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/webhooks'))
   return data ?? fail(error)
 }
 
-/** Has Homewarp tell nobody. */
-export async function removeNotices(): Promise<Settings> {
-  const { data, error } = await signedIn(() => api.DELETE('/api/v1/settings/notices'))
+/** Has Homewarp tell an address what happens to it: everything, or what is named. */
+export async function createWebhook(body: WebhookSettings): Promise<Webhook> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/webhooks', { body }))
   return data ?? fail(error)
 }
 
-/** Sends a notice that says only that notices arrive. It fails with the site's reason if the site does not take it. */
-export async function testNotices(): Promise<Settings> {
-  const { data, error } = await signedIn(() => api.POST('/api/v1/settings/notices/test'))
+/** Changes a webhook. With no address given, it keeps the one it has. */
+export async function changeWebhook(id: number, body: WebhookSettings): Promise<Webhook> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/webhooks/{id}', { params: { path: { id } }, body }))
+  return data ?? fail(error)
+}
+
+export async function removeWebhook(id: number): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/webhooks/{id}', { params: { path: { id } } }))
+  if (!response.ok) fail(error)
+}
+
+/** Sends a webhook a line that says only that it is reached. It fails with the site's reason if the site does not take it. */
+export async function testWebhook(id: number): Promise<Webhook> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/webhooks/{id}/test', { params: { path: { id } } }))
   return data ?? fail(error)
 }
 

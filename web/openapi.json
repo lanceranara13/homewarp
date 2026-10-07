@@ -4123,146 +4123,6 @@
         }
       }
     },
-    "/api/v1/settings/notices": {
-      "put": {
-        "summary": "Has this Homewarp tell an address what happens to it: by itself what\nnobody was at the panel for (a crash, a server put to sleep or woken, what\na schedule did, a VPS that stopped answering), or every line of the\nActivity page. The address is one that takes a message as JSON.",
-        "operationId": "set_notices",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/NoticesChange"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Settings"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Nobody is signed in.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The account is not the owner's.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "That is not an address notices can be sent to.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "summary": "Has this Homewarp tell nobody.",
-        "operationId": "remove_notices",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Settings"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Nobody is signed in.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The account is not the owner's.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/settings/notices/test": {
-      "post": {
-        "summary": "Sends a notice that says only that notices arrive, and waits for the site\nto take it.",
-        "operationId": "test_notices",
-        "responses": {
-          "200": {
-            "description": "The site took it.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Settings"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Nobody is signed in.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The account is not the owner's.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The site did not take it, or there is no address.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/settings/store": {
       "put": {
         "summary": "Has every backup that is made from now on copied to a store elsewhere: a\nbucket that is spoken to as Amazon's S3 is. The store is tried first, with\na few bytes written and taken away again, and is kept only if it took\nthem: a store that is thought to hold copies and holds none is worse than\nnone. The key's secret is kept and not given back.",
@@ -5133,6 +4993,308 @@
           }
         }
       }
+    },
+    "/api/v1/webhooks": {
+      "get": {
+        "summary": "The webhooks, by name, and everything one can be told of. The one request\nthe Webhooks page needs.",
+        "operationId": "list_webhooks",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhooks"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Has this Homewarp tell an address what happens to it: every line of the\nActivity page, or the ones that are named. The address is one that takes a\nmessage as JSON.",
+        "operationId": "create_webhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There are as many webhooks as there may be.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That is not an address that can be told, or nothing it could be told of.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}": {
+      "put": {
+        "summary": "Changes a webhook: its name, what it is told of and, where one is given,\nits address. How the last thing it was sent went is forgotten with the\naddress it was sent to.",
+        "operationId": "change_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The webhook's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such webhook.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That is not an address that can be told, or nothing it could be told of.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Has this Homewarp tell an address no more.",
+        "operationId": "remove_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The webhook's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The webhook is gone."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such webhook.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}/test": {
+      "post": {
+        "summary": "Sends a webhook a line that says only that it is reached, and waits for\nthe site to take it.",
+        "operationId": "test_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The webhook's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The site took it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such webhook.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The site did not take it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5485,7 +5647,7 @@
       },
       "Delivery": {
         "type": "object",
-        "description": "How the last notice went.",
+        "description": "How the last thing a webhook was sent went.",
         "required": [
           "at"
         ],
@@ -6034,6 +6196,24 @@
           }
         }
       },
+      "Happening": {
+        "type": "object",
+        "description": "One thing that is written down, and so can be told.",
+        "required": [
+          "name",
+          "by_itself"
+        ],
+        "properties": {
+          "by_itself": {
+            "type": "boolean",
+            "description": "Whether it happens with nobody at the panel."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name, such as `server.crash`."
+          }
+        }
+      },
       "Health": {
         "type": "object",
         "required": [
@@ -6338,52 +6518,6 @@
             }
           }
         ]
-      },
-      "Notices": {
-        "type": "object",
-        "description": "Where notices go, as the page is told: the address is a secret of the\nsite's making, and is not given back whole.",
-        "required": [
-          "address",
-          "everything"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "The site, and the last few characters of the address."
-          },
-          "everything": {
-            "type": "boolean",
-            "description": "Whether every line of the Activity page is told, and not only what\nhappened by itself."
-          },
-          "last": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Delivery",
-                "description": "How the last notice went, once one has been sent."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        }
-      },
-      "NoticesChange": {
-        "type": "object",
-        "description": "Where notices are to go.",
-        "required": [
-          "url"
-        ],
-        "properties": {
-          "everything": {
-            "type": "boolean",
-            "description": "Every line of the Activity page, and not only what happens by itself."
-          },
-          "url": {
-            "type": "string",
-            "description": "An address that takes a message as JSON, as a Discord or a Slack\nwebhook does: `https`, by a name, on the internet."
-          }
-        }
       },
       "OwnPassword": {
         "type": "object",
@@ -7322,17 +7456,6 @@
             "description": "How many new connections a second a connected VPS lets one address on\nthe internet open to the servers, with twice as many at once. More\nare dropped at the VPS, so that one address cannot crowd the rest out.",
             "minimum": 0
           },
-          "notices": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Notices",
-                "description": "Where this Homewarp tells what happens to it. Nothing if nowhere."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "resolvers": {
             "type": "array",
             "items": {
@@ -8070,6 +8193,100 @@
           "release": {
             "type": "string",
             "description": "The release's id on Modrinth."
+          }
+        }
+      },
+      "WebhookSettings": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What to tell it of, where that is not everything."
+          },
+          "everything": {
+            "type": "boolean",
+            "description": "Every line of the Activity page."
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "An address that takes a message as JSON, as a Discord or a Slack\nwebhook does: `https`, by a name, on the internet. Left out or empty\nfor a webhook that is there already, it stays the address it has."
+          }
+        }
+      },
+      "WebhookView": {
+        "type": "object",
+        "description": "A webhook, as the page is told of it: its address is a secret of the\nsite's making, and is not given back whole.",
+        "required": [
+          "id",
+          "name",
+          "address",
+          "everything",
+          "events"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The site, and the last few characters of the address."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What it is told of, where that is not everything: names such as\n`server.crash`, in the order they are listed in."
+          },
+          "everything": {
+            "type": "boolean",
+            "description": "Whether it is told of every line of the Activity page."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Delivery",
+                "description": "How what it was last sent went, once it has been sent something."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Webhooks": {
+        "type": "object",
+        "required": [
+          "webhooks",
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Happening"
+            },
+            "description": "Everything a webhook can be told of."
+          },
+          "webhooks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookView"
+            }
           }
         }
       }
