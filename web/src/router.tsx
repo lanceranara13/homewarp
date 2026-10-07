@@ -287,6 +287,8 @@ const networkRoute = createRoute({
 const connectRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/network/connect',
+  // Which VPS is being connected, once one has been asked for.
+  validateSearch: (search: Record<string, unknown>): { gate?: number } => ({ gate: numberFrom(search.gate) }),
   beforeLoad: ({ context }) => ownersOnly(context),
   staticData: { reads: (queryClient) => void queryClient.prefetchQuery(gateQuery) },
   loader: async ({ context }) => {

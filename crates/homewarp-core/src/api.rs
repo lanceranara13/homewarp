@@ -87,7 +87,7 @@ impl AppState {
         backups::settle(&db, data).await?;
         schedules::settle(&db).await?;
         Ok(Self {
-            tunnel: Tunnel::new(db.clone(), runtime.clone()),
+            tunnel: Tunnel::new(db.clone(), runtime.clone(), data),
             db,
             data: data.into(),
             runtime,
@@ -433,7 +433,7 @@ pub(crate) struct Trying {
 
 impl Trying {
     pub(crate) fn new(client: Client, account: &str) -> Self {
-        let one = client.0 != std::net::IpAddr::V4(tunnel::GATE);
+        let one = !tunnel::is_gate(client.0);
         Self {
             from: one.then(|| format!("from {}", client.0)),
             account: format!("account {}", account.trim().to_lowercase()),

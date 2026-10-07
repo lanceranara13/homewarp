@@ -779,19 +779,13 @@ mod tests {
         // Two seconds on, 4000 more have come and 1000 more have gone.
         let usage = measure(&over(5000, 1500, 2000), &mut before, after(2)).unwrap();
         assert_eq!(
-            (
-                usage.received_bytes_per_second,
-                usage.sent_bytes_per_second
-            ),
+            (usage.received_bytes_per_second, usage.sent_bytes_per_second),
             (2000, 500)
         );
         // Totals that start again from nothing are no traffic backwards.
         let usage = measure(&over(10, 10, 3000), &mut before, after(3)).unwrap();
         assert_eq!(
-            (
-                usage.received_bytes_per_second,
-                usage.sent_bytes_per_second
-            ),
+            (usage.received_bytes_per_second, usage.sent_bytes_per_second),
             (0, 0)
         );
     }

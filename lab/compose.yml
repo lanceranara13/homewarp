@@ -23,6 +23,16 @@ services:
     mem_limit: ${GATE_MEM:-128m}
     networks: { inet: { ipv4_address: 203.0.113.10 } }
 
+  # A second VPS, for a home that has two: as the first is, at the next address.
+  gate2:
+    <<: *node
+    depends_on: [gate]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    cpus: 1
+    mem_limit: 128m
+    networks: { inet: { ipv4_address: 203.0.113.11 } }
+
   # A player, and with listen.sh a stand-in for any other internet host.
   client:
     <<: *node

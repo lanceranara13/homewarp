@@ -161,9 +161,9 @@ fn sentence(happened: &Happened, server: Option<&str>) -> String {
         }
         // The tunnel may still carry players while the Gate's own program is down.
         "gate.lost" => format!(
-            "The VPS has stopped answering Homewarp: {detail}. Players may not be reaching the servers."
+            "A VPS has stopped answering Homewarp: {detail}. Players may not be reaching the servers behind it."
         ),
-        "gate.back" => "The VPS answers again.".to_owned(),
+        "gate.back" => format!("The VPS {detail} answers again."),
         "notice.test" => "Homewarp can tell this address what happens.".to_owned(),
         // Every other line, for an owner who asked for every line: who, what,
         // to which server, and what was written beside it.
@@ -323,12 +323,15 @@ mod tests {
             assert_eq!(sentence(&happened(action, detail), Some("Lobby")), said);
         }
         assert_eq!(
-            sentence(&happened("gate.back", ""), None),
-            "The VPS answers again."
+            sentence(&happened("gate.back", "Frankfurt"), None),
+            "The VPS Frankfurt answers again."
         );
         assert_eq!(
-            sentence(&happened("gate.lost", "it did not answer"), None),
-            "The VPS has stopped answering Homewarp: it did not answer. Players may not be reaching the servers."
+            sentence(
+                &happened("gate.lost", "Frankfurt (it did not answer)"),
+                None
+            ),
+            "A VPS has stopped answering Homewarp: Frankfurt (it did not answer). Players may not be reaching the servers behind it."
         );
         // Any other line, for an owner who asked for every line.
         let typed = Happened {

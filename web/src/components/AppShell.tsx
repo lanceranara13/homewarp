@@ -3,7 +3,7 @@ import { Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { Blocks, Ellipsis, LayoutGrid, LogOut, ScrollText, Settings, Waypoints, type LucideIcon } from 'lucide-react'
 import { DropdownMenu, Popover } from 'radix-ui'
 
-import { gateLook, useGate } from '../gate'
+import { gateLook, useNetwork } from '../gate'
 import { sessionQuery, useSignOut } from '../session'
 import { DonationHeart, HeartMessage } from './DonationHeart'
 import { Button, FLOATING, MENU_ITEM, Mark, StateMark } from './ui'
@@ -87,7 +87,7 @@ export function AppShell() {
  * waits for it: it is asked for beside the page and painted when it answers.
  */
 function GateMark() {
-  const { word, tone } = gateLook(useGate())
+  const { word, tone } = gateLook(useNetwork())
   return (
     <Link to="/network" title={word} className={ROW_LIVE}>
       <span className="flex w-5 shrink-0 justify-center">

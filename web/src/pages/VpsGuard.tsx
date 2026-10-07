@@ -20,31 +20,31 @@ function said(ports: Guard['open']): string {
  * unless it is kept, so that a mistake cannot lock anyone out. Nothing on the
  * page waits for this.
  */
-export function VpsGuard() {
+export function VpsGuard({ id }: { id: number }) {
   const queryClient = useQueryClient()
   const { data: guard, error } = useQuery({
-    ...guardQuery,
+    ...guardQuery(id),
     // On trial every second counts, and is counted on the VPS, not here.
     refetchInterval: (query) => (query.state.data?.state === 'trial' ? 1_000 : 30_000),
   })
-  const keepAnswer = (changed: Guard) => queryClient.setQueryData(guardQuery.queryKey, changed)
+  const keepAnswer = (changed: Guard) => queryClient.setQueryData(guardQuery(id).queryKey, changed)
   const [tried, setTried] = useState(false)
   const hardening = useMutation({
-    mutationFn: hardenVps,
+    mutationFn: () => hardenVps(id),
     onSuccess: (changed) => {
       setTried(true)
       keepAnswer(changed)
     },
   })
   const keeping = useMutation({
-    mutationFn: keepGuard,
+    mutationFn: () => keepGuard(id),
     onSuccess: (changed) => {
       setTried(false)
       keepAnswer(changed)
     },
   })
   const undoing = useMutation({
-    mutationFn: unhardenVps,
+    mutationFn: () => unhardenVps(id),
     onSuccess: (changed) => {
       setTried(false)
       keepAnswer(changed)
@@ -54,7 +54,7 @@ export function VpsGuard() {
 
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="text-section text-ink">The VPS itself</h2>
+      <h3 className="font-medium text-ink">The VPS itself</h3>
       {!guard ? (
         error && <Problem>{error.message}</Problem>
       ) : guard.state === 'off' ? (

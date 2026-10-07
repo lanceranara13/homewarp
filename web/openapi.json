@@ -563,16 +563,16 @@
         }
       }
     },
-    "/api/v1/gate": {
+    "/api/v1/gates": {
       "get": {
-        "summary": "The Gate, how the tunnel to it is doing, and every port it forwards. The\none request the Network page needs, and the one the Gate's pill asks again.",
-        "operationId": "get_gate",
+        "summary": "Every VPS, how the tunnel to each is doing, and every port they forward.\nThe one request the Network page needs, and the one the sidebar's mark\nasks again.",
+        "operationId": "get_gates",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GateView"
+                  "$ref": "#/components/schemas/Network"
                 }
               }
             }
@@ -590,7 +590,8 @@
         }
       },
       "post": {
-        "summary": "Starts connecting a VPS: makes the keys of a tunnel to it and answers with\nthe one command to run there. The command counts for a quarter of an hour.\nCore dials the VPS from now until then, and the tunnel is up within a few\nseconds of the command being run; asking for the Gate again shows it.",
+        "summary": "Starts connecting a VPS: makes the keys of a tunnel to it and answers with\nthe one command to run there. The command counts for a quarter of an hour.\nCore dials the VPS from now until then, and the tunnel is up within a few\nseconds of the command being run; asking for the VPSes again shows it.",
+        "description": "A VPS that was being connected and is not yet is given up for this one.\nThose that are connected stay as they are.",
         "operationId": "enrol_gate",
         "requestBody": {
           "content": {
@@ -608,7 +609,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GateView"
+                  "$ref": "#/components/schemas/Network"
                 }
               }
             }
@@ -624,7 +625,7 @@
             }
           },
           "409": {
-            "description": "A Gate is connected already.",
+            "description": "That VPS is connected already, or there is no room for one more.",
             "content": {
               "application/json": {
                 "schema": {
@@ -634,7 +635,113 @@
             }
           },
           "422": {
-            "description": "The address or the port will not do.",
+            "description": "The address, the name or the port will not do.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gates/activity": {
+      "get": {
+        "summary": "What passes through each VPS's tunnel now, and has for the last few\nminutes: what the Network page draws. Home counts it, at its own end of\neach tunnel, so nothing is asked of a VPS for it.",
+        "operationId": "get_activity",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Activity"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gates/{id}": {
+      "put": {
+        "summary": "Changes what a VPS is called.",
+        "operationId": "rename_gate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The VPS's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Network"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such VPS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The name will not do.",
             "content": {
               "application/json": {
                 "schema": {
@@ -646,14 +753,36 @@
         }
       },
       "delete": {
-        "summary": "Forgets the Gate and takes home's end of the tunnel down. Servers go back\nto being reached on the home network only. The VPS keeps its Gate program\nuntil `homewarp-gate leave` is run there.",
+        "summary": "Forgets a VPS and takes home's end of the tunnel to it down. The servers\nthat were reached through it are reached through the best of the VPSes\nthat are left, or on the home network only if none is. The VPS keeps its\nGate program until `homewarp-gate leave` is run there.",
         "operationId": "disconnect_gate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The VPS's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "204": {
-            "description": "There is no Gate now."
+            "description": "The VPS is not connected any more."
           },
           "401": {
             "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such VPS.",
             "content": {
               "application/json": {
                 "schema": {
@@ -665,16 +794,28 @@
         }
       }
     },
-    "/api/v1/gate/check": {
+    "/api/v1/gates/{id}/check": {
       "post": {
-        "summary": "Finds out again whether servers see their players' own addresses, and puts\nthe Gate in the mode that works. It takes a few seconds, during which new\nconnections may be turned away.",
+        "summary": "Finds out again whether servers behind a VPS see their players' own\naddresses, and puts its Gate in the mode that works. It takes a few\nseconds, during which new connections through it may be turned away.",
         "operationId": "check_gate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The VPS's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GateView"
+                  "$ref": "#/components/schemas/Network"
                 }
               }
             }
@@ -690,7 +831,7 @@
             }
           },
           "409": {
-            "description": "No Gate is connected, or it cannot be reached.",
+            "description": "The VPS is not connected, or it cannot be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -702,10 +843,22 @@
         }
       }
     },
-    "/api/v1/gate/guard": {
+    "/api/v1/gates/{id}/guard": {
       "get": {
         "summary": "The guard on the VPS itself, and what is listening there.",
         "operationId": "get_guard",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The id of the VPS.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -752,6 +905,18 @@
         "summary": "Hardens the VPS: from now on, what arrives at the VPS itself from the\ninternet is dropped, but for what is listening there at this moment, and\nnew SSH connections from one address are held to a few a minute. What is\nforwarded to servers is not touched.",
         "description": "It is on trial. In a minute the VPS undoes it by itself, unless it has been\nkept by then.",
         "operationId": "harden",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The id of the VPS.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "In place, on trial.",
@@ -798,6 +963,18 @@
       "delete": {
         "summary": "Takes the guard away, kept or on trial.",
         "operationId": "unharden",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The id of the VPS.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "There is no guard now.",
@@ -842,10 +1019,22 @@
         }
       }
     },
-    "/api/v1/gate/guard/keep": {
+    "/api/v1/gates/{id}/guard/keep": {
       "post": {
         "summary": "Keeps a guard that is on trial. The VPS writes it down, and comes back\nwith it after a restart.",
         "operationId": "keep_guard",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The id of the VPS.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "It stays.",
@@ -4816,6 +5005,34 @@
           "backup"
         ]
       },
+      "Activity": {
+        "type": "object",
+        "description": "What passes through the tunnels now, and has for the last few minutes.",
+        "required": [
+          "every_seconds",
+          "most",
+          "gates"
+        ],
+        "properties": {
+          "every_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many seconds lie between one sample and the next.",
+            "minimum": 0
+          },
+          "gates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GateActivity"
+            }
+          },
+          "most": {
+            "type": "integer",
+            "description": "How many samples the whole of it is.",
+            "minimum": 0
+          }
+        }
+      },
       "ActivityEntry": {
         "type": "object",
         "description": "One thing that was done.",
@@ -5373,7 +5590,7 @@
       },
       "ForwardedPort": {
         "type": "object",
-        "description": "A port of a server, which a connected Gate forwards.",
+        "description": "A port of a server, which the Gate of its VPS forwards.",
         "required": [
           "port",
           "protocol",
@@ -5382,6 +5599,14 @@
           "traffic_bytes"
         ],
         "properties": {
+          "gate_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The VPS the server is reached through. None while it is reached on the\nhome network only."
+          },
           "port": {
             "type": "integer",
             "format": "int32",
@@ -5401,7 +5626,7 @@
           "traffic_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "What the Gate counted through it in the last day, both ways together.\nNothing where no Gate has counted."
+            "description": "What that VPS's Gate counted through it in the last day, both ways\ntogether. Nothing where no Gate has counted."
           }
         }
       },
@@ -5441,11 +5666,44 @@
           }
         }
       },
+      "GateActivity": {
+        "type": "object",
+        "description": "What passed through one VPS's tunnel, a look at a time.",
+        "required": [
+          "id",
+          "samples"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rate"
+            },
+            "description": "The newest last. Fewer than the whole of it for a tunnel that has not\nbeen up that long."
+          }
+        }
+      },
+      "GateSettings": {
+        "type": "object",
+        "description": "What can be changed of a VPS that is connected.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "What to call it."
+          }
+        }
+      },
       "GateState": {
         "type": "string",
         "description": "Where a Gate stands.",
         "enum": [
-          "none",
           "waiting",
           "expired",
           "connected"
@@ -5453,21 +5711,22 @@
       },
       "GateView": {
         "type": "object",
-        "description": "The Gate, and how the tunnel to it is doing.",
+        "description": "A VPS, and how the tunnel to it is doing.",
         "required": [
+          "id",
+          "name",
           "state",
+          "address",
           "reachable",
           "player_addresses",
-          "received_bytes",
-          "sent_bytes",
-          "ports"
+          "servers",
+          "received_bytes_per_second",
+          "sent_bytes_per_second",
+          "traffic_bytes"
         ],
         "properties": {
           "address": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "description": "The VPS's public address: what players type."
           },
           "command": {
@@ -5475,7 +5734,7 @@
               "string",
               "null"
             ],
-            "description": "While a VPS is awaited: what to run on it, as root. Where this\nHomewarp knows where its releases are, the command fetches the Gate\nfirst; otherwise it takes the Gate to be on the VPS already."
+            "description": "While the VPS is awaited: what to run on it, as root. Where this\nHomewarp knows where its releases are, the command fetches the Gate\nfirst; otherwise it takes the Gate to be on the VPS already."
           },
           "expires_at": {
             "type": [
@@ -5494,6 +5753,10 @@
             "description": "How long ago the Gate last heard from home over the tunnel.",
             "minimum": 0
           },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
           "latency_ms": {
             "type": [
               "integer",
@@ -5502,6 +5765,19 @@
             "format": "int32",
             "description": "How long the way to the Gate and back takes, in milliseconds.",
             "minimum": 0
+          },
+          "load_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How busy the VPS is: 100 is every processor it has in use. Nothing\nfrom a Gate that does not say.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "What its owner calls it. Its address, until it is called something."
           },
           "note": {
             "type": [
@@ -5514,13 +5790,6 @@
             "$ref": "#/components/schemas/PlayerAddresses",
             "description": "Whether servers see their players' own addresses."
           },
-          "ports": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ForwardedPort"
-            },
-            "description": "Every port of every server: what a connected Gate forwards."
-          },
           "problem": {
             "type": [
               "string",
@@ -5532,19 +5801,29 @@
             "type": "boolean",
             "description": "Whether the Gate answered through the tunnel when it was last asked."
           },
-          "received_bytes": {
+          "received_bytes_per_second": {
             "type": "integer",
             "format": "int64",
-            "description": "Through the tunnel since the Gate last set it up, as the Gate counts.",
+            "description": "What passes through its tunnel in a second, now: from players to\nservers, and from servers to players.",
             "minimum": 0
           },
-          "sent_bytes": {
+          "sent_bytes_per_second": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "servers": {
+            "type": "integer",
+            "description": "How many servers are reached through it.",
             "minimum": 0
           },
           "state": {
             "$ref": "#/components/schemas/GateState"
+          },
+          "traffic_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What its Gate counted through the ports of servers in the last day,\nboth ways together."
           },
           "version": {
             "type": [
@@ -5693,6 +5972,41 @@
           }
         }
       },
+      "Network": {
+        "type": "object",
+        "description": "Every VPS, and every port players reach a server by.",
+        "required": [
+          "gates",
+          "ports"
+        ],
+        "properties": {
+          "gates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GateView"
+            },
+            "description": "The VPSes, the first that was connected first."
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ForwardedPort"
+            },
+            "description": "Every port of every server."
+          },
+          "recommended": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Recommended",
+                "description": "Which of them a server is best reached through, where more than\nnothing is known. A new server is reached through it unless another\nis asked for."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "NewAccount": {
         "type": "object",
         "required": [
@@ -5728,6 +6042,13 @@
           "address": {
             "type": "string",
             "description": "The VPS's public IPv4 address, or a name for it."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to call it. Its address, if nothing is given."
           },
           "wg_port": {
             "type": [
@@ -6191,6 +6512,46 @@
           }
         }
       },
+      "Rate": {
+        "type": "object",
+        "description": "What passed through a tunnel in a second: to the servers, and from them.",
+        "required": [
+          "received",
+          "sent"
+        ],
+        "properties": {
+          "received": {
+            "type": "integer",
+            "format": "int64",
+            "description": "From players to servers, in bytes.",
+            "minimum": 0
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "From servers to players, in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "Recommended": {
+        "type": "object",
+        "description": "The VPS a server is best reached through, and what speaks for it.",
+        "required": [
+          "gate_id",
+          "why"
+        ],
+        "properties": {
+          "gate_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "why": {
+            "type": "string",
+            "description": "As a line under the choice: \"23 ms from home, 12 % busy, 1 server on it\"."
+          }
+        }
+      },
       "RecoveryCodes": {
         "type": "object",
         "description": "The codes that sign an account in when its app is lost. Each works once,\nand they are shown this one time.",
@@ -6428,6 +6789,14 @@
             "type": "boolean",
             "description": "Whether the game's EULA was agreed to for it."
           },
+          "gate_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The VPS it is reached through, whose address is the one players type.\nNone while no VPS is connected: it is then reached at home only."
+          },
           "id": {
             "type": "integer",
             "format": "int64"
@@ -6534,6 +6903,14 @@
             "type": "boolean",
             "description": "Whoever asks agrees to the EULA of the game, for a game that has one."
           },
+          "gate_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The VPS to reach it through, of those that are connected. With none\nnamed, a new server takes the one Homewarp recommends, and a server\nthat is changed keeps the one it has."
+          },
           "image": {
             "type": [
               "string",
@@ -6600,6 +6977,14 @@
           "memory_mb"
         ],
         "properties": {
+          "gate_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The VPS it is reached through. None while it is reached at home only."
+          },
           "id": {
             "type": "integer",
             "format": "int64"

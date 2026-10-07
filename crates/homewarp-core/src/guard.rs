@@ -8,7 +8,10 @@
 //! says within a minute that it is to: by then they have seen that they can
 //! still get in.
 
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use homewarp_proto::{Guard, GuardState, Open};
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -100,13 +103,14 @@ fn view(guard: Guard) -> VpsGuard {
 /// Asks the Gate, and says in words why it could not be asked.
 async fn asked(
     state: &AppState,
+    id: i64,
     method: &str,
     path: &str,
     open: Option<&Open>,
 ) -> Result<Guard, Problem> {
     state
         .tunnel
-        .guard(method, path, open)
+        .guard(id, method, path, open)
         .await
         .map_err(|error| Problem::Conflict(format!("{error:#}.").into()))
 }
@@ -123,7 +127,8 @@ fn said(open: &Open) -> String {
 /// The guard on the VPS itself, and what is listening there.
 #[utoipa::path(
     get,
-    path = "/api/v1/gate/guard",
+    path = "/api/v1/gates/{id}/guard",
+    params(("id" = i64, Path, description = "The id of the VPS.")),
     responses(
         (status = OK, body = VpsGuard),
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
@@ -131,8 +136,14 @@ fn said(open: &Open) -> String {
         (status = CONFLICT, body = ProblemBody, description = "No VPS is connected, or its Gate cannot be reached."),
     )
 )]
-async fn get_guard(State(state): State<AppState>, _: Owner) -> Result<Json<VpsGuard>, Problem> {
-    Ok(Json(view(asked(&state, "GET", "/v1/guard", None).await?)))
+async fn get_guard(
+    State(state): State<AppState>,
+    _: Owner,
+    Path(id): Path<i64>,
+) -> Result<Json<VpsGuard>, Problem> {
+    Ok(Json(view(
+        asked(&state, id, "GET", "/v1/guard", None).await?,
+    )))
 }
 
 /// Hardens the VPS: from now on, what arrives at the VPS itself from the
@@ -144,7 +155,8 @@ async fn get_guard(State(state): State<AppState>, _: Owner) -> Result<Json<VpsGu
 /// kept by then.
 #[utoipa::path(
     put,
-    path = "/api/v1/gate/guard",
+    path = "/api/v1/gates/{id}/guard",
+    params(("id" = i64, Path, description = "The id of the VPS.")),
     responses(
         (status = OK, body = VpsGuard, description = "In place, on trial."),
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
@@ -155,11 +167,12 @@ async fn get_guard(State(state): State<AppState>, _: Owner) -> Result<Json<VpsGu
 async fn harden(
     State(state): State<AppState>,
     Owner(who): Owner,
+    Path(id): Path<i64>,
 ) -> Result<Json<VpsGuard>, Problem> {
     // What is open is what is listening, as the Gate sees it now: the same
     // list the owner was shown, give or take the seconds since.
-    let listening = asked(&state, "GET", "/v1/guard", None).await?.listening;
-    let guard = asked(&state, "PUT", "/v1/guard", Some(&listening)).await?;
+    let listening = asked(&state, id, "GET", "/v1/guard", None).await?.listening;
+    let guard = asked(&state, id, "PUT", "/v1/guard", Some(&listening)).await?;
     audit::record(&state.db, &who, None, "gate.harden", &said(&guard.open)).await;
     Ok(Json(view(guard)))
 }
@@ -168,7 +181,8 @@ async fn harden(
 /// with it after a restart.
 #[utoipa::path(
     post,
-    path = "/api/v1/gate/guard/keep",
+    path = "/api/v1/gates/{id}/guard/keep",
+    params(("id" = i64, Path, description = "The id of the VPS.")),
     responses(
         (status = OK, body = VpsGuard, description = "It stays."),
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
@@ -179,8 +193,9 @@ async fn harden(
 async fn keep_guard(
     State(state): State<AppState>,
     Owner(who): Owner,
+    Path(id): Path<i64>,
 ) -> Result<Json<VpsGuard>, Problem> {
-    let guard = asked(&state, "POST", "/v1/guard/keep", None).await?;
+    let guard = asked(&state, id, "POST", "/v1/guard/keep", None).await?;
     audit::record(
         &state.db,
         &who,
@@ -195,7 +210,8 @@ async fn keep_guard(
 /// Takes the guard away, kept or on trial.
 #[utoipa::path(
     delete,
-    path = "/api/v1/gate/guard",
+    path = "/api/v1/gates/{id}/guard",
+    params(("id" = i64, Path, description = "The id of the VPS.")),
     responses(
         (status = OK, body = VpsGuard, description = "There is no guard now."),
         (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
@@ -206,8 +222,9 @@ async fn keep_guard(
 async fn unharden(
     State(state): State<AppState>,
     Owner(who): Owner,
+    Path(id): Path<i64>,
 ) -> Result<Json<VpsGuard>, Problem> {
-    let guard = asked(&state, "DELETE", "/v1/guard", None).await?;
+    let guard = asked(&state, id, "DELETE", "/v1/guard", None).await?;
     audit::record(&state.db, &who, None, "gate.unharden", "").await;
     Ok(Json(view(guard)))
 }

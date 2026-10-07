@@ -78,6 +78,11 @@ pub struct Status {
     /// or on a VPS whose nft cannot.
     #[serde(default)]
     pub traffic: Vec<Through>,
+    /// How busy the VPS is: what waited for a processor there over the last
+    /// minute, as a share of the processors it has. 100 is all of them in use.
+    /// Nothing from a Gate that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_percent: Option<u32>,
 }
 
 /// What has gone through one forwarded port, both ways together, counted from

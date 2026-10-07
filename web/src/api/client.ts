@@ -18,6 +18,8 @@ export type ServerEvent = components['schemas']['Event']
 export type Usage = components['schemas']['Usage']
 export type Players = components['schemas']['Players']
 export type Gate = components['schemas']['GateView']
+export type Network = components['schemas']['Network']
+export type Traffic = components['schemas']['Activity']
 export type PortProtocol = components['schemas']['PortProtocol']
 export type ExtraPort = components['schemas']['ExtraPort']
 export type FileEntry = components['schemas']['FileEntry']
@@ -577,50 +579,62 @@ export async function listActivity(asked: { server?: number; user?: number; befo
   return data ?? fail(error)
 }
 
-/** The Gate, how the tunnel to it is doing, and every port of every server. */
-export async function getGate(): Promise<Gate> {
-  const { data, error } = await signedIn(() => api.GET('/api/v1/gate'))
+/** Every VPS, how the tunnel to each is doing, and every port of every server. */
+export async function getNetwork(): Promise<Network> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/gates'))
+  return data ?? fail(error)
+}
+
+/** What passes through each VPS's tunnel now, and has for the last few minutes. Only the owner may ask. */
+export async function getTraffic(): Promise<Traffic> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/gates/activity'))
   return data ?? fail(error)
 }
 
 /** Starts connecting a VPS. The answer carries the one command to run there. */
-export async function connectGate(body: NewGate): Promise<Gate> {
-  const { data, error } = await signedIn(() => api.POST('/api/v1/gate', { body }))
+export async function connectGate(body: NewGate): Promise<Network> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/gates', { body }))
   return data ?? fail(error)
 }
 
-/** Has Homewarp find out again whether servers see their players' own addresses. It takes a few seconds. */
-export async function checkGate(): Promise<Gate> {
-  const { data, error } = await signedIn(() => api.POST('/api/v1/gate/check'))
+/** Changes what a VPS is called. */
+export async function renameGate(id: number, name: string): Promise<Network> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/gates/{id}', { params: { path: { id } }, body: { name } }))
   return data ?? fail(error)
 }
 
-export async function disconnectGate(): Promise<void> {
-  const { error, response } = await signedIn(() => api.DELETE('/api/v1/gate'))
+/** Has Homewarp find out again whether servers behind a VPS see their players' own addresses. It takes a few seconds. */
+export async function checkGate(id: number): Promise<Network> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/gates/{id}/check', { params: { path: { id } } }))
+  return data ?? fail(error)
+}
+
+export async function disconnectGate(id: number): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/gates/{id}', { params: { path: { id } } }))
   if (!response.ok) fail(error)
 }
 
-/** The guard on the VPS itself, and what is listening there. Only the owner may ask. */
-export async function getGuard(): Promise<VpsGuard> {
-  const { data, error } = await signedIn(() => api.GET('/api/v1/gate/guard'))
+/** The guard on a VPS itself, and what is listening there. Only the owner may ask. */
+export async function getGuard(id: number): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/gates/{id}/guard', { params: { path: { id } } }))
   return data ?? fail(error)
 }
 
-/** Hardens the VPS, on trial: it is undone by itself in a minute unless it is kept. */
-export async function hardenVps(): Promise<VpsGuard> {
-  const { data, error } = await signedIn(() => api.PUT('/api/v1/gate/guard'))
+/** Hardens a VPS, on trial: it is undone by itself in a minute unless it is kept. */
+export async function hardenVps(id: number): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/gates/{id}/guard', { params: { path: { id } } }))
   return data ?? fail(error)
 }
 
 /** Keeps a guard that is on trial. */
-export async function keepGuard(): Promise<VpsGuard> {
-  const { data, error } = await signedIn(() => api.POST('/api/v1/gate/guard/keep'))
+export async function keepGuard(id: number): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/gates/{id}/guard/keep', { params: { path: { id } } }))
   return data ?? fail(error)
 }
 
-/** Takes the guard off the VPS, kept or on trial. */
-export async function unhardenVps(): Promise<VpsGuard> {
-  const { data, error } = await signedIn(() => api.DELETE('/api/v1/gate/guard'))
+/** Takes the guard off a VPS, kept or on trial. */
+export async function unhardenVps(id: number): Promise<VpsGuard> {
+  const { data, error } = await signedIn(() => api.DELETE('/api/v1/gates/{id}/guard', { params: { path: { id } } }))
   return data ?? fail(error)
 }
 

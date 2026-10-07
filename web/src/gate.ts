@@ -1,19 +1,26 @@
 import { queryOptions, useQuery } from '@tanstack/react-query'
 
-import { getGate, getGuard, getPanel, type Gate } from './api/client'
+import { getGuard, getNetwork, getPanel, getTraffic, type Gate, type Network } from './api/client'
 
 /**
- * How often an open page asks after the Gate, in milliseconds: as often as
- * Homewarp itself asks it, and faster while a VPS is being connected, when
+ * How often an open page asks after the VPSes, in milliseconds: as often as
+ * Homewarp itself asks them, and faster while one is being connected, when
  * each step takes a second or two.
  */
 export const EVERY_GATE = { steady: 10_000, changing: 2_000 }
 
-/** The Gate, the tunnel to it, and every port of every server. */
+/** Every VPS, the tunnel to each, and every port of every server. */
 export const gateQuery = queryOptions({
-  queryKey: ['gate'],
-  queryFn: getGate,
+  queryKey: ['gates'],
+  queryFn: getNetwork,
   staleTime: 2_000,
+})
+
+/** What passes through each tunnel now. Only the owner's Network page asks, for as long as it is open. */
+export const trafficQuery = queryOptions({
+  queryKey: ['gates', 'traffic'],
+  queryFn: getTraffic,
+  staleTime: 1_000,
 })
 
 /** The name the panel is reached by from the internet, and its certificate. Only the owner's page asks. */
@@ -23,41 +30,67 @@ export const panelQuery = queryOptions({
   staleTime: 2_000,
 })
 
-/** The guard on the VPS itself. Only the owner's page asks, and only while a VPS is connected. */
-export const guardQuery = queryOptions({
-  queryKey: ['gate', 'guard'],
-  queryFn: getGuard,
-  staleTime: 1_000,
-})
+/** The guard on one VPS itself. Only the owner's page asks, and only of a VPS that answers. */
+export function guardQuery(id: number) {
+  return queryOptions({
+    queryKey: ['gates', id, 'guard'],
+    queryFn: () => getGuard(id),
+    staleTime: 1_000,
+  })
+}
 
-/** Whether the Gate is in the middle of something that the next few seconds will change. */
+/** Whether a VPS is in the middle of something that the next few seconds will change. */
 export function isChanging(gate: Gate | undefined): boolean {
   return gate?.state === 'waiting' || (gate?.state === 'connected' && gate.player_addresses === 'unchecked' && !gate.note)
 }
 
+/** How often to ask again: faster while any VPS is changing. */
+export function everyGate(network: Network | undefined): number {
+  return network?.gates.some(isChanging) ? EVERY_GATE.changing : EVERY_GATE.steady
+}
+
 /**
- * The Gate as it was last heard of, asked again by itself. Nothing waits for
- * it: the sidebar and the address chips are painted before it answers, and
+ * The VPSes as they were last heard of, asked again by itself. Nothing waits
+ * for it: the sidebar and the address chips are painted before it answers, and
  * every page that uses it shares the one request.
  */
-export function useGate(): Gate | undefined {
-  const { data } = useQuery({
-    ...gateQuery,
-    refetchInterval: (query) => (isChanging(query.state.data) ? EVERY_GATE.changing : EVERY_GATE.steady),
-  })
+export function useNetwork(): Network | undefined {
+  const { data } = useQuery({ ...gateQuery, refetchInterval: (query) => everyGate(query.state.data) })
   return data
 }
 
-/** Where players reach a port: at the VPS once one is connected, on the home network until then. */
-export function addressOf(gate: Gate | undefined, port: number): string {
-  const host = gate?.state === 'connected' && gate.address ? gate.address : window.location.hostname
-  return `${host}:${port}`
+/** The VPS a server is reached through, once it is connected. */
+export function gateOf(network: Network | undefined, server: { gate_id?: number | null }): Gate | undefined {
+  return network?.gates.find((gate) => gate.id === server.gate_id && gate.state === 'connected')
 }
 
-/** What the Gate is doing, as a pill says it: a word, and the state whose colour and mark it takes. */
-export function gateLook(gate: Gate | undefined): { word: string; tone: 'running' | 'starting' | 'crashed' | 'offline' } {
-  if (!gate || gate.state === 'none' || gate.state === 'expired') return { word: 'No VPS', tone: 'offline' }
+/** Where players reach a server's port: at its VPS once it has one, on the home network until then. */
+export function addressOf(network: Network | undefined, server: { port: number; gate_id?: number | null }): string {
+  return `${gateOf(network, server)?.address ?? window.location.hostname}:${server.port}`
+}
+
+type Look = { word: string; tone: 'running' | 'starting' | 'crashed' | 'offline' }
+
+/** What one VPS is doing, as a pill says it: a word, and the state whose colour and mark it takes. */
+export function lookOf(gate: Gate): Look {
+  if (gate.state === 'expired') return { word: 'Not connected', tone: 'offline' }
   if (gate.state === 'waiting') return { word: 'Connecting', tone: 'starting' }
-  if (!gate.reachable) return { word: 'Gate unreachable', tone: 'crashed' }
-  return { word: gate.latency_ms == null ? 'Gate up' : `Gate ${gate.latency_ms} ms`, tone: 'running' }
+  if (!gate.reachable) return { word: 'Unreachable', tone: 'crashed' }
+  return { word: gate.latency_ms == null ? 'Up' : `${gate.latency_ms} ms`, tone: 'running' }
+}
+
+/** The same for all of them at once, as the sidebar's one mark says it. */
+export function gateLook(network: Network | undefined): Look {
+  const connected = network?.gates.filter((gate) => gate.state === 'connected') ?? []
+  if (connected.length === 0) {
+    return network?.gates.some((gate) => gate.state === 'waiting') ? { word: 'Connecting', tone: 'starting' } : { word: 'No VPS', tone: 'offline' }
+  }
+  const down = connected.filter((gate) => !gate.reachable).length
+  if (connected.length === 1) {
+    const [gate] = connected
+    if (down > 0) return { word: 'Gate unreachable', tone: 'crashed' }
+    return { word: gate?.latency_ms == null ? 'Gate up' : `Gate ${gate.latency_ms} ms`, tone: 'running' }
+  }
+  if (down > 0) return { word: `${down} of ${connected.length} VPSes unreachable`, tone: 'crashed' }
+  return { word: `${connected.length} VPSes up`, tone: 'running' }
 }

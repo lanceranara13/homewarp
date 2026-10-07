@@ -90,6 +90,11 @@ only.
 - "Harden this VPS": shuts what is not listening, on trial for a minute and
   undone by itself unless you keep it.
 - Works with a VPS that runs ufw or firewalld.
+- More than one VPS, each with a tunnel of its own. Each server is reached
+  through the one you choose for it, and Homewarp says which it would pick:
+  the nearest to home that is not busy.
+- What passes through each tunnel, drawn as it happens, and what goes to and
+  from each server beside its console.
 
 **The panel**
 - More accounts, each let into chosen servers for chosen things.
@@ -167,6 +172,9 @@ start it once more.
    Gate, opens what the VPS's own firewall needs, and connects.
 3. Within a few seconds the panel shows the VPS as connected, and each
    server's address becomes the VPS's. Share that address with your friends.
+
+A second VPS is connected the same way, and a third. Which one a server is
+reached through is chosen on the server's own form.
 
 To reach the panel itself from outside, point a name at the VPS and give that
 name to the panel on the same page. If the VPS has a firewall and no web
@@ -247,7 +255,7 @@ design is [DESIGN.md](DESIGN.md).
   panel shows give each server a name without it.
 - An importer that reads another panel's database
   ([docs/moving.md](docs/moving.md) has the way by hand).
-- More than one VPS, or more than one home machine.
+- More than one home machine.
 - Bedrock Edition for the Minecraft extras: players, sleep and mods are Java
   Edition only. Bedrock servers themselves run like any other game.
 

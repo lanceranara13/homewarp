@@ -38,7 +38,7 @@ GATE_FW=${GATE_FW:-none}
 # The VPS is then of an image that has firewalld (firewalld.Dockerfile). firewalld is a
 # program of some tens of megabytes itself, and no part of what the Gate is held to.
 [ "$GATE_FW" = firewalld ] && export GATE_IMAGE=homewarp-lab-firewalld GATE_DOCKERFILE=firewalld.Dockerfile GATE_MEM=${GATE_MEM:-256m}
-GATE_IP=203.0.113.10 HOME_IP=203.0.113.20 HOME_IP_NEXT=203.0.113.21 CLIENT_IP=203.0.113.50
+GATE_IP=203.0.113.10 GATE2_IP=203.0.113.11 HOME_IP=203.0.113.20 HOME_IP_NEXT=203.0.113.21 CLIENT_IP=203.0.113.50
 PEBBLE_IP=203.0.113.30
 RELEASES_IP=203.0.113.40  # where releases are fetched from, as a web server on the internet
 NAME=panel.lab  # the panel's name, which leads to the gate
@@ -51,6 +51,7 @@ IPERF=25566     # iperf3 in a server of its own, published by Docker
 CLOSED=25567    # open in the game container, not published
 VOICE=25568     # a further port of the game's, for udp alone
 MC=25570        # a server that speaks Minecraft, and is put to sleep
+SECOND=25571    # a server that is reached through a second VPS
 SVC=2222        # listen.sh on home, nas and client
 
 dc()   { docker compose -p homewarp-lab --progress quiet "$@"; }
@@ -85,18 +86,28 @@ gate_says()  {
   dc exec -T home curl -s -m 5 -H "Authorization: Bearer $(gate_token)" "http://$GATE_TUN:$API_PORT/v1/status"
 }
 
-# Core's view of its Gate: one field of it, and waiting for a field to be a value.
-gate_is() { core GET /gate | field "$1"; }
-until_gate() {  # field, value, seconds
+# Core's view of a VPS, the first unless another is named by its address: one
+# field of it, and waiting for a field to be a value.
+gate_is() {  # field, [address]
+  core GET /gates | python3 -c 'import json, sys
+gates = [gate for gate in json.load(sys.stdin)["gates"] if gate["address"] == sys.argv[2]]
+print(gates[0].get(sys.argv[1]) if gates else {"state": "none"}.get(sys.argv[1]))' "$1" "${2:-$GATE_IP}"
+}
+# Has Core begin to connect a VPS, and says the one command to run there.
+connect() {  # address, [name]
+  core POST /gates "{\"address\":\"$1\"${2:+,\"name\":\"$2\"}}" | python3 -c 'import json, sys
+print(next(gate["command"] for gate in json.load(sys.stdin)["gates"] if gate["state"] == "waiting"))'
+}
+until_gate() {  # field, value, seconds, [address]
   for _ in $(seq "$3"); do
-    [ "$(gate_is "$1" 2>/dev/null)" = "$2" ] && return 0
+    [ "$(gate_is "$1" "${4:-$GATE_IP}" 2>/dev/null)" = "$2" ] && return 0
     sleep 1
   done
   return 1
 }
 
 # Has Core find out again how players' addresses arrive, and says what it found.
-check_again() { core POST /gate/check | field player_addresses; }
+check_again() { core POST "/gates/$(gate_is id)/check" >/dev/null; gate_is player_addresses; }
 
 # Starts the two programs, as their services would.
 start_gate() { dc exec -d gate sh -c 'homewarp-gate run --dir /run/hw >>/run/hw/log 2>&1'; }
@@ -202,7 +213,7 @@ EOF
   fi
 
   echo "== a VPS is connected: Core makes the one command, and the VPS runs it"
-  command=$(core POST /gate "{\"address\":\"$GATE_IP\"}" | field command)
+  command=$(connect "$GATE_IP")
   token=${command##* }
   echo "   ${command:0:60}… (${#token} characters)"
   dc exec -T gate sh -c 'pkill homewarp-gate; ip link del homewarp0; rm -rf /run/hw /usr/local/bin/homewarp-gate; true' 2>/dev/null
@@ -291,7 +302,7 @@ panel_is() { core GET /panel | field "$1"; }
 fw() { dc exec -T gate firewall-cmd "$@" 2>&1 | tr '\n' ' ' | sed 's/ *$//'; }
 
 cmd_test() {
-  local HOME_PUB joined carried rss size wan token answer wg_port command mc asks joins told restored
+  local HOME_PUB joined carried rss size wan token answer wg_port command mc asks joins told restored second
   echo "home: $(dc exec -T home sh -c 'docker version --format "Docker {{.Server.Version}}"; iptables --version' | tr '\n' ' ') firewall backend $HOME_FW"
 
   echo "== a release is trusted for its signature, and not for where it came from"
@@ -332,7 +343,7 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   differ "and so is the Gate's token" "$(gate_token)" "$(echo "$joined" | field t)"
   check "the token the command carried opens nothing" "$(dc exec -T home curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(echo "$joined" | field t)" "http://$GATE_TUN:$API_PORT/v1/status")" "401"
   check "each end has the other as its one peer" "$(dc exec -T gate wg show homewarp0 peers | wc -l) $(dc exec -T home wg show homewarp0 peers | wc -l)" "1 1"
-  check "the command cannot be run a second time for another Gate" "$(core GET /gate | field command)" "None"
+  check "the command cannot be run a second time for another Gate" "$(gate_is command)" "None"
 
   if [ "$GATE_FW" = firewalld ]; then
     echo "== the VPS's own firewall: firewalld was asked for what the tunnel needs, and for nothing more"
@@ -374,7 +385,7 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   check "as Docker publishes it at home" "$(dc exec -T home docker ps --format '{{.Ports}}' --filter publish=$VOICE/udp | grep -o "$VOICE->$VOICE/[a-z]*" | sort -u | tr '\n' ' ')" "$VOICE->$VOICE/udp "
 
   echo "== traffic: what goes through a port, as the Gate counts it and home adds it up"
-  counted() { core GET /gate | python3 -c 'import json, sys; print(sum(port["traffic_bytes"] for port in json.load(sys.stdin)["ports"]))'; }
+  counted() { core GET /gates | python3 -c 'import json, sys; print(sum(port["traffic_bytes"] for port in json.load(sys.stdin)["ports"]))'; }
   check "the Gate has counted through the ports just used" \
     "$(gate_says | python3 -c 'import json, sys; print(sum(1 for port in json.load(sys.stdin)["traffic"] if port["bytes"] > 0) >= 2)')" "True"
   before=$(counted)
@@ -490,16 +501,16 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   if [ "$got" -ge 18 ]; then ok "with which twenty at once get through as before ($got)"; else fail "of twenty at once, only $got got through after the limit was set back"; fi
 
   echo "== the VPS itself: hardened on trial, and undone by itself unless it is kept"
-  guard_is() { core GET /gate/guard | field "$1"; }
+  guard_is() { core GET "/gates/$(gate_is id)/guard" | field "$1"; }
   guard_has() {  # which list, which kind
-    core GET /gate/guard | python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]][sys.argv[2]])' "$1" "$2"
+    core GET "/gates/$(gate_is id)/guard" | python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]][sys.argv[2]])' "$1" "$2"
   }
   # Something of the VPS's own that listens before it is hardened: an SSH of its, say.
   dc exec -d gate sh -c 'SVC=2301 /lab/listen.sh'
   sleep 1
   check "control: what listens on the VPS is reached" "$(reach client "$GATE_IP" 2301)" "reached $CLIENT_IP"
   check "there is no guard, and the Gate says what listens there" "$(guard_is state) $(guard_has listening tcp)" "off [2301, $API_PORT]"
-  core PUT /gate/guard >/dev/null
+  core PUT "/gates/$(gate_is id)/guard" >/dev/null
   check "hardened, on trial" "$(guard_is state)" "trial"
   check "open is what was listening, and the tunnel's own port" "$(guard_has open tcp) $(guard_has open udp)" "[2301, $API_PORT] [51820]"
   # And something that begins to listen after.
@@ -518,8 +529,8 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   check "nothing of it is written down" "$(dc exec -T gate sh -c 'ls /run/hw | grep -c guard' || true)" "0"
 
   echo "== the VPS itself: kept"
-  core PUT /gate/guard >/dev/null
-  core POST /gate/guard/keep >/dev/null
+  core PUT "/gates/$(gate_is id)/guard" >/dev/null
+  core POST "/gates/$(gate_is id)/guard/keep" >/dev/null
   check "kept" "$(guard_is state) $(guard_has open tcp)" "kept [2301, 2302, $API_PORT]"
   dc exec -d gate sh -c 'SVC=2303 /lab/listen.sh'
   sleep 1
@@ -538,8 +549,8 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   check "and the guard lets whoever asks in to it" "$(dc exec -T client curl -s -m 5 "http://$GATE_IP/.well-known/acme-challenge/guarded-Token")" "guarded-Token.mark"
   check "the answer taken away" "$(gate_asked DELETE "/v1/challenge/guarded-Token")" "204"
   check "the port is shut again" "$(status client "http://$GATE_IP/.well-known/acme-challenge/guarded-Token")" "000"
-  check "hardened again, what listens now is open" "$(core PUT /gate/guard | field state) $(reach client "$GATE_IP" 2303)" "trial reached $CLIENT_IP"
-  core DELETE /gate/guard >/dev/null
+  check "hardened again, what listens now is open" "$(core PUT "/gates/$(gate_is id)/guard" | field state) $(reach client "$GATE_IP" 2303)" "trial reached $CLIENT_IP"
+  core DELETE "/gates/$(gate_is id)/guard" >/dev/null
   check "the guard taken away, on trial as it was" "$(guard_is state)" "off"
   dc exec -T gate sh -c 'pkill -f "TCP4-LISTEN:230"; true'
   check "and nothing of it is left in the Gate's rules" "$(dc exec -T gate nft list table inet homewarp | grep -c guard || true)" "0"
@@ -652,7 +663,7 @@ EOF
   start_core
   # As after a reboot of the home machine, with its servers started again by Docker.
   check "started as after a reboot, Core brings the tunnel back" "$(seen_again 30)" "$CLIENT_IP"
-  check "and still has its Gate" "$(core GET /gate | field state)" "connected"
+  check "and still has its Gate" "$(gate_is state)" "connected"
 
   echo "== self-healing: the home's address changes (to $HOME_IP_NEXT)"
   wan=$(dc exec -T router sh -c "ip -o -4 addr show | awk -v ip=$HOME_IP 'index(\$4, ip \"/\") == 1 { print \$2 }'")
@@ -705,8 +716,41 @@ EOF
   check "and nobody reaches the panel from the internet" "$(status client -k --resolve "$NAME:$TLS:$GATE_IP" "https://$NAME:$TLS/api/v1/health")" "000"
   check "players get through as before" "$(seen tcp)" "$CLIENT_IP"
 
+  echo "== a second VPS: a tunnel of its own, and a server that is reached through it"
+  dc exec -T gate2 sh -c 'pkill homewarp-gate; ip link del homewarp0; rm -rf /run/hw /usr/local/bin/homewarp-gate; true' 2>/dev/null
+  command=$(connect "$GATE2_IP" Second)
+  dc exec -T gate2 sh -c "$command --dir /run/hw --no-service --wan eth0" | sed 's/^/   /'
+  dc exec -d gate2 sh -c 'homewarp-gate run --dir /run/hw >>/run/hw/log 2>&1'
+  until_gate player_addresses preserved 60 "$GATE2_IP" || true
+  check "Core has two, and the second is called what it was called" "$(gate_is state) $(gate_is state "$GATE2_IP") $(gate_is name "$GATE2_IP")" "connected connected Second"
+  check "players' addresses through the second, as Core found them" "$(gate_is player_addresses "$GATE2_IP")" "preserved"
+  check "home has a tunnel to each, and a way back by each" "$(dc exec -T home sh -c 'ls /sys/class/net | grep -c "^homewarp[01]$"; ip rule | grep -c "fwmark 0x485[78] lookup 485[78]"' | tr '\n' ' ')" "2 2 "
+  check "the second tunnel has the next addresses" "$(dc exec -T gate2 sh -c "ip -o -4 addr show homewarp0" | awk '{ print $4 }')" "10.213.77.5/30"
+  check "the servers there were stay with the first VPS" "$(gate_says | field forwards) $(gate_is servers "$GATE2_IP")" "5 0"
+  second=$(gate_is id "$GATE2_IP")
+  check "a server cannot be reached through a VPS there is not" "$(dc exec -T home curl -s -o /dev/null -w '%{http_code}' -b /run/hw/jar -X POST -H 'Content-Type: application/json' -d "{\"name\":\"nowhere\",\"template_id\":1,\"memory_mb\":256,\"port\":$SECOND,\"gate_id\":999}" http://127.0.0.1:3600/api/v1/servers)" "422"
+  core POST /servers "{\"name\":\"second\",\"template_id\":1,\"memory_mb\":256,\"port\":$SECOND,\"gate_id\":$second}" >/dev/null
+  seen_at() { dc exec -T client sh -c "socat -u TCP:$1:$2,connect-timeout=4 - 2>/dev/null || true" | awk '$1 == "tcp" { print $2 }'; }
+  for _ in $(seq 40); do [ -n "$(seen_at "$GATE2_IP" "$SECOND")" ] && break; sleep 1; done
+  check "a player reaches it at the second VPS, and is seen as themselves" "$(seen_at "$GATE2_IP" "$SECOND")" "$CLIENT_IP"
+  check "and not at the first, which does not forward it" "$(seen_at "$GATE_IP" "$SECOND")" ""
+  check "the first VPS's server is not reached at the second" "$(seen_at "$GATE2_IP" "$PORT")" ""
+  check "and is reached where it was" "$(seen tcp)" "$CLIENT_IP"
+  check "Core says which of the two a new server would take, and why" "$(core GET /gates | python3 -c 'import json, sys
+said = json.load(sys.stdin)
+print(said["recommended"]["gate_id"] in [gate["id"] for gate in said["gates"]], "ms from home" in said["recommended"]["why"])')" "True True"
+  sleep 5
+  check "and has looked at what passes through each tunnel" "$(core GET /gates/activity | python3 -c 'import json, sys
+print(sorted(len(gate["samples"]) > 0 for gate in json.load(sys.stdin)["gates"]))')" "[True, True]"
+  check "the second Gate says how busy its VPS is" "$(gate_is load_percent "$GATE2_IP" | grep -c '^[0-9][0-9]*$')" "1"
+  core DELETE "/gates/$second"
+  for _ in $(seq 40); do [ -n "$(seen_at "$GATE_IP" "$SECOND")" ] && break; sleep 1; done
+  check "the second VPS disconnected, its server is reached through the first" "$(seen_at "$GATE_IP" "$SECOND")" "$CLIENT_IP"
+  check "and home's second tunnel is gone, with its way back" "$(dc exec -T home sh -c 'ls /sys/class/net | grep -c "^homewarp1$"; ip rule | grep -c 0x4858' | tr '\n' ' ')" "0 0 "
+  check "the first is as it was" "$(seen tcp) $(gate_is reachable)" "$CLIENT_IP True"
+
   echo "== a VPS is disconnected"
-  core DELETE /gate
+  core DELETE "/gates/$(gate_is id)"
   check "Core has no Gate" "$(gate_is state)" "none"
   check "home's end is gone from the kernel" "$(dc exec -T home sh -c 'ls /sys/class/net | grep -c homewarp0; nft list table inet homewarp >/dev/null 2>&1 && echo table; ip rule | grep -c 0x4857' | tr '\n' ' ')" "0 0 "
   check "nobody gets through" "$(seen tcp)" ""
@@ -720,7 +764,7 @@ EOF
 
   echo "== a home that is already on a network with the tunnel's addresses"
   dc exec -T home ip route add 10.213.77.0/24 dev eth0
-  check "a VPS is not connected there, and Core says which network is in the way" "$(dc exec -T home curl -s -m 10 -b /run/hw/jar -X POST -H 'Content-Type: application/json' -d "{\"address\":\"$GATE_IP\"}" http://127.0.0.1:3600/api/v1/gate | python3 -c 'import json, sys; print("eth0 10.213.77.0/24" in json.load(sys.stdin).get("error", ""))')" "True"
+  check "a VPS is not connected there, and Core says which network is in the way" "$(dc exec -T home curl -s -m 10 -b /run/hw/jar -X POST -H 'Content-Type: application/json' -d "{\"address\":\"$GATE_IP\"}" http://127.0.0.1:3600/api/v1/gates | python3 -c 'import json, sys; print("eth0 10.213.77.0/24" in json.load(sys.stdin).get("error", ""))')" "True"
   check "and nothing was begun" "$(gate_is state)" "none"
   dc exec -T home ip route del 10.213.77.0/24 dev eth0
 
@@ -729,13 +773,13 @@ EOF
 
   if [ "$GATE_FW" = firewalld ]; then
     echo "== the VPS's own firewall: connected a second time, and then left"
-    command=$(core POST /gate "{\"address\":\"$GATE_IP\"}" | field command)
+    command=$(connect "$GATE_IP")
     dc exec -T gate pkill homewarp-gate || true
     check "the zone is there already, and the command says nothing against that" "$(dc exec -T gate sh -c "$command --dir /run/hw --no-service --wan eth0 2>&1" | grep -c 'firewalld: opened')" "1"
     start_gate
     until_gate state connected 40 || true
     check "and the VPS is connected again" "$(gate_is state)" "connected"
-    core DELETE /gate
+    core DELETE "/gates/$(gate_is id)"
     dc exec -T gate pkill homewarp-gate || true
     dc exec -T gate homewarp-gate leave --dir /run/hw | sed 's/^/   /'
     check "the Gate left: its zone is gone, and the tunnel's port is shut again" "$(fw --get-zones | tr ' ' '\n' | grep -c '^homewarp$' || true) '$(fw --zone=public --list-ports)' '$(fw --permanent --zone=public --list-ports)'" "0 '2301-2303/tcp' '2301-2303/tcp'"

@@ -5,7 +5,7 @@ import { useId, useState, type ReactNode } from 'react'
 
 import { createServer, type PortProtocol, type ServerSettings, type Template } from '../api/client'
 import { Button, Field, PageBar, Problem, Steps, buttonClass } from '../components/ui'
-import { useGate } from '../gate'
+import { useNetwork } from '../gate'
 import { serverQuery, serversQuery } from '../servers'
 import { templateQuery, templatesQuery } from '../templates'
 
@@ -96,8 +96,8 @@ export function NewServerPage() {
 
   // The first port from Minecraft's own upward that no server has. The servers' further ports
   // are known once the Gate has answered; a clash with one of those is refused in words anyway.
-  const gate = useGate()
-  const taken = new Set([...servers.map((server) => server.port), ...(gate?.ports.map((published) => published.port) ?? [])])
+  const network = useNetwork()
+  const taken = new Set([...servers.map((server) => server.port), ...(network?.ports.map((published) => published.port) ?? [])])
   let port = FIRST_PORT
   while (taken.has(port)) port += 1
 
@@ -143,6 +143,17 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
   const [further, setFurther] = useState(() =>
     (start.ports ?? []).map((one, key) => ({ key, port: String(one.port), protocol: one.protocol ?? ('both' as PortProtocol) })),
   )
+  // The VPS it is reached through: the one it has or the one that was picked, and until then
+  // the one Homewarp would pick. Wanted, not needed: the form is painted before the answer.
+  const network = useNetwork()
+  const [picked, setPicked] = useState<number | null>(start.gate_id ?? null)
+  const vpses = network?.gates.filter((gate) => gate.state === 'connected') ?? []
+  const recommended = network?.recommended ?? null
+  // Which one Homewarp would pick changes as the VPSes are asked again. What the form
+  // starts on is the first answer, so that it does not change under whoever is filling it in.
+  const [suggested, setSuggested] = useState<number | null>(null)
+  if (suggested === null && recommended) setSuggested(recommended.gate_id)
+  const through = picked ?? suggested ?? vpses[0]?.id ?? null
   const changeFurther = (key: number, change: { port?: string; protocol?: PortProtocol }) =>
     setFurther((rows) => rows.map((row) => (row.key === key ? { ...row, ...change } : row)))
   // What a person is meant to set comes first, with what has to be set because the template
@@ -179,6 +190,7 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
           port: Number(typed('port')),
           protocol: typed('protocol') as PortProtocol,
           ports: further.filter((row) => row.port !== '').map((row) => ({ port: Number(row.port), protocol: row.protocol })),
+          gate_id: through,
           variables: Object.fromEntries(template.variables.map(({ env }) => [env, typed(`variable.${env}`)])),
           eula: form.get('eula') === 'on',
           sleep_minutes: Number(typed('sleep_minutes')) || 0,
@@ -222,6 +234,31 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
         defaultValue={start.port}
         hint="Where players reach it, here and at a connected VPS. No two servers have the same one."
       />
+      {/* With one VPS there is nothing to choose, and with none nothing to choose from. */}
+      {vpses.length > 1 && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor={`${id}-gate`} className="text-caption text-ink-subtle">
+            Reached through
+          </label>
+          <select id={`${id}-gate`} value={through ?? ''} onChange={(event) => setPicked(Number(event.target.value))} className={SELECT}>
+            {vpses.map((gate) => (
+              <option key={gate.id} value={gate.id}>
+                {gate.name === gate.address ? gate.address : `${gate.name} · ${gate.address}`}
+                {gate.id === recommended?.gate_id ? ' (recommended)' : ''}
+              </option>
+            ))}
+          </select>
+          <div className="text-small text-ink-subtle">
+            The VPS whose address players type for this server.
+            {recommended && (
+              <>
+                {' '}
+                Homewarp would pick {vpses.find((gate) => gate.id === recommended.gate_id)?.name}: {recommended.why}.
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {asked.map(field)}
       {template.features.includes('eula') && (
         <label className="flex items-start gap-2">

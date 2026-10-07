@@ -91,6 +91,13 @@ words, and `homewarp-gate leave` takes them away again:
   called `homewarp` for the tunnel's interface that lets in the Gate's API and
   nothing else. firewalld is reloaded once to take that up.
 
+**More than one VPS** can be connected, each by a line of its own from the same
+page: eight at the most. Each has a tunnel of its own, and each server is
+reached through one of them, which is chosen on the server's form. Homewarp
+says which it would pick: the one nearest to home that is not busy. A server
+keeps the VPS it has until another is chosen for it, and when a VPS is
+disconnected its servers go to the best of those that are left.
+
 Port 80 is not among them. It is needed only when the panel is given a name
 (its certificate is asked for there), and on a VPS without a web server you
 open it yourself: `ufw allow 80/tcp`, or `firewall-cmd --permanent

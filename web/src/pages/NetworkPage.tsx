@@ -1,15 +1,18 @@
-import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
+import { Link, getRouteApi, useNavigate } from '@tanstack/react-router'
 import { Check, LoaderCircle, Plus, TriangleAlert, Waypoints } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
-import { checkGate, connectGate, disconnectGate, type Gate, type PortProtocol } from '../api/client'
+import { checkGate, connectGate, disconnectGate, renameGate, type Gate, type Network, type PortProtocol } from '../api/client'
+import { TrafficChart, type Sample } from '../components/TrafficChart'
 import { Button, Confirm, CopyChip, Field, PageBar, Pill, Problem, Steps, buttonClass, type Tone } from '../components/ui'
 import { bytes } from '../format'
-import { EVERY_GATE, addressOf, gateLook, gateQuery, isChanging } from '../gate'
+import { addressOf, everyGate, gateQuery, isChanging, lookOf, trafficQuery } from '../gate'
 import { useOwner } from '../session'
 import { PanelAddress } from './PanelAddress'
 import { VpsGuard } from './VpsGuard'
+
+const connect = getRouteApi('/shell/network/connect')
 
 const PROTOCOLS: Record<PortProtocol, string> = { tcp: 'TCP', udp: 'UDP', both: 'TCP and UDP' }
 
@@ -33,54 +36,61 @@ const PLAYERS: Record<Gate['player_addresses'], { word: string; tone: Tone; sent
 
 const CONNECT_STEPS = ['VPS address', 'Run one command', 'Verify']
 
-/** The Gate for a page that cannot paint without it, asked again as often as it is changing. */
-function useGateHere(): Gate {
-  const { data } = useSuspenseQuery({
-    ...gateQuery,
-    refetchInterval: (query) => (isChanging(query.state.data) ? EVERY_GATE.changing : EVERY_GATE.steady),
-  })
+/** The VPSes for a page that cannot paint without them, asked again as often as one is changing. */
+function useNetworkHere(): Network {
+  const { data } = useSuspenseQuery({ ...gateQuery, refetchInterval: (query) => everyGate(query.state.data) })
   return data
 }
 
-/** 1536 bytes as "1.5 kB". */
-function amount(bytes: number): string {
-  const units = ['bytes', 'kB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
+/**
+ * What has passed through each tunnel over the last few minutes, a sample at
+ * a time, by the VPS's id. Wanted, not needed: the page is painted before it
+ * answers, and it is asked again as often as Homewarp looks.
+ */
+function useTraffic(asked: boolean): { slots: number; of: (id: number) => Sample[]; all: Sample[] } {
+  const { data, dataUpdatedAt } = useQuery({ ...trafficQuery, enabled: asked, refetchInterval: 2_000 })
+  const every = (data?.every_seconds ?? 2) * 1000
+  // The newest sample is of now, and each one before it is that much older.
+  const timed = (samples: { received: number; sent: number }[]): Sample[] =>
+    samples.map((sample, index) => ({ ...sample, at: dataUpdatedAt - (samples.length - 1 - index) * every }))
+  const gates = data?.gates ?? []
+  const longest = gates.reduce((longest, gate) => Math.max(longest, gate.samples.length), 0)
+  // All of them together, counted back from the newest: a tunnel that has been up for less adds nothing before it was.
+  const all = Array.from({ length: longest }, (_, index) => {
+    const back = longest - 1 - index
+    return gates.reduce(
+      (sum, gate) => {
+        const sample = gate.samples[gate.samples.length - 1 - back]
+        return sample ? { received: sum.received + sample.received, sent: sum.sent + sample.sent } : sum
+      },
+      { received: 0, sent: 0 },
+    )
+  })
+  return {
+    slots: data?.most ?? 150,
+    of: (id) => timed(gates.find((gate) => gate.id === id)?.samples ?? []),
+    all: timed(all),
   }
-  return `${unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
 }
 
-/** The tunnel, how it is doing, and every port players reach a server by. */
+/** Every VPS, what passes through each, and every port players reach a server by. */
 export function NetworkPage() {
-  const gate = useGateHere()
+  const network = useNetworkHere()
   const owner = useOwner()
-  const connected = gate.state === 'connected'
+  const connected = network.gates.filter((gate) => gate.state === 'connected')
+  const traffic = useTraffic(owner && connected.length > 0)
+  const another = owner && (
+    <Link to="/network/connect" className={buttonClass('primary')}>
+      <Plus aria-hidden size={16} />
+      Connect a VPS
+    </Link>
+  )
 
   return (
     <>
-      <PageBar title="Network" />
+      <PageBar title="Network">{network.gates.length > 0 && another}</PageBar>
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-8 p-4 md:p-6">
-        {connected ? (
-          <>
-            <Tunnel gate={gate} />
-            <PlayerAddresses gate={gate} />
-          </>
-        ) : gate.state === 'waiting' ? (
-          <section className="flex flex-col items-start gap-3 rounded-lg border border-hairline bg-surface-1 p-4">
-            <Pill tone="starting">Connecting</Pill>
-            <p className="max-w-140">
-              The VPS at <code className="font-mono text-ink">{gate.address}</code> has been given its command and has not been
-              heard from yet.
-            </p>
-            <Link to="/network/connect" className={buttonClass('primary')}>
-              Continue
-            </Link>
-          </section>
-        ) : (
+        {network.gates.length === 0 ? (
           <section className="flex flex-col items-center py-10 text-center">
             <Waypoints aria-hidden size={32} className="mb-3 text-ink-faint" />
             <h2 className="text-section text-ink">No VPS connected.</h2>
@@ -88,122 +98,246 @@ export function NetworkPage() {
               Servers are reached on your home network only. Connect a VPS and players anywhere join through it, with no port
               opened at home.
             </p>
-            <div className="mt-4">
-              <Link to="/network/connect" className={buttonClass('primary')}>
-                <Plus aria-hidden size={16} />
-                Connect a VPS
-              </Link>
-            </div>
+            <div className="mt-4">{another}</div>
           </section>
+        ) : (
+          <>
+            {owner && connected.length > 0 && (
+              <section className="flex flex-col gap-3">
+                <div>
+                  <h2 className="text-section text-ink">Traffic now</h2>
+                  <p className="mt-1 max-w-140 text-small text-ink-subtle">
+                    What passes between players and your servers{connected.length > 1 && ', through every VPS together'}, over
+                    the last five minutes.
+                  </p>
+                </div>
+                <div className="rounded-lg border border-hairline bg-surface-1 p-4">
+                  <TrafficChart samples={traffic.all} slots={traffic.slots} labels={['To servers', 'To players']} />
+                </div>
+              </section>
+            )}
+            <section className="flex flex-col gap-3">
+              <h2 className="text-section text-ink">{network.gates.length === 1 ? 'Your VPS' : 'Your VPSes'}</h2>
+              <div className="grid items-start gap-4 wide:grid-cols-2">
+                {network.gates.map((gate) => (
+                  <Vps
+                    key={gate.id}
+                    gate={gate}
+                    owner={owner}
+                    samples={traffic.of(gate.id)}
+                    slots={traffic.slots}
+                    // Which one a new server would take is worth saying only where there is a choice.
+                    recommended={connected.length > 1 && network.recommended?.gate_id === gate.id ? network.recommended.why : null}
+                  />
+                ))}
+              </div>
+            </section>
+          </>
         )}
-        <Ports gate={gate} />
-        {owner && <PanelAddress gate={gate} />}
-        {owner && connected && gate.reachable && <VpsGuard />}
-        {connected && <Disconnect address={gate.address ?? ''} />}
+        <Ports network={network} />
+        {owner && <PanelAddress connected={connected.length > 0} />}
       </main>
     </>
   )
 }
 
-/** One of the four places a player's packets pass: a small card (DESIGN.md, Tunnel diagram). */
-function Place({ label, pill, sub, children }: { label: string; pill?: ReactNode; sub?: ReactNode; children: ReactNode }) {
+/** One figure of a VPS: what it is, and how much. */
+function Figure({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-lg border border-hairline bg-surface-1 p-3 md:flex-1 md:basis-0">
-      <div className="flex min-h-5.5 items-center justify-between gap-2">
-        <span className="text-caption text-ink-subtle">{label}</span>
-        {pill}
-      </div>
-      <div className="truncate text-body font-medium text-ink">{children}</div>
-      <div className="truncate text-small">{sub}</div>
+    <div className="min-w-0">
+      <dt className="text-caption text-ink-subtle">{label}</dt>
+      <dd className="truncate font-medium text-ink tabular-nums">{children}</dd>
     </div>
   )
 }
 
-/** The line between two places: down the page on a phone, across it otherwise. */
-function Wire({ down = false }: { down?: boolean }) {
-  return (
-    <span
-      aria-hidden
-      className={`mx-auto h-4 w-0 border-l border-current md:mx-0 md:h-0 md:w-6 md:shrink-0 md:border-t md:border-l-0 ${down ? 'border-dashed text-state-crashed' : 'text-accent'}`}
-    />
-  )
-}
+/**
+ * One VPS: where it is, how the tunnel to it is doing, what passes through it,
+ * and for its owner what can be done with it.
+ */
+function Vps({
+  gate,
+  owner,
+  samples,
+  slots,
+  recommended,
+}: {
+  gate: Gate
+  owner: boolean
+  samples: Sample[]
+  slots: number
+  recommended: string | null
+}) {
+  const look = lookOf(gate)
+  const players = PLAYERS[gate.player_addresses]
 
-function Tunnel({ gate }: { gate: Gate }) {
-  const servers = new Set(gate.ports.map((port) => port.server_id)).size
-  const look = gateLook(gate)
-  const down = !gate.reachable
-
   return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-col md:flex-row md:items-center">
-        <Place label="Players" sub="anywhere">
-          The internet
-        </Place>
-        <Wire down={down} />
-        <Place
-          label="Gate"
-          pill={<Pill tone={look.tone}>{down ? 'Unreachable' : gate.latency_ms == null ? 'Up' : `${gate.latency_ms} ms`}</Pill>}
-          sub="your VPS"
-        >
-          <span className="font-mono text-mono">{gate.address}</span>
-        </Place>
-        <Wire down={down} />
-        <Place label="Home" sub="where Homewarp runs">
-          This machine
-        </Place>
-        <Wire />
-        <Place label="Servers" sub={`${gate.ports.length} ${gate.ports.length === 1 ? 'port' : 'ports'}`}>
-          {servers} {servers === 1 ? 'server' : 'servers'}
-        </Place>
-      </div>
-      {gate.problem ? (
-        <Problem>{gate.problem}</Problem>
+    <article className="flex min-w-0 flex-col gap-4 rounded-lg border border-hairline bg-surface-1 p-4">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        {/* One that has not been called anything is called by its address, which is then said once. */}
+        {gate.name === gate.address ? (
+          <h3 className="min-w-0">
+            <CopyChip text={gate.address} />
+          </h3>
+        ) : (
+          <>
+            <h3 className="min-w-0 truncate font-medium text-ink">{gate.name}</h3>
+            <CopyChip text={gate.address} />
+          </>
+        )}
+        <span className="ml-auto">
+          <Pill tone={look.tone}>{look.word}</Pill>
+        </span>
+      </header>
+      {gate.state === 'connected' ? (
+        <>
+          {gate.problem && <Problem>{gate.problem}</Problem>}
+          {recommended && <p className="text-small text-ink-subtle">A new server would take this one: {recommended}.</p>}
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-4">
+            <Figure label="There and back">{gate.latency_ms == null ? '—' : `${gate.latency_ms} ms`}</Figure>
+            <Figure label="Busy">{gate.load_percent == null ? '—' : `${gate.load_percent} %`}</Figure>
+            <Figure label="Servers">{gate.servers}</Figure>
+            <Figure label="Traffic, last day">{bytes(gate.traffic_bytes)}</Figure>
+          </dl>
+          {owner && <TrafficChart samples={samples} slots={slots} labels={['To servers', 'To players']} compact />}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-small">
+            <span className="text-ink-subtle">Player IP addresses</span>
+            <Pill tone={players.tone}>{players.word}</Pill>
+            {gate.version && <span className="ml-auto text-ink-subtle">Gate {gate.version}</span>}
+          </div>
+          {gate.note && <p className="text-small">{gate.note}</p>}
+          {owner && <Manage gate={gate} />}
+        </>
       ) : (
-        gate.reachable && (
-          <p className="text-small text-ink-subtle">
-            {amount(gate.received_bytes)} from home and {amount(gate.sent_bytes)} to it through the tunnel
-            {gate.version && ` · Gate ${gate.version}`}
-          </p>
-        )
+        <Awaited gate={gate} />
       )}
-    </section>
+    </article>
   )
 }
 
-function PlayerAddresses({ gate }: { gate: Gate }) {
+/** A VPS that was given its command and is not connected: still awaited, or given up on. */
+function Awaited({ gate }: { gate: Gate }) {
   const queryClient = useQueryClient()
-  const checking = useMutation({
-    mutationFn: checkGate,
-    onSuccess: (checked) => queryClient.setQueryData(gateQuery.queryKey, checked),
+  const removing = useMutation({
+    mutationFn: () => disconnectGate(gate.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: gateQuery.queryKey }),
   })
-  const { word, tone, sentence } = PLAYERS[gate.player_addresses]
 
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-section text-ink">Player IP addresses</h2>
-      <div className="flex flex-wrap items-center gap-3">
-        <Pill tone={tone}>{word}</Pill>
-        <Button busy={checking.isPending} onClick={() => checking.mutate()}>
-          Check again
+    <>
+      <p>
+        {gate.state === 'waiting'
+          ? 'It has been given its command and has not been heard from yet.'
+          : 'Its command was not run within its quarter of an hour, and opens nothing now.'}
+      </p>
+      {removing.error && <Problem>{removing.error.message}</Problem>}
+      <div className="flex flex-wrap gap-2">
+        <Link to="/network/connect" search={{ gate: gate.id }} className={buttonClass('secondary')}>
+          {gate.state === 'waiting' ? 'Continue' : 'Connect it again'}
+        </Link>
+        <Button variant="ghost" busy={removing.isPending} onClick={() => removing.mutate()}>
+          Give it up
         </Button>
       </div>
-      <p className="max-w-140 text-small text-ink-subtle">{sentence}</p>
-      {gate.note && <p className="max-w-140 text-small">{gate.note}</p>}
-      {checking.error && <Problem>{checking.error.message}</Problem>}
-    </section>
+    </>
+  )
+}
+
+/** What its owner can do with a connected VPS, tucked away: none of it is done often. */
+function Manage({ gate }: { gate: Gate }) {
+  const queryClient = useQueryClient()
+  const keep = (changed: Network) => queryClient.setQueryData(gateQuery.queryKey, changed)
+  const checking = useMutation({ mutationFn: () => checkGate(gate.id), onSuccess: keep })
+  const renaming = useMutation({ mutationFn: (name: string) => renameGate(gate.id, name), onSuccess: keep })
+  const [asking, setAsking] = useState(false)
+  const disconnecting = useMutation({
+    mutationFn: () => disconnectGate(gate.id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: gateQuery.queryKey })
+      setAsking(false)
+    },
+  })
+
+  return (
+    <details className="border-t border-hairline pt-3">
+      <summary className="cursor-pointer text-ink">Manage this VPS</summary>
+      <div className="mt-4 flex flex-col gap-6">
+        <section className="flex flex-col items-start gap-2">
+          <h3 className="font-medium text-ink">Player IP addresses</h3>
+          <p className="max-w-140 text-small text-ink-subtle">{PLAYERS[gate.player_addresses].sentence}</p>
+          {checking.error && <Problem>{checking.error.message}</Problem>}
+          <Button busy={checking.isPending} onClick={() => checking.mutate()}>
+            Check again
+          </Button>
+        </section>
+        <form
+          // What was kept is what the field starts from again.
+          key={gate.name}
+          className="flex max-w-80 flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            renaming.mutate(String(new FormData(event.currentTarget).get('name') ?? ''))
+          }}
+        >
+          <Field
+            label="What to call it"
+            name="name"
+            maxLength={40}
+            autoComplete="off"
+            defaultValue={gate.name}
+            hint="Where it is, say. Left empty it is called by its address."
+          />
+          {renaming.error && <Problem>{renaming.error.message}</Problem>}
+          <div>
+            <Button type="submit" busy={renaming.isPending}>
+              Save
+            </Button>
+          </div>
+        </form>
+        {gate.reachable && <VpsGuard id={gate.id} />}
+        <section>
+          <Button onClick={() => setAsking(true)}>Disconnect this VPS</Button>
+          <Confirm
+            open={asking}
+            onClose={() => setAsking(false)}
+            title={`Disconnect ${gate.name}?`}
+            action={
+              <Button variant="danger" busy={disconnecting.isPending} onClick={() => disconnecting.mutate()}>
+                Disconnect
+              </Button>
+            }
+          >
+            <p>
+              Players will no longer reach your servers at <code className="font-mono text-ink">{gate.address}</code>. The
+              servers keep running. Those that were reached through it are reached through another VPS if one is connected,
+              and on your home network if none is.
+            </p>
+            <p className="mt-2">
+              The Gate program stays on the VPS until <code className="font-mono text-ink">homewarp-gate leave</code> is run
+              there.
+            </p>
+            {disconnecting.error && (
+              <div className="mt-3">
+                <Problem>{disconnecting.error.message}</Problem>
+              </div>
+            )}
+          </Confirm>
+        </section>
+      </div>
+    </details>
   )
 }
 
 /** Every port of every server, and where players reach it. */
-function Ports({ gate }: { gate: Gate }) {
-  const connected = gate.state === 'connected'
+function Ports({ network }: { network: Network }) {
+  const connected = network.gates.some((gate) => gate.state === 'connected')
+  const several = network.gates.length > 1
   const cell = 'px-4 font-normal'
 
   return (
     <section className="flex flex-col gap-3">
       <h2 className="text-section text-ink">{connected ? 'Forwarded ports' : 'Ports'}</h2>
-      {gate.ports.length === 0 ? (
+      {network.ports.length === 0 ? (
         <p>No server has a port yet.</p>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-hairline bg-surface-1">
@@ -213,14 +347,15 @@ function Ports({ gate }: { gate: Gate }) {
                 <th className={cell}>{connected ? 'Public address' : 'Address at home'}</th>
                 <th className={cell}>Protocol</th>
                 <th className={cell}>Server</th>
+                {several && <th className={cell}>Through</th>}
                 {connected && <th className={`${cell} text-right`}>Traffic, last day</th>}
               </tr>
             </thead>
             <tbody>
-              {gate.ports.map((port) => (
+              {network.ports.map((port) => (
                 <tr key={port.port} className="h-10 border-b border-hairline last:border-b-0">
                   <td className={cell}>
-                    <CopyChip text={addressOf(gate, port.port)} />
+                    <CopyChip text={addressOf(network, port)} />
                   </td>
                   <td className={cell}>{PROTOCOLS[port.protocol]}</td>
                   <td className={cell}>
@@ -232,6 +367,7 @@ function Ports({ gate }: { gate: Gate }) {
                       {port.server}
                     </Link>
                   </td>
+                  {several && <td className={cell}>{network.gates.find((gate) => gate.id === port.gate_id)?.name ?? 'Home only'}</td>}
                   {/* What the VPS counted through the port, both ways. A server reached at home only goes uncounted. */}
                   {connected && <td className={`${cell} text-right tabular-nums`}>{bytes(port.traffic_bytes)}</td>}
                 </tr>
@@ -244,73 +380,47 @@ function Ports({ gate }: { gate: Gate }) {
   )
 }
 
-function Disconnect({ address }: { address: string }) {
-  const [asking, setAsking] = useState(false)
-  const queryClient = useQueryClient()
-  const disconnecting = useMutation({
-    mutationFn: disconnectGate,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: gateQuery.queryKey })
-      setAsking(false)
-    },
-  })
-
-  return (
-    <section>
-      <Button onClick={() => setAsking(true)}>Disconnect this VPS</Button>
-      <Confirm
-        open={asking}
-        onClose={() => setAsking(false)}
-        title="Disconnect this VPS?"
-        action={
-          <Button variant="danger" busy={disconnecting.isPending} onClick={() => disconnecting.mutate()}>
-            Disconnect
-          </Button>
-        }
-      >
-        <p>
-          Players will no longer reach your servers at <code className="font-mono text-ink">{address}</code>. The servers keep
-          running, and are reached on your home network as before.
-        </p>
-        <p className="mt-2">
-          The Gate program stays on the VPS until <code className="font-mono text-ink">homewarp-gate leave</code> is run
-          there.
-        </p>
-        {disconnecting.error && (
-          <div className="mt-3">
-            <Problem>{disconnecting.error.message}</Problem>
-          </div>
-        )}
-      </Confirm>
-    </section>
-  )
-}
-
 /**
  * Connect a VPS: three steps, one thing to do in each (DESIGN.md, Key screens).
- * Which step is open follows from where the Gate stands, so the page can be
- * left and come back to, or opened on another machine, and is where it was.
+ * Which VPS it is about is in the address, and which step is open follows from
+ * where that VPS stands, so the page can be left and come back to, or opened
+ * on another machine, and is where it was.
  */
 export function ConnectPage() {
-  const gate = useGateHere()
-  const at = gate.state === 'waiting' ? 1 : gate.state === 'connected' ? 2 : 0
+  const network = useNetworkHere()
+  const { gate: id } = connect.useSearch()
+  // Come to with no VPS named, it is the one that is awaited, if one is.
+  const gate = network.gates.find((gate) => (id === undefined ? gate.state === 'waiting' : gate.id === id))
+  const at = gate?.state === 'waiting' ? 1 : gate?.state === 'connected' ? 2 : 0
 
   return (
     <>
       <PageBar title="Connect a VPS" crumb={<Link to="/network">Network</Link>} />
       <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
         <Steps steps={CONNECT_STEPS} at={at} />
-        {at === 0 ? <AddressStep expired={gate.state === 'expired'} /> : at === 1 ? <CommandStep gate={gate} /> : <VerifyStep gate={gate} />}
+        {!gate || gate.state === 'expired' ? (
+          <AddressStep expired={gate} others={network.gates.some((other) => other.state === 'connected')} />
+        ) : gate.state === 'waiting' ? (
+          <CommandStep gate={gate} />
+        ) : (
+          <VerifyStep gate={gate} first={network.ports.length === 0} />
+        )}
       </main>
     </>
   )
 }
 
-function AddressStep({ expired }: { expired: boolean }) {
+function AddressStep({ expired, others }: { expired: Gate | undefined; others: boolean }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const connecting = useMutation({
     mutationFn: connectGate,
-    onSuccess: (gate) => queryClient.setQueryData(gateQuery.queryKey, gate),
+    onSuccess: async (network) => {
+      queryClient.setQueryData(gateQuery.queryKey, network)
+      // The one that is awaited now is the one that was just asked for.
+      const awaited = network.gates.find((gate) => gate.state === 'waiting')
+      await navigate({ to: '/network/connect', search: { gate: awaited?.id }, replace: true })
+    },
   })
 
   return (
@@ -319,12 +429,17 @@ function AddressStep({ expired }: { expired: boolean }) {
       onSubmit={(event) => {
         event.preventDefault()
         const form = new FormData(event.currentTarget)
-        connecting.mutate({ address: String(form.get('address') ?? ''), wg_port: Number(form.get('wg_port')) || null })
+        connecting.mutate({
+          address: String(form.get('address') ?? ''),
+          name: String(form.get('name') ?? '') || null,
+          wg_port: Number(form.get('wg_port')) || null,
+        })
       }}
     >
       <p>
         A VPS gives your servers an address that anyone can reach. It only passes traffic on: your worlds, your files and this
         panel stay at home.
+        {others && ' Each VPS has a tunnel of its own, and each server is reached through the one you choose for it.'}
       </p>
       {expired && <p className="text-small text-ink-subtle">The last command was not run within its quarter of an hour. This makes a new one.</p>}
       <Field
@@ -336,7 +451,17 @@ function AddressStep({ expired }: { expired: boolean }) {
         autoComplete="off"
         spellCheck={false}
         placeholder="203.0.113.10"
+        defaultValue={expired?.address}
         hint="Its public IPv4 address, or a name that leads to it. This is what players will type."
+      />
+      <Field
+        label="What to call it"
+        name="name"
+        maxLength={40}
+        autoComplete="off"
+        placeholder="Frankfurt"
+        defaultValue={expired && expired.name !== expired.address ? expired.name : undefined}
+        hint="Where it is, say: for telling one VPS from another. Left empty it is called by its address."
       />
       <details>
         <summary className="cursor-pointer text-ink">Advanced</summary>
@@ -382,7 +507,7 @@ function CommandStep({ gate }: { gate: Gate }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const cancelling = useMutation({
-    mutationFn: disconnectGate,
+    mutationFn: () => disconnectGate(gate.id),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: gateQuery.queryKey })
       await navigate({ to: '/network' })
@@ -441,7 +566,7 @@ function Checked({ mark, sub, children }: { mark: 'done' | 'busy' | 'warn'; sub?
   )
 }
 
-function VerifyStep({ gate }: { gate: Gate }) {
+function VerifyStep({ gate, first }: { gate: Gate; first: boolean }) {
   const players = gate.player_addresses
 
   return (
@@ -472,7 +597,7 @@ function VerifyStep({ gate }: { gate: Gate }) {
         )}
       </ul>
       <div className="flex gap-2">
-        {gate.ports.length === 0 ? (
+        {first ? (
           <>
             <Link to="/servers/new" className={buttonClass('primary')}>
               Create first server

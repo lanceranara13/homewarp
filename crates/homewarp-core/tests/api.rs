@@ -618,29 +618,38 @@ async fn a_console_is_followed_only_from_this_site_and_signed_in() {
 async fn a_vps_is_connected_with_one_command_that_counts_for_a_while() {
     let panel = panel().await;
     let cookie = panel.set_up().await;
-    let gate = || panel.get("/api/v1/gate", Some(&cookie));
+    let gates = || panel.get("/api/v1/gates", Some(&cookie));
 
-    let none = gate().await;
+    let none = gates().await;
     assert_eq!(none.status, StatusCode::OK);
-    assert_eq!(none.body["state"], "none");
-    assert_eq!(none.body["player_addresses"], "unchecked");
-    assert_eq!(none.body["ports"], json!([]));
+    assert_eq!(
+        none.body,
+        json!({ "gates": [], "recommended": null, "ports": [] })
+    );
 
     for odd in ["", "  ", "203.0.113.10; reboot", "http://example.com"] {
         let refused = panel
-            .post("/api/v1/gate", json!({ "address": odd }), Some(&cookie))
+            .post("/api/v1/gates", json!({ "address": odd }), Some(&cookie))
             .await;
         assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{odd}");
     }
+    let long = json!({ "address": "203.0.113.10", "name": "a".repeat(41) });
+    let refused = panel.post("/api/v1/gates", long, Some(&cookie)).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let asked = json!({ "address": " 203.0.113.10 ", "wg_port": 51999 });
-    let waiting = panel.post("/api/v1/gate", asked, Some(&cookie)).await;
+    let asked = json!({ "address": " 203.0.113.10 ", "wg_port": 51999, "name": " Frankfurt " });
+    let waiting = panel.post("/api/v1/gates", asked, Some(&cookie)).await;
     assert_eq!(waiting.status, StatusCode::CREATED);
-    assert_eq!(waiting.body["state"], "waiting");
-    assert_eq!(waiting.body["address"], "203.0.113.10");
-    assert_eq!(waiting.body["reachable"], false);
+    let first = &waiting.body["gates"][0];
+    assert_eq!(first["state"], "waiting");
+    assert_eq!(first["address"], "203.0.113.10");
+    assert_eq!(first["name"], "Frankfurt");
+    assert_eq!(first["reachable"], false);
+    assert_eq!(first["player_addresses"], "unchecked");
+    // A VPS that is not connected yet is not one to recommend.
+    assert_eq!(waiting.body["recommended"], Value::Null);
     // The command carries all a VPS needs, and says when it stops counting.
-    let command = waiting.body["command"].as_str().unwrap();
+    let command = first["command"].as_str().unwrap();
     let token = command.strip_prefix("homewarp-gate join ").unwrap();
     let token = homewarp_proto::JoinToken::decode(token).unwrap();
     assert_eq!((token.wg_port, token.api_port), (51999, 4857));
@@ -653,7 +662,7 @@ async fn a_vps_is_connected_with_one_command_that_counts_for_a_while() {
     ] {
         assert_eq!(key.len(), 44);
     }
-    let until = waiting.body["expires_at"].as_i64().unwrap();
+    let until = first["expires_at"].as_i64().unwrap();
     assert_eq!(token.expires_at, until.unsigned_abs());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -661,23 +670,49 @@ async fn a_vps_is_connected_with_one_command_that_counts_for_a_while() {
         .as_secs() as i64;
     assert!((now + 890..=now + 900).contains(&until));
     // Asked for again, it is the same command: the page can be opened anew.
-    assert_eq!(gate().await.body["command"], waiting.body["command"]);
-    // Asked to connect again while waiting, the command is a new one.
+    assert_eq!(gates().await.body["gates"][0]["command"], first["command"]);
+    // Asked to connect another while that one is awaited, the one awaited
+    // makes way: one VPS is connected at a time. It is called by its address
+    // until it is called something.
     let again = json!({ "address": "vps.example.com" });
-    let again = panel.post("/api/v1/gate", again, Some(&cookie)).await;
+    let again = panel.post("/api/v1/gates", again, Some(&cookie)).await;
     assert_eq!(again.status, StatusCode::CREATED);
-    assert_eq!(again.body["address"], "vps.example.com");
-    assert_ne!(again.body["command"], waiting.body["command"]);
+    assert_eq!(again.body["gates"].as_array().unwrap().len(), 1);
+    let second = &again.body["gates"][0];
+    assert_eq!(second["address"], "vps.example.com");
+    assert_eq!(second["name"], "vps.example.com");
+    assert_ne!(second["command"], first["command"]);
+    let id = second["id"].as_i64().unwrap();
+    let one = format!("/api/v1/gates/{id}");
 
     // Nothing has been enrolled, so there is nothing to check yet.
     let check = panel
-        .post("/api/v1/gate/check", json!({}), Some(&cookie))
+        .post(&format!("{one}/check"), json!({}), Some(&cookie))
         .await;
     assert_eq!(check.status, StatusCode::CONFLICT);
 
-    let gone = panel.delete("/api/v1/gate", Some(&cookie)).await;
+    let renamed = panel
+        .put(&one, json!({ "name": "Home away" }), Some(&cookie))
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    assert_eq!(renamed.body["gates"][0]["name"], "Home away");
+    let long = json!({ "name": "a".repeat(41) });
+    let refused = panel.put(&one, long, Some(&cookie)).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let nowhere = json!({ "name": "Nowhere" });
+    let missing = panel.put("/api/v1/gates/999", nowhere, Some(&cookie)).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    // Nothing has passed through a tunnel that was never up.
+    let activity = panel.get("/api/v1/gates/activity", Some(&cookie)).await;
+    assert_eq!(activity.status, StatusCode::OK);
+    assert_eq!(activity.body["every_seconds"], 2);
+
+    let gone = panel.delete(&one, Some(&cookie)).await;
     assert_eq!(gone.status, StatusCode::NO_CONTENT);
-    assert_eq!(gate().await.body["state"], "none");
+    assert_eq!(gates().await.body["gates"], json!([]));
+    let gone = panel.delete(&one, Some(&cookie)).await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -685,9 +720,9 @@ async fn an_installed_homewarp_gives_a_vps_one_line_that_fetches_its_gate() {
     let panel = installed_panel(" https://releases.example.com/homewarp/ ").await;
     let cookie = panel.set_up().await;
     let asked = json!({ "address": "203.0.113.10" });
-    let begun = panel.post("/api/v1/gate", asked, Some(&cookie)).await;
+    let begun = panel.post("/api/v1/gates", asked, Some(&cookie)).await;
     assert_eq!(begun.status, StatusCode::CREATED, "{}", begun.body);
-    let command = begun.body["command"].as_str().unwrap();
+    let command = begun.body["gates"][0]["command"].as_str().unwrap();
     let (fetch, token) = command.rsplit_once(' ').unwrap();
     assert_eq!(
         fetch,
@@ -706,12 +741,13 @@ async fn an_installed_homewarp_gives_a_vps_one_line_that_fetches_its_gate() {
 async fn the_gate_is_for_someone_signed_in() {
     let panel = panel().await;
     for answer in [
-        panel.get("/api/v1/gate", None).await,
+        panel.get("/api/v1/gates", None).await,
+        panel.get("/api/v1/gates/activity", None).await,
         panel
-            .post("/api/v1/gate", json!({ "address": "203.0.113.10" }), None)
+            .post("/api/v1/gates", json!({ "address": "203.0.113.10" }), None)
             .await,
-        panel.post("/api/v1/gate/check", json!({}), None).await,
-        panel.delete("/api/v1/gate", None).await,
+        panel.post("/api/v1/gates/1/check", json!({}), None).await,
+        panel.delete("/api/v1/gates/1", None).await,
     ] {
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     }
@@ -1128,9 +1164,11 @@ async fn an_account_does_what_it_has_been_let_do_and_no_more() {
         panel.post("/api/v1/servers", json!({}), sam).await,
         panel.delete("/api/v1/servers/1", sam).await,
         panel
-            .post("/api/v1/gate", json!({ "address": "203.0.113.10" }), sam)
+            .post("/api/v1/gates", json!({ "address": "203.0.113.10" }), sam)
             .await,
-        panel.delete("/api/v1/gate", sam).await,
+        panel.delete("/api/v1/gates/1", sam).await,
+        panel.get("/api/v1/gates/activity", sam).await,
+        panel.get("/api/v1/gates/1/guard", sam).await,
         panel.get("/api/v1/servers/1/users", sam).await,
         panel.put(&grant, files.clone(), sam).await,
     ] {

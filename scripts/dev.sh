@@ -108,9 +108,11 @@ cmd_deploy() {
 # trying what needs an account without touching staging's. It runs as the
 # deployment does, behind a door of its own: it shares the Docker daemon, so a
 # server made in it is a real container, and the machine's network, so a VPS
-# connected in it is a real tunnel. There is one tunnel on a machine: connect a VPS here only while
-# staging has none. `scratch down` removes the copy, the containers of its
-# servers, its data and, if it had a VPS, its end of the tunnel.
+# connected in it is a real tunnel. A Homewarp leaves alone the tunnels that are
+# not its own, so the copy can be started beside one that has a VPS; but the
+# two number their tunnels alike, so connect a VPS here only while no other
+# Homewarp on the machine has one. `scratch down` removes the copy, the
+# containers of its servers, its data and, if it had a VPS, its end of the tunnel.
 #
 # It is served over TLS as well, behind a third door, on SCRATCH_TLS_PORT (8444):
 # the port a VPS connected to it forwards once the panel is given a name. The
@@ -122,14 +124,15 @@ SCRATCH_ACME=${SCRATCH_ACME:-https://acme-staging-v02.api.letsencrypt.org/direct
 cmd_scratch() {
   local data=$REMOTE/scratch tls=$SCRATCH_TLS_PORT
   if [ "${1:-up}" = down ]; then
-    home "had=\$(docker exec homewarp-scratch sh -c 'test -e /sys/class/net/homewarp0 && echo tunnel' 2>/dev/null || true)
+    home "ours=\$(cat $data/tunnels 2>/dev/null || true)
           docker rm -f homewarp-scratch homewarp-scratch-door homewarp-scratch-sftp homewarp-scratch-tls >/dev/null 2>&1 || true
           for id in \$(ls $data/servers 2>/dev/null); do
             docker rm -f homewarp-\$id homewarp-\$id-install homewarp-\$id-chown homewarp-\$id-standin >/dev/null 2>&1 || true
           done
-          if [ -n \"\$had\" ]; then
+          if [ -n \"\$ours\" ]; then
             docker run --rm --network host --cap-drop ALL --cap-add NET_ADMIN --entrypoint sh homewarp:dev -c \
-              'ip link del homewarp0; nft delete table inet homewarp; ip rule del fwmark 0x4857 lookup 4857; true' 2>/dev/null
+              \"for n in \$ours; do ip link del homewarp\\\$n; ip rule del fwmark \\\$((0x4857 + n)) lookup \\\$((4857 + n)); done
+               ls /sys/class/net | grep -q '^homewarp[0-9]' || nft delete table inet homewarp; true\" 2>/dev/null
           fi
           docker run --rm -v $REMOTE:/homewarp alpine:3.20 rm -rf /homewarp/scratch"
     return

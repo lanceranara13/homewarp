@@ -30,7 +30,7 @@ use crate::{
     minecraft::Players,
     mods,
     runtime::{self, Definition, Event, Power, Runtime},
-    templates,
+    templates, tunnel,
 };
 
 const LONGEST_NAME: usize = 60;
@@ -114,17 +114,19 @@ pub(crate) struct Published {
     pub(crate) server: String,
     pub(crate) port: u16,
     pub(crate) protocol: PortProtocol,
+    /// The VPS the server is reached through, whose Gate forwards the port.
+    pub(crate) gate_id: Option<i64>,
 }
 
 /// Every port of every server, lowest first: what is published at home, and
-/// what a Gate forwards.
+/// what the Gate of each server's VPS forwards.
 pub(crate) async fn published(db: &SqlitePool) -> anyhow::Result<Vec<Published>> {
-    let rows: Vec<(i64, String, i64, String, String)> =
-        sqlx::query_as("SELECT id, name, port, protocol, ports FROM servers")
+    let rows: Vec<(i64, String, i64, String, String, Option<i64>)> =
+        sqlx::query_as("SELECT id, name, port, protocol, ports, gate_id FROM servers")
             .fetch_all(db)
             .await?;
     let mut all = Vec::with_capacity(rows.len());
-    for (server_id, server, port, protocol, further) in rows {
+    for (server_id, server, port, protocol, further, gate_id) in rows {
         let further: Vec<ExtraPort> =
             serde_json::from_str(&further).context("reading a server's ports")?;
         let first = ExtraPort {
@@ -137,6 +139,7 @@ pub(crate) async fn published(db: &SqlitePool) -> anyhow::Result<Vec<Published>>
                 server: server.clone(),
                 port: one.port,
                 protocol: one.protocol,
+                gate_id,
             });
         }
     }
@@ -164,6 +167,8 @@ struct ServerSummary {
     /// Where players reach it on the home machine.
     port: i64,
     memory_mb: i64,
+    /// The VPS it is reached through. None while it is reached at home only.
+    gate_id: Option<i64>,
     /// Who is on it, for a running server that says.
     players: Option<Players>,
 }
@@ -188,6 +193,9 @@ struct Server {
     protocol: PortProtocol,
     /// The further ports it has.
     ports: Vec<ExtraPort>,
+    /// The VPS it is reached through, whose address is the one players type.
+    /// None while no VPS is connected: it is then reached at home only.
+    gate_id: Option<i64>,
     state: runtime::State,
     /// The last lines of its console: the install first, then what the server prints.
     console: Vec<String>,
@@ -225,6 +233,11 @@ struct ServerSettings {
     /// Further ports, each published and forwarded as the first is.
     #[serde(default)]
     ports: Vec<ExtraPort>,
+    /// The VPS to reach it through, of those that are connected. With none
+    /// named, a new server takes the one Homewarp recommends, and a server
+    /// that is changed keeps the one it has.
+    #[serde(default)]
+    gate_id: Option<i64>,
     /// Values for the template's variables, by the name the server sees. One
     /// that is not given takes the template's default.
     #[serde(default)]
@@ -260,6 +273,8 @@ struct Checked {
     port: u16,
     protocol: PortProtocol,
     ports: Vec<ExtraPort>,
+    /// The VPS asked for, if one was.
+    gate_id: Option<i64>,
     variables: Vec<(String, String)>,
     eula: bool,
     sleep_minutes: u32,
@@ -267,6 +282,20 @@ struct Checked {
 }
 
 impl Checked {
+    /// The VPS the server is to be reached through: the one asked for, which
+    /// has to be connected, or else the one it has, or else the one Homewarp
+    /// would choose.
+    async fn through(&self, state: &AppState, has: Option<i64>) -> Result<Option<i64>, Problem> {
+        match self.gate_id {
+            Some(asked) if tunnel::is_connected(state, asked).await? => Ok(Some(asked)),
+            Some(_) => Err(Problem::Invalid("There is no such VPS connected.".into())),
+            None => match has {
+                Some(has) => Ok(Some(has)),
+                None => Ok(tunnel::chosen(state).await?),
+            },
+        }
+    }
+
     /// Refuses a port that is Homewarp's own: the one the panel is served on
     /// over TLS, which a VPS forwards as it forwards a server's.
     fn apart(self, state: &AppState) -> Result<Self, Problem> {
@@ -409,6 +438,7 @@ fn check(
         port: settings.port,
         protocol: settings.protocol,
         ports: settings.ports,
+        gate_id: settings.gate_id,
         variables,
         eula: settings.eula,
         sleep_minutes: settings.sleep_minutes,
@@ -543,8 +573,9 @@ async fn list_servers(
     SignedIn(who): SignedIn,
 ) -> Result<Json<Vec<ServerSummary>>, Problem> {
     // All of them for the owner, and for anyone else those they have been let into.
-    let rows: Vec<(i64, String, String, i64, i64)> = sqlx::query_as(
-        "SELECT servers.id, servers.name, templates.name, servers.port, servers.memory_mb
+    let rows: Vec<(i64, String, String, i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT servers.id, servers.name, templates.name, servers.port, servers.memory_mb,
+                servers.gate_id
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE ?1 OR servers.id IN (SELECT server_id FROM server_users WHERE user_id = ?2)
          ORDER BY servers.name",
@@ -555,15 +586,18 @@ async fn list_servers(
     .await?;
     let servers = rows
         .into_iter()
-        .map(|(id, name, template, port, memory_mb)| ServerSummary {
-            id,
-            name,
-            template,
-            state: state_of(&state, id),
-            port,
-            memory_mb,
-            players: players_of(&state, id),
-        })
+        .map(
+            |(id, name, template, port, memory_mb, gate_id)| ServerSummary {
+                id,
+                name,
+                template,
+                state: state_of(&state, id),
+                port,
+                memory_mb,
+                gate_id,
+                players: players_of(&state, id),
+            },
+        )
         .collect();
     Ok(Json(servers))
 }
@@ -600,13 +634,14 @@ async fn create_server(
 
     let runtime = state.runtime.as_ref().ok_or(NO_DOCKER)?;
     checked.free(&state.db, None).await?;
+    let gate_id = checked.through(&state, None).await?;
     let uuid = auth::new_uuid();
     let created_at = auth::now();
     let id = sqlx::query(
         "INSERT INTO servers
              (uuid, name, template_id, image, memory_mb, cpu_percent, port, protocol, ports,
-              variables, eula, sleep_minutes, says_offline, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              variables, eula, sleep_minutes, says_offline, gate_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&uuid)
     .bind(&checked.name)
@@ -621,6 +656,7 @@ async fn create_server(
     .bind(checked.eula)
     .bind(checked.sleep_minutes)
     .bind(checked.says_offline)
+    .bind(gate_id)
     .bind(created_at)
     .execute(&state.db)
     .await
@@ -639,6 +675,7 @@ async fn create_server(
         port: checked.port.into(),
         protocol: checked.protocol,
         ports: checked.ports.clone(),
+        gate_id,
         state: runtime::State::Installing,
         console: Vec::new(),
         variables: checked.variables.iter().cloned().collect(),
@@ -681,15 +718,15 @@ async fn change_server(
         "Stop this server before changing it.",
     ));
     accounts::may(&state.db, &who, id, Some(Permission::Settings)).await?;
-    let found: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT servers.uuid, templates.definition, servers.installed
+    let found: Option<(String, String, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT servers.uuid, templates.definition, servers.installed, servers.gate_id
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
-    let (uuid, definition, installed) = found.ok_or(MISSING)?;
+    let (uuid, definition, installed, has) = found.ok_or(MISSING)?;
     let template = templates::read(&definition)?;
     let checked = check(&template, settings)?.apart(&state)?;
     // A running server was started as it was. Changed under itself, it would
@@ -703,11 +740,12 @@ async fn change_server(
         return Err(RUNNING);
     }
     checked.free(&state.db, Some(id)).await?;
+    let gate_id = checked.through(&state, has).await?;
 
     sqlx::query(
         "UPDATE servers
          SET name = ?, image = ?, memory_mb = ?, cpu_percent = ?, port = ?, protocol = ?,
-             ports = ?, variables = ?, eula = ?, sleep_minutes = ?, says_offline = ?
+             ports = ?, variables = ?, eula = ?, sleep_minutes = ?, says_offline = ?, gate_id = ?
          WHERE id = ?",
     )
     .bind(&checked.name)
@@ -721,6 +759,7 @@ async fn change_server(
     .bind(checked.eula)
     .bind(checked.sleep_minutes)
     .bind(checked.says_offline)
+    .bind(gate_id)
     .bind(id)
     .execute(&state.db)
     .await
@@ -773,12 +812,14 @@ async fn get_server(
         i64,
         String,
         i64,
+        Option<i64>,
     );
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.name, servers.template_id, templates.name, servers.image,
                 servers.memory_mb, servers.cpu_percent, servers.port, servers.protocol,
                 servers.ports, servers.created_at, servers.variables, servers.eula,
-                servers.sleep_minutes, templates.definition, servers.says_offline
+                servers.sleep_minutes, templates.definition, servers.says_offline,
+                servers.gate_id
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
@@ -801,6 +842,7 @@ async fn get_server(
         sleep_minutes,
         definition,
         says_offline,
+        gate_id,
     ) = found.ok_or(MISSING)?;
     let variables: Vec<(String, String)> = serde_json::from_str(&variables)
         .context("reading a server's variables")
@@ -825,6 +867,7 @@ async fn get_server(
         port,
         protocol: PortProtocol::read(&protocol),
         ports,
+        gate_id,
         state: now,
         console,
         variables: variables.into_iter().collect(),

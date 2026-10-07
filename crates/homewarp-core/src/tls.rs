@@ -129,7 +129,7 @@ impl Open {
         let from_there = open.get(&from).copied().unwrap_or(0);
         // Where the Gate stands in for whoever comes through it, its one
         // address is everybody on the internet.
-        let most = match from == IpAddr::V4(tunnel::GATE) {
+        let most = match tunnel::is_gate(from) {
             true => OPEN,
             false => OPEN_FROM_ONE,
         };
@@ -350,7 +350,6 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use super::{OPEN, OPEN_FROM_ONE, Open, Shown, element, named, time, validity};
-    use crate::tunnel::GATE;
 
     #[test]
     fn no_more_connections_are_open_than_there_is_room_for() {
@@ -373,7 +372,7 @@ mod tests {
 
         // The Gate's own address, where it stands in for everybody, has the
         // whole of the room and no more than that.
-        let gate = IpAddr::V4(GATE);
+        let gate = IpAddr::V4(Ipv4Addr::new(10, 213, 77, 1));
         let all: Vec<_> = (0..OPEN).map(|_| open.enter(gate).unwrap()).collect();
         assert!(open.enter(gate).is_none());
         assert!(open.enter(one).is_none());

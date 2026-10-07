@@ -20,8 +20,26 @@ use defguard_wireguard_rs::{
 };
 use homewarp_proto::{Desired, Mode, NEW_PER_SECOND, Open, Protocol, Through};
 
-/// What both ends call the tunnel's interface.
+/// What a Gate calls its tunnel's interface, and home its first tunnel's.
 pub const INTERFACE: &str = "homewarp0";
+/// How many tunnels a home can keep at once: one to each VPS, numbered from 0.
+pub const TUNNELS: u8 = 8;
+/// What home marks the connections of its first tunnel with, and the number of
+/// the routing table that sends their replies back into it. Each further
+/// tunnel has the next number of both.
+const MARK: u32 = 0x4857;
+
+/// What home calls the interface of one of its tunnels.
+pub fn interface(tunnel: u8) -> String {
+    format!("homewarp{tunnel}")
+}
+
+/// Whether an interface is one of home's tunnels, by its name.
+fn is_tunnel(interface: &str) -> bool {
+    interface
+        .strip_prefix("homewarp")
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit()))
+}
 /// Small enough for WireGuard's own header to fit inside any ordinary link.
 pub const MTU: u32 = 1380;
 
@@ -259,6 +277,8 @@ pub fn guard_dropped() -> u64 {
 
 /// One end of the tunnel, as the kernel is to have it.
 pub struct Link {
+    /// The interface it is: [`INTERFACE`] at a Gate, one of [`interface`] at home.
+    pub interface: String,
     /// This end's own key, in base64 as WireGuard writes keys.
     pub private_key: String,
     /// Where WireGuard listens. 0 leaves the choice to the kernel, which is
@@ -313,13 +333,16 @@ pub fn new_preshared_key() -> String {
 /// Makes the tunnel's interface if it is not there and sets it up as `link`
 /// says: key, port, address, the one peer. Done again, it changes what differs.
 pub fn bring_up(link: &Link) -> Result<(), Error> {
-    let mut api = WGApi::<Kernel>::new(INTERFACE).map_err(wireguard)?;
+    if !named_well(&link.interface) {
+        return Err(Error::Interface(link.interface.clone()));
+    }
+    let mut api = WGApi::<Kernel>::new(link.interface.as_str()).map_err(wireguard)?;
     let allowed = IpAddrMask::new(link.peer_allowed.0.into(), link.peer_allowed.1);
     let key = |text: &str| Key::try_from(text).map_err(wireguard);
     let peer_key = key(&link.peer_public_key)?;
     let preshared = key(&link.preshared_key)?;
 
-    if !Path::new("/sys/class/net").join(INTERFACE).exists() {
+    if !Path::new("/sys/class/net").join(&link.interface).exists() {
         api.create_interface().map_err(wireguard)?;
     } else if let Ok(now) = api.read_interface_data() {
         // Set up again, WireGuard forgets the session it has and where the
@@ -350,7 +373,7 @@ pub fn bring_up(link: &Link) -> Result<(), Error> {
         peer.persistent_keepalive_interval = Some(25);
     }
     api.configure_interface(&InterfaceConfiguration {
-        name: INTERFACE.to_owned(),
+        name: link.interface.clone(),
         prvkey: link.private_key.clone(),
         addresses: vec![IpAddrMask::new(link.address.into(), 30)],
         port: link.listen_port,
@@ -361,7 +384,21 @@ pub fn bring_up(link: &Link) -> Result<(), Error> {
     .map_err(wireguard)
 }
 
-/// What this end has heard of the other: when, and how much.
+/// What has come in by one of home's tunnels and what has gone out by it, in
+/// bytes, counted by the kernel from when the interface was made. None where
+/// there is no such interface.
+pub fn passed(tunnel: u8) -> Option<(u64, u64)> {
+    let count = |which: &str| {
+        let path = format!(
+            "/sys/class/net/{}/statistics/{which}_bytes",
+            interface(tunnel)
+        );
+        fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
+    };
+    Some((count("rx")?, count("tx")?))
+}
+
+/// What a Gate has heard of home: when, and how much.
 pub fn heard() -> Result<Heard, Error> {
     let host = WGApi::<Kernel>::new(INTERFACE)
         .and_then(|api| api.read_interface_data())
@@ -407,21 +444,59 @@ pub fn heard() -> Result<Heard, Error> {
 /// bridge of Homewarp's, so it is let in by what it came for: a connection
 /// from the tunnel that was to that port and that Docker passed on. The panel's
 /// other port, the one without TLS, stays shut to the tunnel.
-pub fn home_ruleset(bridge: &str, probe: Option<u16>, panel: Option<u16>) -> Result<String, Error> {
+///
+/// `tunnels` is every tunnel home keeps, one to each VPS. Each has a mark of
+/// its own, so that a reply leaves by the tunnel its connection came in by and
+/// a player is answered from the address they connected to. `probe` names the
+/// tunnel whose VPS is being looked at, with the port.
+pub fn home_ruleset(
+    bridge: &str,
+    tunnels: &[u8],
+    probe: Option<(u8, u16)>,
+    panel: Option<u16>,
+) -> Result<String, Error> {
     if !named_well(bridge) {
         return Err(Error::Interface(bridge.to_owned()));
     }
+    let mut tunnels = tunnels.to_vec();
+    tunnels.sort_unstable();
+    tunnels.dedup();
+    if tunnels.is_empty() || tunnels.iter().any(|tunnel| *tunnel >= TUNNELS) {
+        return Err(Error::Routing(
+            "there is no such tunnel to make rules for".to_owned(),
+        ));
+    }
+    let list = |each: &dyn Fn(u8) -> String| {
+        let all: Vec<String> = tunnels.iter().map(|tunnel| each(*tunnel)).collect();
+        all.join(", ")
+    };
+    // Every tunnel's interface, and every tunnel's mark, as nft writes a list.
+    let from = list(&|tunnel| format!("\"{}\"", interface(tunnel)));
+    let marks = list(&|tunnel| format!("{:#x}", MARK + u32::from(tunnel)));
+    let marked: String = tunnels
+        .iter()
+        .map(|tunnel| {
+            format!(
+                "\n    iifname \"{}\" ct state new ct mark set {:#x}",
+                interface(*tunnel),
+                MARK + u32::from(*tunnel)
+            )
+        })
+        .collect();
     let panel = match panel {
         None => String::new(),
         Some(port) => format!(
-            "\n    iifname \"homewarp0\" meta l4proto tcp ct original proto-dst {port} ct status dnat accept"
+            "\n    iifname {{ {from} }} meta l4proto tcp ct original proto-dst {port} ct status dnat accept"
         ),
     };
     let (counter, counted) = match probe {
         None => Default::default(),
-        Some(port) => (
+        Some((tunnel, port)) => (
             "\n  counter probe { packets 0 bytes 0 }".to_owned(),
-            format!("\n    iifname \"homewarp0\" tcp dport {port} counter name \"probe\""),
+            format!(
+                "\n    iifname \"{}\" tcp dport {port} counter name \"probe\"",
+                interface(tunnel)
+            ),
         ),
     };
     Ok(format!(
@@ -429,22 +504,21 @@ pub fn home_ruleset(bridge: &str, probe: Option<u16>, panel: Option<u16>) -> Res
 delete table inet homewarp
 table inet homewarp {{{counter}
   chain mark_in {{
-    type filter hook prerouting priority mangle; policy accept;{counted}
-    iifname "homewarp0" ct state new ct mark set 0x4857
-    iifname != "homewarp0" ct mark 0x4857 meta mark set ct mark
+    type filter hook prerouting priority mangle; policy accept;{counted}{marked}
+    iifname != {{ {from} }} ct mark {{ {marks} }} meta mark set ct mark
   }}
   chain input {{
     type filter hook input priority filter; policy accept;
-    iifname {{ "homewarp0", "{bridge}" }} ct state established,related accept
-    iifname "homewarp0" counter drop
+    iifname {{ {from}, "{bridge}" }} ct state established,related accept
+    iifname {{ {from} }} counter drop
     iifname "{bridge}" counter drop
   }}
   chain forward {{
     type filter hook forward priority filter - 1; policy accept;
-    iifname "homewarp0" oifname "{bridge}" ct status dnat accept{panel}
-    iifname "homewarp0" counter drop
+    iifname {{ {from} }} oifname "{bridge}" ct status dnat accept{panel}
+    iifname {{ {from} }} counter drop
     iifname "{bridge}" ip daddr {{ 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }} ct state new counter drop
-    oifname "homewarp0" tcp flags syn tcp option maxseg size set rt mtu
+    oifname {{ {from} }} tcp flags syn tcp option maxseg size set rt mtu
   }}
 }}
 "#
@@ -472,18 +546,22 @@ fn ip(arguments: &[&str]) -> Result<String, Error> {
 ///
 /// Done again it changes nothing, and at no moment is the way back missing:
 /// it is done again every few seconds, under whoever is playing.
-pub fn route_replies() -> Result<(), Error> {
+pub fn route_replies(tunnel: u8) -> Result<(), Error> {
+    let interface = interface(tunnel);
+    let interface = interface.as_str();
+    let (mark, table) = way_back(tunnel);
     let rules = ip(&["rule", "show"])?;
-    let there = rules
-        .lines()
-        .any(|rule| rule.contains("fwmark 0x4857") && rule.contains("lookup 4857"));
+    let there = rules.lines().any(|rule| {
+        let mut words = rule.split_whitespace();
+        words.any(|word| word == mark) && rule.trim_end().ends_with(&format!("lookup {table}"))
+    });
     if !there {
-        ip(&["rule", "add", "fwmark", "0x4857", "lookup", "4857"])?;
+        ip(&["rule", "add", "fwmark", &mark, "lookup", &table])?;
     }
     // The kernel drops this route whenever the interface loses its address,
     // which setting WireGuard up again makes it do for a moment.
     ip(&[
-        "route", "replace", "default", "dev", INTERFACE, "table", "4857",
+        "route", "replace", "default", "dev", interface, "table", &table,
     ])?;
     let filter = |of: &str| {
         fs::read_to_string(format!("/proc/sys/net/ipv4/conf/{of}/rp_filter"))
@@ -492,7 +570,7 @@ pub fn route_replies() -> Result<(), Error> {
     };
     // The kernel goes by the greater of an interface's own setting and the one
     // for all of them, where 1 is strict and 2 is loose.
-    let strict = || filter(INTERFACE).max(filter("all")) == Some(1);
+    let strict = || filter(interface).max(filter("all")) == Some(1);
     if !strict() {
         return Ok(());
     }
@@ -500,10 +578,20 @@ pub fn route_replies() -> Result<(), Error> {
     // change the network. Then players' packets are dropped as they arrive,
     // which Core's probe finds out, and the Gate stands in for them instead.
     let _ = fs::write(
-        format!("/proc/sys/net/ipv4/conf/{INTERFACE}/rp_filter"),
+        format!("/proc/sys/net/ipv4/conf/{interface}/rp_filter"),
         "2",
     );
     Ok(())
+}
+
+/// The mark of a tunnel's connections and the number of the routing table that
+/// sends their replies back into it, as `ip` writes and reads them.
+fn way_back(tunnel: u8) -> (String, String) {
+    // The first table's number is the mark's digits, read as a decimal number.
+    (
+        format!("{:#x}", MARK + u32::from(tunnel)),
+        (4857 + u32::from(tunnel)).to_string(),
+    )
 }
 
 /// Whether this end's table is in the kernel. Something that empties the
@@ -677,7 +765,7 @@ fn in_the_way(routes: &str, (network, length): (Ipv4Addr, u8)) -> Option<String>
         let read = |field: &&str| u32::from_str_radix(field, 16).ok().map(u32::swap_bytes);
         let (destination, mask) = (read(fields.get(1)?)?, read(fields.get(7)?)?);
         // The default route covers every address and is in nobody's way.
-        if mask == 0 || interface == INTERFACE {
+        if mask == 0 || is_tunnel(interface) {
             return None;
         }
         // Two networks share addresses when they agree as far as the shorter
@@ -693,12 +781,36 @@ fn in_the_way(routes: &str, (network, length): (Ipv4Addr, u8)) -> Option<String>
     })
 }
 
-/// Removes everything this crate makes, on either end: the table, the way
-/// back and the interface. What is not there is passed over.
+/// Removes everything this crate makes at a Gate, and at a home with the one
+/// tunnel: the table, the way back and the interface. What is not there is
+/// passed over.
 pub fn take_down() {
-    let _ = ip(&["rule", "del", "fwmark", "0x4857", "lookup", "4857"]);
-    let _ = ip(&["link", "del", INTERFACE]);
+    take_tunnel_down(0);
+    take_table_down();
+}
+
+/// Removes one of home's tunnels: its way back and its interface. The table
+/// is home's to make anew for the tunnels that are left, or to take down.
+pub fn take_tunnel_down(tunnel: u8) {
+    let (mark, table) = way_back(tunnel);
+    let _ = ip(&["rule", "del", "fwmark", &mark, "lookup", &table]);
+    let _ = ip(&["link", "del", &interface(tunnel)]);
+}
+
+/// Removes this end's table.
+pub fn take_table_down() {
     let _ = apply("table inet homewarp\ndelete table inet homewarp\n");
+}
+
+/// Which of home's tunnels have an interface in the kernel now.
+pub fn tunnels_up() -> Vec<u8> {
+    (0..TUNNELS)
+        .filter(|tunnel| {
+            Path::new("/sys/class/net")
+                .join(interface(*tunnel))
+                .exists()
+        })
+        .collect()
 }
 
 /// Hands a ruleset to nft, which makes all of it take effect or none of it.
@@ -930,9 +1042,9 @@ mod tests {
 
     #[test]
     fn home_counts_what_arrives_for_a_probe_and_opens_nothing_for_it() {
-        let plain = super::home_ruleset("homewarp-br", None, None).unwrap();
+        let plain = super::home_ruleset("homewarp-br", &[0], None, None).unwrap();
         assert!(!plain.contains("probe"));
-        let probing = super::home_ruleset("homewarp-br", Some(50002), None).unwrap();
+        let probing = super::home_ruleset("homewarp-br", &[0], Some((0, 50002)), None).unwrap();
         assert!(probing.contains("counter probe { packets 0 bytes 0 }"));
         // Counted where it arrives, before anything has had the chance to drop it.
         let counted = probing
@@ -1039,33 +1151,68 @@ mod tests {
 
     #[test]
     fn home_marks_what_comes_from_the_gate_and_lets_in_only_what_docker_published() {
-        let rules = super::home_ruleset("homewarp-br", None, None).unwrap();
+        let rules = super::home_ruleset("homewarp-br", &[0], None, None).unwrap();
         // The mark goes on a connection as it arrives, and onto its replies only.
         assert!(rules.contains("iifname \"homewarp0\" ct state new ct mark set 0x4857"));
-        assert!(rules.contains("iifname != \"homewarp0\" ct mark 0x4857 meta mark set ct mark"));
         assert!(
-            rules.contains("iifname \"homewarp0\" oifname \"homewarp-br\" ct status dnat accept")
+            rules.contains("iifname != { \"homewarp0\" } ct mark { 0x4857 } meta mark set ct mark")
+        );
+        assert!(
+            rules.contains(
+                "iifname { \"homewarp0\" } oifname \"homewarp-br\" ct status dnat accept"
+            )
         );
         assert!(rules.contains(
             "iifname { \"homewarp0\", \"homewarp-br\" } ct state established,related accept"
         ));
         assert!(matches!(
-            super::home_ruleset("br\" accept; #", None, None),
+            super::home_ruleset("br\" accept; #", &[0], None, None),
             Err(Error::Interface(_))
         ));
     }
 
     #[test]
+    fn each_tunnel_has_a_mark_of_its_own_so_that_a_reply_leaves_by_the_one_it_came_in_by() {
+        // Given in any order, and one of them twice.
+        let rules =
+            super::home_ruleset("homewarp-br", &[2, 0, 2], Some((2, 50002)), Some(8443)).unwrap();
+        assert!(rules.contains("iifname \"homewarp0\" ct state new ct mark set 0x4857"));
+        assert!(rules.contains("iifname \"homewarp2\" ct state new ct mark set 0x4859"));
+        assert!(!rules.contains("homewarp1"));
+        assert!(rules.contains(
+            "iifname != { \"homewarp0\", \"homewarp2\" } ct mark { 0x4857, 0x4859 } meta mark set ct mark"
+        ));
+        // What a tunnel may not do, no tunnel may.
+        assert!(rules.contains("iifname { \"homewarp0\", \"homewarp2\" } counter drop"));
+        assert!(rules.contains(
+            "iifname { \"homewarp0\", \"homewarp2\" } meta l4proto tcp ct original proto-dst 8443 ct status dnat accept"
+        ));
+        // The probe is counted on the tunnel of the VPS that is looked at.
+        assert!(rules.contains("iifname \"homewarp2\" tcp dport 50002 counter name \"probe\""));
+        assert_eq!(super::way_back(0), ("0x4857".to_owned(), "4857".to_owned()));
+        assert_eq!(super::way_back(2), ("0x4859".to_owned(), "4859".to_owned()));
+        // No tunnel at all is no table, and there are only so many.
+        assert!(super::home_ruleset("homewarp-br", &[], None, None).is_err());
+        assert!(super::home_ruleset("homewarp-br", &[super::TUNNELS], None, None).is_err());
+        assert!(super::is_tunnel("homewarp7") && !super::is_tunnel("homewarp-br"));
+    }
+
+    #[test]
     fn home_lets_the_tunnel_in_to_the_panels_tls_port_once_it_has_a_name_and_to_no_other() {
-        let named = super::home_ruleset("homewarp-br", None, Some(8443)).unwrap();
+        let named = super::home_ruleset("homewarp-br", &[0], None, Some(8443)).unwrap();
         // Among what passes through this machine, ahead of the rule that drops
         // whatever else comes from the tunnel. What comes to the machine itself
         // is dropped as before.
         let (to_here, through) = named.split_once("chain forward").unwrap();
         let let_in = through
-            .find("iifname \"homewarp0\" meta l4proto tcp ct original proto-dst 8443 ct status dnat accept")
+            .find("iifname { \"homewarp0\" } meta l4proto tcp ct original proto-dst 8443 ct status dnat accept")
             .unwrap();
-        assert!(let_in < through.find("iifname \"homewarp0\" counter drop").unwrap());
+        assert!(
+            let_in
+                < through
+                    .find("iifname { \"homewarp0\" } counter drop")
+                    .unwrap()
+        );
         assert!(!to_here.contains("8443"));
         // And that is the only difference a name makes.
         let without: String = named
@@ -1075,7 +1222,7 @@ mod tests {
             .collect();
         assert_eq!(
             without,
-            super::home_ruleset("homewarp-br", None, None).unwrap()
+            super::home_ruleset("homewarp-br", &[0], None, None).unwrap()
         );
     }
 

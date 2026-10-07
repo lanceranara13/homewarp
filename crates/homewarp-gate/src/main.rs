@@ -38,8 +38,8 @@ use axum::{
     routing::{get, post, put},
 };
 use homewarp_net::{
-    Link, ProbeForward, apply, bring_up, counted, gate_ruleset, gate_ruleset_uncounted, guarded,
-    has_table, heard, new_keypair,
+    INTERFACE, Link, ProbeForward, apply, bring_up, counted, gate_ruleset, gate_ruleset_uncounted,
+    guarded, has_table, heard, new_keypair,
 };
 use homewarp_proto::{
     Answer, AnsweredBy, Answering, Desired, Probe, ProbeRequest, Protocol, Rotate, Rotated, Status,
@@ -89,6 +89,7 @@ impl Config {
     /// This end of the tunnel, as the kernel is to have it.
     fn link(&self) -> Link {
         Link {
+            interface: INTERFACE.to_owned(),
             private_key: self.private_key.clone(),
             listen_port: self.listen_port,
             address: self.address,
@@ -477,7 +478,25 @@ async fn status(
         received_bytes: heard.received_bytes,
         sent_bytes: heard.sent_bytes,
         traffic: counted(),
+        load_percent: fs::read_to_string("/proc/loadavg").ok().and_then(|load| {
+            busy(
+                &load,
+                std::thread::available_parallelism().map_or(1, usize::from),
+            )
+        }),
     }))
+}
+
+/// How busy the machine is, from what the kernel says of its load: the first
+/// number there is how many programs wanted a processor over the last minute,
+/// and it is told here as a share of the processors there are.
+fn busy(load: &str, processors: usize) -> Option<u32> {
+    let waiting: f64 = load.split_whitespace().next()?.parse().ok()?;
+    Some(
+        (waiting * 100.0 / processors.max(1) as f64)
+            .round()
+            .clamp(0.0, 10_000.0) as u32,
+    )
 }
 
 /// Makes a key that has been nowhere but here, and a new token, and tells
@@ -729,7 +748,39 @@ async fn answered(Named(token): Named<String>) -> Result<String, StatusCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_answer, is_token};
+    use super::{busy, is_answer, is_token};
+
+    #[test]
+    fn how_busy_a_vps_is_is_its_load_as_a_share_of_its_processors() {
+        assert_eq!(
+            busy(
+                "0.50 0.40 0.30 1/123 4567
+",
+                1
+            ),
+            Some(50)
+        );
+        assert_eq!(
+            busy(
+                "0.50 0.40 0.30 1/123 4567
+",
+                2
+            ),
+            Some(25)
+        );
+        assert_eq!(
+            busy(
+                "3.00 1.00 0.50 2/99 1
+",
+                2
+            ),
+            Some(150)
+        );
+        // No processors at all is not a number to divide by.
+        assert_eq!(busy("1.00 1.00 1.00 1/1 1", 0), Some(100));
+        assert_eq!(busy("", 1), None);
+        assert_eq!(busy("nonsense here", 1), None);
+    }
 
     #[test]
     fn a_token_names_a_file_in_the_directory_of_answers_and_nothing_else() {

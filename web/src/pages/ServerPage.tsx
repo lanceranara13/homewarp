@@ -19,7 +19,7 @@ import {
 } from '../api/client'
 import { TrafficChart, type Sample } from '../components/TrafficChart'
 import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill, buttonClass } from '../components/ui'
-import { addressOf, useGate } from '../gate'
+import { addressOf, gateOf, useNetwork } from '../gate'
 import { EVERY, serverQuery, serversQuery } from '../servers'
 import { useOwner } from '../session'
 import { templateQuery } from '../templates'
@@ -60,7 +60,7 @@ export function ServerLayout() {
   // Who is on it comes with what is fetched anyway: the first request, and then the socket.
   const players = state === 'running' ? (followed ? followed.players : (server.players ?? null)) : null
   // Wanted, not needed: the chip is painted with the address at home, and takes the VPS's once it is known.
-  const gate = useGate()
+  const network = useNetwork()
   const owner = useOwner()
 
   return (
@@ -72,7 +72,7 @@ export function ServerLayout() {
         <div className="flex flex-wrap items-start gap-3">
           <div className="flex min-h-10 flex-wrap items-center gap-3 md:min-h-8">
             <StatusPill state={state} />
-            <CopyChip text={addressOf(gate, server.port)} />
+            <CopyChip text={addressOf(network, server)} />
             {players && <PlayersOn players={players} />}
           </div>
           {/* What an account has not been let do is not put before it to be refused. */}
@@ -217,8 +217,7 @@ export function ConsoleTab() {
   const state = followed?.state ?? server.state
   // Known of a server that has said who is on it, or sleeps because nobody was.
   const minecraft = state === 'asleep' || (followed ? followed.players : server.players) != null
-  const gate = useGate()
-  const vps = gate?.state === 'connected' ? gate.address : null
+  const vps = gateOf(useNetwork(), server)?.address ?? null
 
   return (
     <>

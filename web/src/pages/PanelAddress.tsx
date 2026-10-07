@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle } from 'lucide-react'
 import { useState } from 'react'
 
-import { askForCertificate, changePanel, type Gate, type Panel } from '../api/client'
+import { askForCertificate, changePanel, type Panel } from '../api/client'
 import { Button, Confirm, CopyChip, Field, Pill, Problem } from '../components/ui'
 import { when } from '../format'
 import { panelQuery } from '../gate'
@@ -34,7 +34,7 @@ function forWebServer(name: string, port: number, answers: string): string {
  * The panel's way in from the internet: a name that leads to the VPS, which
  * passes the panel's port home unread. Nothing on the page waits for this.
  */
-export function PanelAddress({ gate }: { gate: Gate }) {
+export function PanelAddress({ connected }: { connected: boolean }) {
   const queryClient = useQueryClient()
   const { data: panel } = useQuery({
     ...panelQuery,
@@ -96,12 +96,12 @@ export function PanelAddress({ gate }: { gate: Gate }) {
               .<span className="block text-small text-ink-subtle">That is who the certificate for the name is asked of.</span>
             </span>
           </label>
-          {gate.state !== 'connected' && (
+          {!connected && (
             <p className="text-small text-ink-subtle">A VPS has to be connected first: the name leads to it.</p>
           )}
           {changing.error && <Problem>{changing.error.message}</Problem>}
           <div>
-            <Button type="submit" variant="primary" busy={changing.isPending} disabled={gate.state !== 'connected'}>
+            <Button type="submit" variant="primary" busy={changing.isPending} disabled={!connected}>
               Put the panel online
             </Button>
           </div>

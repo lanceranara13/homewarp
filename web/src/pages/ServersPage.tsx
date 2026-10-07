@@ -3,7 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { LayoutGrid, Plus } from 'lucide-react'
 
 import { CopyChip, PageBar, StatusPill, buttonClass } from '../components/ui'
-import { addressOf, useGate } from '../gate'
+import { addressOf, useNetwork } from '../gate'
 import { EVERY, serversQuery } from '../servers'
 import { useOwner } from '../session'
 
@@ -11,7 +11,7 @@ import { useOwner } from '../session'
 export function ServersPage() {
   const { data: servers } = useSuspenseQuery({ ...serversQuery, refetchInterval: EVERY.list })
   // Wanted, not needed: the cards are painted with the address at home, and take the VPS's once it is known.
-  const gate = useGate()
+  const network = useNetwork()
   // Making a server is the owner's to do.
   const owner = useOwner()
   // The page's one primary action: in the bar once there are servers, in the empty state until then.
@@ -55,7 +55,7 @@ export function ServersPage() {
                   <StatusPill state={server.state} />
                 </div>
                 <div className="relative flex flex-wrap items-center gap-3 self-start">
-                  <CopyChip text={addressOf(gate, server.port)} />
+                  <CopyChip text={addressOf(network, server)} />
                   {server.players && (
                     <span className="text-small text-ink-subtle">
                       {server.players.online} of {server.players.max} on it

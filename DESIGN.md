@@ -504,7 +504,8 @@ file pages, or any tracking of who clicked.
 
 ### Tunnel diagram
 
-Used on the Network page and in the connect wizard:
+The way of a player's packets, for wherever one VPS is shown by itself. The Network
+page, which shows every VPS a home has, gives a card to each instead (Key screens):
 
 ```
   Players ───────► Gate ═══════════════► Home ───────► 3 servers
@@ -523,9 +524,9 @@ Each node is a small card with its own status pill.
 |---|---|
 | **Servers** | All servers as cards (or a table for 10+). Landing page. |
 | **Templates** | Installed templates; browse catalogue; import an egg file or URL. |
-| **Network** | Gate status, tunnel health, forwarded ports, domains, client-IP mode. |
+| **Network** | Every VPS and the tunnel to it, traffic now, forwarded ports, the panel's own address. |
 | **Activity** | Audit log and system events, filterable by server and user. |
-| **Settings** | Account, Users, Security, Backups, System, Updates. |
+| **Settings** | Account, Security, Users, Backups, System, Updates. |
 
 ### Inside a server
 
@@ -611,17 +612,46 @@ Sticky header (name · status pill · address chip · power controls), then tabs
 **Network**
 
 ```
-  [ tunnel diagram ]
+  Network                                                  [ + Connect a VPS ]
+
+  Traffic now
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ ── To servers 412 KB/s   ┄┄ To players 1.9 MB/s                          │
+  │ 4 MB/s                                                                   │
+  │ 2 MB/s           ╱╲      ┄┄╱┄╲┄┄                                         │
+  │ ________________╱__╲____╱_____╲_______________________________ 5 minutes │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  Your VPSes
+  ┌───────────────────────────────────┐ ┌───────────────────────────────────┐
+  │ Frankfurt  [203.0.113.10 ⧉] ● 23 ms│ │ Singapore [198.51.100.7 ⧉] ● 180 ms│
+  │ A new server would take this one… │ │                                   │
+  │ From home   Busy   Servers  Day   │ │ From home   Busy   Servers  Day   │
+  │ 23 ms       12 %   2        1.2 GB│ │ 180 ms      3 %    1        88 MB │
+  │ ── To servers  ┄┄ To players  ▁▂▃▅ │ │ ── To servers  ┄┄ To players  ▁▁▂ │
+  │ Player IP addresses ● Preserved   │ │ Player IP addresses ● Preserved   │
+  │ ▸ Manage this VPS                 │ │ ▸ Manage this VPS                 │
+  └───────────────────────────────────┘ └───────────────────────────────────┘
 
   Forwarded ports
-  Public                 Protocol   Server        Traffic (24 h)
-  203.0.113.10:25565     TCP        Survival      1.2 GB
-  203.0.113.10:19132     UDP        Bedrock       310 MB
-  203.0.113.10:24454     UDP        Survival      88 MB     (voice chat)
+  Public                 Protocol   Server      Through      Traffic, last day
+  203.0.113.10:25565     TCP        Survival    Frankfurt    1.2 GB
+  198.51.100.7:19132     UDP        Bedrock     Singapore    88 MB
 
-  Player IP addresses    ● Preserved
-  Panel access           LAN only                    [ Make public… ]
+  Panel address          ● Online   https://panel.example.com:8443
 ```
+
+- **One card to a VPS**, two across from 1200px. What is done to a VPS seldom
+  (checking players' addresses again, renaming it, hardening it, disconnecting it)
+  is under "Manage this VPS", closed until it is wanted.
+- **Traffic is drawn as two lines over one scale**: the first in the accent with its
+  area filled, the second neutral and dashed, so the two are told apart by more than
+  colour. The figures above the chart are the newest, and those of the moment under
+  the pointer while it is over the chart. The same chart, smaller, is on each VPS's
+  card and beside a server's console.
+- A server is reached through one VPS, which its owner chooses on the server's
+  form where there is more than one. Homewarp says which it would pick and why, in
+  words: how far from home, how busy, how many servers on it already.
 
 ## Interaction & motion
 
