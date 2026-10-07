@@ -132,6 +132,66 @@ fn ufw_is_active() -> bool {
     said("ufw", &["status"]).is_some_and(|status| status.starts_with("Status: active"))
 }
 
+/// The zone of firewalld's that the tunnel's interface is put in. It is one of
+/// this Gate's own, so that the tunnel lets in the Gate's API and nothing else.
+const ZONE: &str = "homewarp";
+
+fn firewalld_is_running() -> bool {
+    said("firewall-cmd", &["--state"]).is_some_and(|state| state.trim() == "running")
+}
+
+/// The zone players arrive in: the one their interface was put in, or the one
+/// firewalld takes for an interface it was told nothing about.
+fn firewalld_zone(wan: &str) -> anyhow::Result<String> {
+    said("firewall-cmd", &[&format!("--get-zone-of-interface={wan}")])
+        .or_else(|| said("firewall-cmd", &["--get-default-zone"]))
+        .map(|zone| zone.trim().to_owned())
+        .filter(|zone| !zone.is_empty())
+        .context("firewalld did not say which zone players arrive in")
+}
+
+fn firewalld_has_zone() -> bool {
+    said("firewall-cmd", &["--permanent", "--get-zones"])
+        .is_some_and(|zones| zones.split_whitespace().any(|zone| zone == ZONE))
+}
+
+/// The same openings, as firewalld is asked for them. What ufw is told about
+/// routed traffic has no line here: firewalld passes on what another table
+/// has sent somewhere else, and a forward of this Gate's is that.
+///
+/// All of it goes into what firewalld keeps, and is taken up by the reload the
+/// list ends with: a zone cannot be made in what is running alone.
+fn firewalld_rules(
+    wg_port: u16,
+    api_port: u16,
+    wan_zone: &str,
+    has_zone: bool,
+) -> Vec<Vec<String>> {
+    let kept = |words: &[&str]| -> Vec<String> {
+        std::iter::once("--permanent")
+            .chain(words.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    let zone = format!("--zone={ZONE}");
+    let mut rules = Vec::new();
+    if !has_zone {
+        rules.push(kept(&[&format!("--new-zone={ZONE}")]));
+    }
+    rules.extend([
+        // Core talks to the Gate through the tunnel, and that is all the tunnel lets in.
+        kept(&[&zone, &format!("--add-interface={INTERFACE}")]),
+        kept(&[&zone, &format!("--add-port={api_port}/tcp")]),
+        // Home dials the tunnel here.
+        kept(&[
+            &format!("--zone={wan_zone}"),
+            &format!("--add-port={wg_port}/udp"),
+        ]),
+        vec!["--reload".to_owned()],
+    ]);
+    rules
+}
+
 /// A host firewall that drops what it was not told about would drop the
 /// tunnel too: an accept in this Gate's own table cannot undo a drop in
 /// another. So the firewall itself is asked, where it is one this knows.
@@ -145,12 +205,20 @@ fn open_firewall(config: &Config) -> anyhow::Result<()> {
             "ufw: opened UDP {} for the tunnel, and let the tunnel's traffic pass.",
             config.listen_port
         );
-    } else if said("firewall-cmd", &["--state"]).is_some_and(|state| state.trim() == "running") {
+    } else if firewalld_is_running() {
+        let wan_zone = firewalld_zone(&config.wan)?;
+        let rules = firewalld_rules(
+            config.listen_port,
+            config.api_port,
+            &wan_zone,
+            firewalld_has_zone(),
+        );
+        for rule in rules {
+            let words: Vec<&str> = rule.iter().map(String::as_str).collect();
+            must("firewall-cmd", &words)?;
+        }
         println!(
-            "This machine runs firewalld, which Homewarp does not set up yet. Open the tunnel with:\n  \
-             firewall-cmd --permanent --add-port={}/udp\n  \
-             firewall-cmd --permanent --zone=trusted --add-interface={INTERFACE}\n  \
-             firewall-cmd --reload",
+            "firewalld: opened UDP {} for the tunnel in the zone `{wan_zone}`, and made the zone `{ZONE}` for the tunnel itself. It was reloaded to take that up.",
             config.listen_port
         );
     }
@@ -170,14 +238,38 @@ fn ufw_removals(wg_port: u16, api_port: u16, wan: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// What firewalld was asked for, as it is asked to take that away again.
+fn firewalld_removals(wg_port: u16, wan_zone: &str) -> Vec<Vec<String>> {
+    let rule = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
+    vec![
+        rule(&[
+            "--permanent",
+            &format!("--zone={wan_zone}"),
+            &format!("--remove-port={wg_port}/udp"),
+        ]),
+        rule(&["--permanent", &format!("--delete-zone={ZONE}")]),
+        rule(&["--reload"]),
+    ]
+}
+
 fn close_firewall(config: &Config) {
-    if !ufw_is_active() {
-        return;
-    }
-    for rule in ufw_removals(config.listen_port, config.api_port, &config.wan) {
-        let words: Vec<&str> = rule.iter().map(String::as_str).collect();
-        if let Err(error) = must("ufw", &words) {
-            println!("An opening in ufw was left as it is: {error:#}");
+    if ufw_is_active() {
+        for rule in ufw_removals(config.listen_port, config.api_port, &config.wan) {
+            let words: Vec<&str> = rule.iter().map(String::as_str).collect();
+            if let Err(error) = must("ufw", &words) {
+                println!("An opening in ufw was left as it is: {error:#}");
+            }
+        }
+    } else if firewalld_is_running() {
+        let wan_zone = match firewalld_zone(&config.wan) {
+            Ok(zone) => zone,
+            Err(error) => return println!("firewalld was left as it is: {error:#}"),
+        };
+        for rule in firewalld_removals(config.listen_port, &wan_zone) {
+            let words: Vec<&str> = rule.iter().map(String::as_str).collect();
+            if let Err(error) = must("firewall-cmd", &words) {
+                println!("An opening in firewalld was left as it is: {error:#}");
+            }
         }
     }
 }
@@ -229,11 +321,12 @@ pub(crate) fn join(token: &str, options: &Options) -> anyhow::Result<()> {
         "Homewarp Gate: the tunnel listens on UDP {}, and players arrive on {}.",
         config.listen_port, config.wan
     );
+    // Wanted however the Gate is started: by the service, or by hand.
+    open_firewall(&config)?;
     if !options.service {
         return Ok(());
     }
 
-    open_firewall(&config)?;
     let this = std::env::current_exe().context("finding this program")?;
     if this != Path::new(PROGRAM) {
         // Beside it and then over it: the old one may be running.
@@ -287,7 +380,7 @@ pub(crate) fn leave(options: &Options) -> anyhow::Result<()> {
 mod tests {
     use std::path::Path;
 
-    use super::{ufw_removals, ufw_rules, unit};
+    use super::{firewalld_removals, firewalld_rules, ufw_removals, ufw_rules, unit};
 
     #[test]
     fn the_service_runs_from_its_directory_and_may_write_nowhere_else() {
@@ -328,6 +421,37 @@ mod tests {
                 "delete allow 51820/udp",
                 "delete allow in on homewarp0 to any port 4857 proto tcp",
                 "route delete allow in on eth0 out on homewarp0",
+            ]
+        );
+    }
+
+    #[test]
+    fn firewalld_is_asked_for_a_zone_of_the_tunnels_own_and_the_tunnels_port() {
+        let said = |rules: Vec<Vec<String>>| -> Vec<String> {
+            rules.into_iter().map(|rule| rule.join(" ")).collect()
+        };
+        assert_eq!(
+            said(firewalld_rules(51820, 4857, "public", false)),
+            [
+                "--permanent --new-zone=homewarp",
+                "--permanent --zone=homewarp --add-interface=homewarp0",
+                "--permanent --zone=homewarp --add-port=4857/tcp",
+                "--permanent --zone=public --add-port=51820/udp",
+                "--reload",
+            ]
+        );
+        // A VPS connected a second time has the zone already, and making it again is refused.
+        assert!(
+            !said(firewalld_rules(51820, 4857, "public", true))
+                .iter()
+                .any(|rule| rule.contains("--new-zone"))
+        );
+        assert_eq!(
+            said(firewalld_removals(51820, "public")),
+            [
+                "--permanent --zone=public --remove-port=51820/udp",
+                "--permanent --delete-zone=homewarp",
+                "--reload",
             ]
         );
     }

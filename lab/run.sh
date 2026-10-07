@@ -29,10 +29,15 @@
 #
 # Usage: run.sh all | up | test | bench | down | clean
 #        HOME_FW=nftables run.sh all     # Docker's nftables firewall backend at home
+#        GATE_FW=firewalld run.sh all    # a VPS with firewalld in front of everything on it
 set -euo pipefail
 cd "$(dirname "$0")"
 
 export HOME_FW=${HOME_FW:-iptables}
+GATE_FW=${GATE_FW:-none}
+# The VPS is then of an image that has firewalld (firewalld.Dockerfile). firewalld is a
+# program of some tens of megabytes itself, and no part of what the Gate is held to.
+[ "$GATE_FW" = firewalld ] && export GATE_IMAGE=homewarp-lab-firewalld GATE_DOCKERFILE=firewalld.Dockerfile GATE_MEM=${GATE_MEM:-256m}
 GATE_IP=203.0.113.10 HOME_IP=203.0.113.20 HOME_IP_NEXT=203.0.113.21 CLIENT_IP=203.0.113.50
 PEBBLE_IP=203.0.113.30
 RELEASES_IP=203.0.113.40  # where releases are fetched from, as a web server on the internet
@@ -185,6 +190,16 @@ EOF
   dc cp "$release/served/." releases:/releases >/dev/null
   rm -rf "$release"
 
+  if [ "$GATE_FW" = firewalld ]; then
+    echo "== the VPS has a firewall of its own: firewalld, as it is when first installed"
+    if [ "$(dc exec -T gate firewall-cmd --state 2>/dev/null || true)" != running ]; then
+      dc exec -T gate sh -c 'mkdir -p /run/dbus && { pidof dbus-daemon >/dev/null || dbus-daemon --system; }'
+      dc exec -d gate firewalld --nofork --nopid
+    fi
+    for _ in $(seq 60); do [ "$(dc exec -T gate firewall-cmd --state 2>/dev/null || true)" = running ] && break; sleep 1; done
+    echo "   firewalld $(dc exec -T gate firewall-cmd --version): $(dc exec -T gate firewall-cmd --state 2>&1 || true), and what arrives is for the zone $(dc exec -T gate firewall-cmd --get-default-zone)"
+  fi
+
   echo "== a VPS is connected: Core makes the one command, and the VPS runs it"
   command=$(core POST /gate "{\"address\":\"$GATE_IP\"}" | field command)
   token=${command##* }
@@ -271,8 +286,11 @@ browse() {  # curl arguments..., path
 
 panel_is() { core GET /panel | field "$1"; }
 
+# What the VPS's firewalld answers, on one line.
+fw() { dc exec -T gate firewall-cmd "$@" 2>&1 | tr '\n' ' ' | sed 's/ *$//'; }
+
 cmd_test() {
-  local HOME_PUB joined carried rss size wan token answer
+  local HOME_PUB joined carried rss size wan token answer wg_port command mc asks joins told
   echo "home: $(dc exec -T home sh -c 'docker version --format "Docker {{.Server.Version}}"; iptables --version' | tr '\n' ' ') firewall backend $HOME_FW"
 
   echo "== a release is trusted for its signature, and not for where it came from"
@@ -314,6 +332,31 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   check "the token the command carried opens nothing" "$(dc exec -T home curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(echo "$joined" | field t)" "http://$GATE_TUN:$API_PORT/v1/status")" "401"
   check "each end has the other as its one peer" "$(dc exec -T gate wg show homewarp0 peers | wc -l) $(dc exec -T home wg show homewarp0 peers | wc -l)" "1 1"
   check "the command cannot be run a second time for another Gate" "$(core GET /gate | field command)" "None"
+
+  if [ "$GATE_FW" = firewalld ]; then
+    echo "== the VPS's own firewall: firewalld was asked for what the tunnel needs, and for nothing more"
+    wg_port=$(dc exec -T gate cat /run/hw/config.json | field listen_port)
+    check "the tunnel's port is open where players arrive" "$(fw --zone=public --list-ports)" "$wg_port/udp"
+    check "the tunnel's interface is in a zone of the Gate's own" "$(fw --get-zone-of-interface=homewarp0)" "homewarp"
+    check "which lets in the Gate's API and nothing else" "$(fw --zone=homewarp --list-ports), $(fw --zone=homewarp --list-services)" "$API_PORT/tcp, "
+    check "and all of it is kept for the next time the VPS starts" "$(fw --permanent --zone=homewarp --list-ports) $(fw --permanent --zone=public --list-ports)" "$API_PORT/tcp $wg_port/udp"
+    dc exec -d gate /lab/listen.sh
+    sleep 1
+    check "control: something else on the VPS listens" "$(reach gate 127.0.0.1 "$SVC")" "reached 127.0.0.1"
+    blocked "and firewalld keeps the internet from it" client "$GATE_IP" "$SVC"
+    blocked "and home too, through the tunnel" home "$GATE_TUN" "$SVC"
+    dc exec -T gate sh -c "pkill -f 'TCP4-LISTEN:$SVC'; true"
+
+    echo "== a certificate, while the VPS's firewall shuts port 80"
+    core PUT /panel "{\"name\":\"$NAME\",\"agreed\":true}" >/dev/null
+    for _ in $(seq 90); do [ "$(panel_is state)" = failed ] && break; sleep 1; done
+    check "there is none, and Core says what to open" "$(panel_is state) $(panel_is problem | grep -c 'firewall-cmd --permanent --add-service=http')" "failed 1"
+    echo "   core says: $(panel_is problem)"
+    core PUT /panel '{"name":null}' >/dev/null
+    # As the VPS's owner then does, for that and for what else the VPS serves:
+    # the sections below have it listen on these, as a web server of its own would.
+    dc exec -T gate sh -c 'firewall-cmd -q --permanent --add-service=http && firewall-cmd -q --permanent --add-port=2301-2303/tcp && firewall-cmd -q --reload'
+  fi
 
   echo "== the self-probe: Core connected to the VPS from home, and saw how that arrived"
   check "players' addresses, as Core found them" "$(gate_is player_addresses)" "preserved"
@@ -508,6 +551,11 @@ EOF
   # unanswered, which Core's asking after the Gate sees to.
   check "started as after a reboot, it is back with its own keys and what it was last told" "$(seen_again 45)" "$CLIENT_IP"
 
+  if [ "$GATE_FW" = firewalld ]; then
+    dc exec -T gate firewall-cmd -q --reload
+    check "firewalld is reloaded: the Gate's table is left alone, and home still reaches the Gate" "$(seen tcp) $(gate_asked GET /v1/status)" "$CLIENT_IP 200"
+  fi
+
   echo "== self-healing: home"
   dc exec -T home sh -c 'ip link del homewarp0; nft delete table inet homewarp; ip rule del fwmark 0x4857 lookup 4857; true'
   check "control: with home's end gone from the kernel, nobody gets through" "$(seen tcp)" ""
@@ -590,6 +638,21 @@ EOF
 
   echo "-- drop counters at the gate"
   dc exec -T gate nft list table inet homewarp | grep 'counter packets' | sed 's/^[[:space:]]*/   /'
+
+  if [ "$GATE_FW" = firewalld ]; then
+    echo "== the VPS's own firewall: connected a second time, and then left"
+    command=$(core POST /gate "{\"address\":\"$GATE_IP\"}" | field command)
+    dc exec -T gate pkill homewarp-gate || true
+    check "the zone is there already, and the command says nothing against that" "$(dc exec -T gate sh -c "$command --dir /run/hw --no-service --wan eth0 2>&1" | grep -c 'firewalld: opened')" "1"
+    start_gate
+    until_gate state connected 40 || true
+    check "and the VPS is connected again" "$(gate_is state)" "connected"
+    core DELETE /gate
+    dc exec -T gate pkill homewarp-gate || true
+    dc exec -T gate homewarp-gate leave --dir /run/hw | sed 's/^/   /'
+    check "the Gate left: its zone is gone, and the tunnel's port is shut again" "$(fw --get-zones | tr ' ' '\n' | grep -c '^homewarp$' || true) '$(fw --zone=public --list-ports)' '$(fw --permanent --zone=public --list-ports)'" "0 '2301-2303/tcp' '2301-2303/tcp'"
+    check "and what the owner opened is as it was" "$(fw --zone=public --list-services | tr ' ' '\n' | grep -c '^http$' || true)" "1"
+  fi
   return $FAILED
 }
 

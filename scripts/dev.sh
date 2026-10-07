@@ -240,10 +240,10 @@ cmd_vps() {
 }
 
 # The simulated VPS, internet and home (lab/run.sh), with the Gate just built. HOME_FW=nftables switches
-# the home side to Docker's nftables firewall backend.
+# the home side to Docker's nftables firewall backend, and GATE_FW=firewalld gives the VPS a firewall.
 cmd_lab() {
   cmd_gate
-  home "cd $REMOTE/src/lab && HOME_FW=${HOME_FW:-iptables} bash run.sh ${*:-all}"
+  home "cd $REMOTE/src/lab && HOME_FW=${HOME_FW:-iptables} GATE_FW=${GATE_FW:-none} bash run.sh ${*:-all}"
 }
 
 # Phase 0 runtime spike (crates/homewarp-runtime/examples/paper.rs): the real

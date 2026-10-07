@@ -11,18 +11,22 @@ x-node: &node
 
 services:
   # The simulated VPS, held to the smallest tier PLAN.md §7.1 supports.
+  # It is of the same image as the others, unless run.sh is asked for a VPS with
+  # a firewall of its own (GATE_FW), which that image does not have.
   gate:
     <<: *node
-    build: { context: ., dockerfile: node.Dockerfile }
+    image: ${GATE_IMAGE:-homewarp-lab-node}
+    build: { context: ., dockerfile: "${GATE_DOCKERFILE:-node.Dockerfile}" }
     cap_add: [NET_ADMIN]
     sysctls: { net.ipv4.ip_forward: "1" }
     cpus: 1
-    mem_limit: 128m
+    mem_limit: ${GATE_MEM:-128m}
     networks: { inet: { ipv4_address: 203.0.113.10 } }
 
   # A player, and with listen.sh a stand-in for any other internet host.
   client:
     <<: *node
+    build: { context: ., dockerfile: node.Dockerfile }
     depends_on: [gate]
     command: ["sh", "-c", "/lab/listen.sh & exec sleep infinity"]
     networks: { inet: { ipv4_address: 203.0.113.50 } }

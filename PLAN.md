@@ -351,8 +351,12 @@ As built (2026-10-06):
   `join` writes the Gate's `config.json`, asks ufw for the three openings it needs
   where ufw is active (the tunnel's UDP port; the Gate's API on the tunnel's interface;
   routed traffic from the public interface into the tunnel), installs a systemd unit
-  that is held to the network and its own directory, and starts it. For firewalld it
-  prints the commands and runs none. `homewarp-gate leave` takes all of it away.
+  that is held to the network and its own directory, and starts it. Where firewalld runs
+  instead, it is asked for the tunnel's port in the zone players arrive in, and for a
+  zone of the Gate's own (`homewarp`) for the tunnel's interface, which lets in the
+  Gate's API and nothing else; what a forward sends on needs no opening there, because
+  firewalld passes what another table has redirected (Phase 6). `homewarp-gate leave`
+  takes all of it away.
 - **The token** is JSON in URL-safe base64, about 400 characters: the Gate's first
   private key, home's public key, a preshared key, the token for the Gate's API, the
   two ports, the two tunnel addresses, and when it runs out. Core stops dialling with
@@ -1587,6 +1591,28 @@ Each phase ends with something that works on the homelab.
     - Both scripts are one function called on their last line, so that one cut off on
       the way does nothing at all.
   - *Docs:* `docs/installing.md` and `docs/releasing.md`.
+  - *firewalld, set up by `join` and no longer only described.* No machine here runs
+    firewalld, so the lab was given one: `GATE_FW=firewalld bash scripts/dev.sh lab`
+    makes the simulated VPS an AlmaLinux 9 with firewalld 1.3 running as it does when
+    first installed, and the whole lab is then run behind it.
+    - *What `join` asks for:* the tunnel's UDP port in the zone players arrive in, and a
+      zone of the Gate's own, `homewarp`, for the tunnel's interface, with the Gate's API
+      port in it and nothing else. Both go into what firewalld keeps, and one reload
+      takes them up. A VPS connected a second time has the zone already, which is not
+      an error. `leave` takes both away again and leaves what the owner had opened.
+    - *What it does not need:* an opening for what players send. firewalld passes on
+      what another table has redirected, and a forward of the Gate's is that. Seen in
+      its rules (`ct status dnat accept`) and then in the lab, where a player's own
+      address arrives at the server with firewalld in front.
+    - *Narrower than what was described before.* The advice `join` used to print put
+      the tunnel's interface in firewalld's `trusted` zone, which would have let home
+      reach everything on the VPS. In its own zone, home reaches the Gate's API and a
+      service beside it is refused, which the lab tries.
+    - *Port 80 is the owner's to open,* as with ufw, and only when the panel is given a
+      name. The lab asks for a certificate with it shut: there is none, and Core says
+      why and gives the two commands, where before it passed on the authority's
+      "no route to host" and nothing more. That needed the authority's refusal to be
+      read where it arrives, which is as an error and not as a state of the order.
   - *The first server, from a panel with nothing in it.* "New server" on a new panel
     used to stop at an empty list. It says what an egg is now and leads to the
     catalogue; the import page, come to that way, goes on to the server's form once the
@@ -1606,9 +1632,6 @@ Each phase ends with something that works on the homelab.
   - *Updating by itself.* Running the line again is the update. A Core that replaces
     the container it runs in, and a Gate that takes a new program through the tunnel,
     are each a piece of work with its own ways of going wrong.
-  - *firewalld set up by `join`.* Still described and not done. No machine here runs
-    firewalld, and commands for a firewall that were never run against one are not
-    worth shipping.
   - *A home machine with a firewall of its own and no Docker.* Homewarp needs Docker
     to run servers at all; the doors are how its ports are published.
 

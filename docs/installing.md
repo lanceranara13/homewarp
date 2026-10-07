@@ -74,8 +74,23 @@ curl -fsSL RELEASES/install-gate.sh | sh -s -- eyJrIjoi…
 It fetches the Gate for the VPS's processor, checks it, and makes the VPS the
 Gate of the home whose panel gave the line: a WireGuard tunnel, one nftables
 table, a service that keeps both up, and the openings a firewall on the VPS
-needs (ufw is asked; firewalld is described). Nothing else on the VPS is
-touched, and the panel finds the Gate within a few seconds.
+needs. Nothing else on the VPS is touched, and the panel finds the Gate within
+a few seconds.
+
+A VPS with **ufw** or **firewalld** is asked for those openings in its own
+words, and `homewarp-gate leave` takes them away again:
+
+- ufw: the tunnel's UDP port, the Gate's API on the tunnel's interface, and
+  routed traffic from the public interface into the tunnel.
+- firewalld: the tunnel's UDP port in the zone players arrive in, and a zone
+  called `homewarp` for the tunnel's interface that lets in the Gate's API and
+  nothing else. firewalld is reloaded once to take that up.
+
+Port 80 is not among them. It is needed only when the panel is given a name
+(its certificate is asked for there), and on a VPS without a web server you
+open it yourself: `ufw allow 80/tcp`, or `firewall-cmd --permanent
+--add-service=http` and `firewall-cmd --reload`. The panel says so if it finds
+the port shut.
 
 **To remove it**: `homewarp-gate leave`, as root. It takes away everything the
 line made.

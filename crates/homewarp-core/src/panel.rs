@@ -344,6 +344,8 @@ async fn answer(
     order: &mut Order,
     tokens: &mut Vec<String>,
 ) -> anyhow::Result<()> {
+    // Whether the Gate serves the answers itself, to a port 80 that home did not get through to.
+    let mut shut = false;
     {
         let mut authorizations = order.authorizations();
         while let Some(authorization) = authorizations.next().await {
@@ -362,17 +364,34 @@ async fn answer(
             tokens.push(token.clone());
             lock(&state.panel.said).answers =
                 (answering.by == AnsweredBy::WebServer).then(|| answering.directory.clone());
-            served(name, &token, answer.as_str(), &answering).await?;
+            let seen = served(name, &token, answer.as_str(), &answering).await?;
+            shut |= !seen && answering.by == AnsweredBy::Gate;
             challenge.set_ready().await?;
         }
     }
-    if order.poll_ready(&PATIENT).await? == OrderStatus::Ready {
-        return Ok(());
-    }
+    let refused = match order.poll_ready(&PATIENT).await {
+        Ok(OrderStatus::Ready) => return Ok(()),
+        Ok(_) => refusal(order).await,
+        // The same refusal, where the authority gives its reason with the order.
+        Err(instant_acme::Error::Api(problem)) => match &problem.detail {
+            Some(detail) => detail.clone(),
+            None => problem.to_string(),
+        },
+        Err(other) => return Err(other.into()),
+    };
+    // The likeliest reason, where neither the authority nor home got an answer
+    // from a port that the Gate does serve: a firewall of the VPS's own.
+    let advice = match shut {
+        true => {
+            " Home did not get through to port 80 of the VPS either. If the VPS has a firewall of its own, open the port in it: `ufw allow 80/tcp`, or `firewall-cmd --permanent --add-service=http` and `firewall-cmd --reload`."
+        }
+        false => "",
+    };
+    // The authority ends its sentence as it pleases, and this one ends with a full stop.
     bail!(
-        "{} was not satisfied that this is {name}: {}",
+        "{} was not satisfied that this is {name}: {}.{advice}",
         state.authority.name(),
-        refusal(order).await
+        refused.trim_end().trim_end_matches('.')
     )
 }
 
@@ -396,13 +415,13 @@ async fn refusal(order: &mut Order) -> String {
 ///
 /// Only an answer that is the wrong one stops the asking. A home that cannot
 /// look the name up, or cannot reach its own VPS that way, says nothing of
-/// what the authority will find.
+/// what the authority will find: that is `false`, and the asking goes on.
 async fn served(
     name: &str,
     token: &str,
     answer: &str,
     answering: &Answering,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let asked = async {
         let mut stream = TcpStream::connect((name, 80)).await?;
         let request = format!(
@@ -414,11 +433,11 @@ async fn served(
         std::io::Result::Ok(reply)
     };
     let Ok(Ok(reply)) = timeout(ASKING, asked).await else {
-        return Ok(());
+        return Ok(false);
     };
     let reply = String::from_utf8_lossy(&reply);
     if reply.contains(answer) {
-        return Ok(());
+        return Ok(true);
     }
     let status = reply
         .split_whitespace()
