@@ -74,3 +74,18 @@ export const PERMISSIONS: { name: Permission; label: string; means: string }[] =
   { name: 'schedules', label: 'Schedules', means: 'Set what it does by the clock' },
   { name: 'settings', label: 'Settings', means: 'Change what it is made of' },
 ]
+
+export type SettingsGroup = 'account' | 'security' | 'users' | 'backups' | 'system'
+
+/**
+ * What the Settings page is divided into, in the order it is listed in: an
+ * account's own two groups first, then the owner's, which are about this
+ * Homewarp as a whole.
+ */
+export const SETTINGS_GROUPS: { name: SettingsGroup; label: string; owners?: true }[] = [
+  { name: 'account', label: 'Account' },
+  { name: 'security', label: 'Security' },
+  { name: 'users', label: 'Users', owners: true },
+  { name: 'backups', label: 'Backups', owners: true },
+  { name: 'system', label: 'System', owners: true },
+]

@@ -108,7 +108,7 @@ export function ServerUsersTab() {
         <p className="text-small text-ink-subtle">
           {inside.length > 0 ? 'Every account is in this server. ' : 'There is no account to let in yet. '}
           Accounts are made in{' '}
-          <Link to="/settings" className="text-accent hover:underline">
+          <Link to="/settings" search={{ group: 'users' }} className="text-accent hover:underline">
             Settings
           </Link>
           .

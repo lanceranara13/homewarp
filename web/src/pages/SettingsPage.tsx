@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
+import { Link, getRouteApi } from '@tanstack/react-router'
 import { KeyRound, Plus, Trash2 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
-import { accountsQuery, passkeysQuery, settingsQuery, twoStepsQuery } from '../accounts'
+import { SETTINGS_GROUPS, accountsQuery, passkeysQuery, settingsQuery, twoStepsQuery } from '../accounts'
 import {
   addPasskey,
   beginPasskey,
@@ -27,24 +28,77 @@ import { when } from '../format'
 import { makePasskey, passkeysHere } from '../passkeys'
 import { sessionQuery } from '../session'
 
-/** What is about this Homewarp and not about one server: the account signed in here and, for the owner, the others. */
+const route = getRouteApi('/shell/settings')
+
+/**
+ * What is about this Homewarp and not about one server: the account signed in
+ * here and, for the owner, the others and the machine. One group of it is open
+ * at a time, and the address says which.
+ */
 export function SettingsPage() {
   const { data: session } = useSuspenseQuery(sessionQuery)
+  const { group = 'account' } = route.useSearch()
 
   return (
     <>
       <PageBar title="Settings" />
-      <main className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-10 p-4 md:p-6">
-        <OwnPassword username={session.user?.username ?? ''} />
-        <TwoSteps />
-        <Passkeys />
-        {session.user?.owner && <Accounts />}
-        {session.user?.owner && <Resolvers />}
-        {session.user?.owner && <NewConnections />}
-        {session.user?.owner && <Notices />}
-        {session.user?.owner && <BackupStore />}
-      </main>
+      <div className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:flex-row md:gap-8 md:p-6">
+        <Groups owner={session.user?.owner ?? false} />
+        <main className="flex min-w-0 flex-1 flex-col gap-10">
+          {group === 'account' && <OwnPassword username={session.user?.username ?? ''} />}
+          {group === 'security' && (
+            <>
+              <TwoSteps />
+              <Passkeys />
+            </>
+          )}
+          {group === 'users' && <Accounts />}
+          {group === 'backups' && <BackupStore />}
+          {group === 'system' && (
+            <>
+              <Resolvers />
+              <NewConnections />
+              <Notices />
+            </>
+          )}
+        </main>
+      </div>
     </>
+  )
+}
+
+const GROUP =
+  'flex h-10 shrink-0 items-center border-b-2 px-3 text-body font-medium transition-colors duration-120 ease-out md:h-8 md:rounded-md md:border-b-0 md:px-2.5'
+const GROUP_HERE = { className: 'border-accent text-ink md:bg-accent-soft' }
+const GROUP_ELSEWHERE = {
+  className: 'border-transparent text-ink-subtle hover:text-ink md:text-ink-muted md:hover:bg-surface-2',
+}
+
+/**
+ * The groups, down the left of the page as rows like the sidebar's. A phone has
+ * no room beside the page, so there they are underline tabs that scroll sideways
+ * (DESIGN.md, Tabs). An account that is not the owner's has its own two.
+ */
+function Groups({ owner }: { owner: boolean }) {
+  return (
+    <div className="border-b border-hairline md:w-48 md:shrink-0 md:border-b-0">
+      <nav aria-label="Settings" className="-mb-px flex overflow-x-auto md:sticky md:top-6 md:mb-0 md:flex-col md:gap-1 md:overflow-visible">
+        {SETTINGS_GROUPS.filter((group) => owner || !group.owners).map(({ name, label }) => (
+          <Link
+            key={name}
+            to="/settings"
+            search={name === 'account' ? {} : { group: name }}
+            // Exact, or the first group, which asks for nothing in the address, would be open beside every other.
+            activeOptions={{ exact: true }}
+            className={GROUP}
+            activeProps={GROUP_HERE}
+            inactiveProps={GROUP_ELSEWHERE}
+          >
+            {label}
+          </Link>
+        ))}
+      </nav>
+    </div>
   )
 }
 

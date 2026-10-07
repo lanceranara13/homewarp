@@ -428,6 +428,11 @@ Near-black panel in both themes (`#08090A`), 13px mono, ANSI colours supported.
 Underline tabs on a hairline. Active tab: `ink` text + 2px `accent` underline.
 Scroll horizontally on narrow screens; never wrap to two lines.
 
+Settings is the one page whose groups are listed down its left side instead: a 192px
+rail of rows drawn as the sidebar's are (`accent-soft` behind the open one), with the
+open group's sections beside it. Below 768px, where there is no room for a rail, the
+same groups are underline tabs.
+
 ### Tables
 
 `surface-1`, hairline row dividers, no zebra striping. Primary column `body-strong`.

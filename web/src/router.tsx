@@ -10,7 +10,15 @@ import {
   type ErrorComponentProps,
 } from '@tanstack/react-router'
 
-import { accountsQuery, activityQuery, serverUsersQuery, settingsQuery, twoStepsQuery } from './accounts'
+import {
+  SETTINGS_GROUPS,
+  accountsQuery,
+  activityQuery,
+  serverUsersQuery,
+  settingsQuery,
+  twoStepsQuery,
+  type SettingsGroup,
+} from './accounts'
 import { AppShell } from './components/AppShell'
 import { Button, Doorway, Problem } from './components/ui'
 import { filesQuery } from './files'
@@ -344,15 +352,28 @@ const activityRoute = createRoute({
   component: ActivityPage,
 })
 
+/** Which group of the Settings page an address means. None is the account's own, which the page opens on. */
+function groupFrom(search: Record<string, unknown>): { group?: SettingsGroup } {
+  const group = SETTINGS_GROUPS.find(({ name }) => name === search.group)?.name
+  return group && group !== 'account' ? { group } : {}
+}
+
 const settingsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/settings',
-  loader: async ({ context: { queryClient } }) => {
-    // The other accounts are the owner's to see, and so only the owner's page waits for them.
-    // What each account has of its own, and what the owner has of everyone's, set off together.
+  validateSearch: groupFrom,
+  beforeLoad: async ({ context: { queryClient }, search }) => {
+    // A group that is the owner's leads anyone else to their own account, as the owner's pages lead to the servers.
     const session = await queryClient.ensureQueryData(sessionQuery)
-    const owners = session.user?.owner ? [queryClient.ensureQueryData(accountsQuery), queryClient.ensureQueryData(settingsQuery)] : []
-    await Promise.all([queryClient.ensureQueryData(twoStepsQuery), ...owners])
+    const owners = SETTINGS_GROUPS.some(({ name, owners }) => owners && name === search.group)
+    if (owners && !session.user?.owner) throw redirect({ to: '/settings' })
+  },
+  loaderDeps: ({ search }) => ({ group: search.group }),
+  loader: async ({ context: { queryClient }, deps: { group } }) => {
+    // Each group waits for what it shows and for nothing else: at most the one request.
+    if (group === 'security') await queryClient.ensureQueryData(twoStepsQuery)
+    else if (group === 'users') await queryClient.ensureQueryData(accountsQuery)
+    else if (group === 'backups' || group === 'system') await queryClient.ensureQueryData(settingsQuery)
   },
   component: SettingsPage,
 })
