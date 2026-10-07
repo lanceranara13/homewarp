@@ -3,6 +3,7 @@ name = "homewarp-core"
 description = "Homewarp Core: the home-side panel, API and runtime."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]

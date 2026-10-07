@@ -1,10 +1,10 @@
 import { Popover } from 'radix-ui'
 
 /**
- * Where a heart can be given. Empty until the owner sets the links up
- * (README.md, Support); the popover says so rather than show dead buttons.
+ * Where a heart can be given: the same places README.md names under Support.
+ * Were there none, the popover would say so rather than show dead buttons.
  */
-const LINKS: { label: string; href: string }[] = []
+const LINKS: { label: string; href: string }[] = [{ label: 'Give on Ko-fi', href: 'https://ko-fi.com/pixelsthecoder' }]
 
 /** The pixel heart of DESIGN.md: a 7 × 6 grid, drawn at whole multiples so the pixels stay sharp. */
 export function PixelHeart({ className = '' }: { className?: string }) {

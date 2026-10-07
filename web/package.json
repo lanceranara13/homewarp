@@ -1,6 +1,7 @@
 {
   "name": "homewarp-web",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "gen": "openapi-typescript openapi.json -o src/api/schema.d.ts",

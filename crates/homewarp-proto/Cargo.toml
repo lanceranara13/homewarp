@@ -3,6 +3,7 @@ name = "homewarp-proto"
 description = "What Core and the Gate say to each other: desired state, status and the join token. Types only."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]

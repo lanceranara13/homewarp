@@ -3,6 +3,7 @@ name = "homewarp-net"
 description = "The tunnel: kernel WireGuard and the nftables rules on both of its ends."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]

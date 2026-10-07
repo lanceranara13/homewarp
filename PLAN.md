@@ -8,8 +8,8 @@
 > anywhere over TLS that is ended at home (tried on the owner's VPS with
 > `homewarp.apixels.net`); sign-ins are limited and take a second step or a passkey; the
 > VPS itself can be hardened on trial. §6 has the security model held against the code.
-> Phase 6 is done but for a public release, which waits for the owner (a licence, an
-> address, a signing key), and for updating by itself. Of Phase 7, "Later", five things
+> Phase 6 is done but for a public release, which waits for the owner (an address and a
+> signing key; the licence is AGPL-3.0-or-later since 2026-10-07), and for updating by itself. Of Phase 7, "Later", five things
 > are built and tried (who is on a Minecraft server, sleep and wake, notices, mods from
 > Modrinth, a store elsewhere for backups) and four are not, each with its reason.
 
@@ -1631,8 +1631,8 @@ Each phase ends with something that works on the homelab.
   Mojang's EULA, which nobody does for the owner. Not yet done with a person and a
   stopwatch.
 - *Not done, and why:*
-  - *A public release.* It waits for the licence (§13), for an address to serve it
-    from, and for the owner's own signing key. All three are the owner's.
+  - *A public release.* The licence is decided (§13). It waits for an address to serve it
+    from, and for the owner's own signing key. Both are the owner's.
   - *Updating by itself.* Running the line again is the update. A Core that replaces
     the container it runs in, and a Gate that takes a new program through the tunnel,
     are each a piece of work with its own ways of going wrong.
@@ -1850,7 +1850,8 @@ Decided by the owner on 2026-10-05:
 
 Still open:
 
-1. **Licence** — to be decided later, before the first release. MIT/Apache-2.0 (like
+1. **Licence** — decided by the owner on 2026-10-07: AGPL-3.0-or-later (`LICENSE`).
+   It had stood open as: MIT/Apache-2.0 (like
    Calagopus/Pterodactyl) or AGPL-3.0 (like Pelican)? With free, donations only, either
    works: MIT/Apache maximises adoption; AGPL stops a company taking a modified version
    closed.

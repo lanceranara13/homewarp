@@ -3,6 +3,7 @@ name = "homewarp-runtime"
 description = "Runs servers as Docker containers: install, lifecycle and console."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]
