@@ -35,6 +35,7 @@ export type ScheduleSettings = components['schemas']['ScheduleSettings']
 export type Task = components['schemas']['Task']
 export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
+export type NoticesChange = components['schemas']['NoticesChange']
 type SettingsChange = components['schemas']['SettingsChange']
 export type Panel = components['schemas']['PanelView']
 export type VpsGuard = components['schemas']['VpsGuard']
@@ -450,6 +451,24 @@ export async function getSettings(): Promise<Settings> {
 /** Changes what is named, and leaves the rest. The answer is the settings as they are kept. */
 export async function changeSettings(body: SettingsChange): Promise<Settings> {
   const { data, error } = await signedIn(() => api.PUT('/api/v1/settings', { body }))
+  return data ?? fail(error)
+}
+
+/** Has Homewarp tell an address what happens to it. The answer is the settings as they are kept. */
+export async function setNotices(body: NoticesChange): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/settings/notices', { body }))
+  return data ?? fail(error)
+}
+
+/** Has Homewarp tell nobody. */
+export async function removeNotices(): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.DELETE('/api/v1/settings/notices'))
+  return data ?? fail(error)
+}
+
+/** Sends a notice that says only that notices arrive. It fails with the site's reason if the site does not take it. */
+export async function testNotices(): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/settings/notices/test'))
   return data ?? fail(error)
 }
 

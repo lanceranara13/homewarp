@@ -13,8 +13,11 @@ import {
   createAccount,
   endTwoSteps,
   removeAccount,
+  removeNotices,
   removePasskey,
+  setNotices,
   setPassword,
+  testNotices,
   type Account,
 } from '../api/client'
 import { Button, Confirm, CopyChip, Field, PageBar, Problem } from '../components/ui'
@@ -36,6 +39,7 @@ export function SettingsPage() {
         {session.user?.owner && <Accounts />}
         {session.user?.owner && <Resolvers />}
         {session.user?.owner && <NewConnections />}
+        {session.user?.owner && <Notices />}
       </main>
     </>
   )
@@ -382,6 +386,94 @@ function NewConnections() {
         <div>
           <Button type="submit" busy={changing.isPending}>
             Save
+          </Button>
+        </div>
+      </form>
+    </Section>
+  )
+}
+
+/**
+ * Where Homewarp tells what happens to it while nobody is at the panel: an
+ * address that takes a message, as a Discord or a Slack webhook does. The
+ * address is a secret of the site's making, so what is kept is not shown whole.
+ */
+function Notices() {
+  const queryClient = useQueryClient()
+  const { data: settings } = useSuspenseQuery(settingsQuery)
+  const kept = (fresh: typeof settings) => queryClient.setQueryData(settingsQuery.queryKey, fresh)
+  const setting = useMutation({ mutationFn: setNotices, onSuccess: kept })
+  const removing = useMutation({ mutationFn: removeNotices, onSuccess: kept })
+  const testing = useMutation({
+    mutationFn: testNotices,
+    onSuccess: kept,
+    // How it went is kept either way, and shown below.
+    onError: () => queryClient.invalidateQueries({ queryKey: settingsQuery.queryKey }),
+  })
+  const notices = settings.notices
+
+  return (
+    <Section
+      title="Notices"
+      lead="Homewarp can tell you what happens while you are not here: a server that crashed, one that was put to sleep or woken by a player, what a schedule did, a VPS that stopped answering. Give it the address of a webhook, as Discord, Slack and their like make them for a channel. Whoever has that address can post there, so it is kept and not shown again."
+    >
+      {notices && (
+        <div className="flex max-w-140 flex-col gap-2">
+          <p>
+            Told to <code className="font-mono text-mono text-ink">{notices.address}</code>
+            {notices.everything ? ': everything on the Activity page.' : ': what happens by itself.'}
+          </p>
+          {notices.last && (
+            <p role="status" className="text-small text-ink-subtle">
+              {notices.last.problem
+                ? `The last one, ${when(notices.last.at)}, was not taken: ${notices.last.problem}`
+                : `The last one was taken ${when(notices.last.at)}.`}
+            </p>
+          )}
+          {testing.error && <Problem>{testing.error.message}</Problem>}
+          {removing.error && <Problem>{removing.error.message}</Problem>}
+          <div className="flex flex-wrap gap-2">
+            <Button busy={testing.isPending} onClick={() => testing.mutate()}>
+              Send one now
+            </Button>
+            <Button variant="ghost" busy={removing.isPending} onClick={() => removing.mutate()}>
+              Stop telling it
+            </Button>
+          </div>
+        </div>
+      )}
+      <form
+        // Emptied once what was typed has been kept: the address is not shown again.
+        key={notices?.address ?? ''}
+        className="flex max-w-140 flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const form = new FormData(event.currentTarget)
+          setting.mutate({ url: String(form.get('url') ?? ''), everything: form.get('everything') === 'on' })
+        }}
+      >
+        <Field
+          label={notices ? 'Another address' : 'Address to tell'}
+          name="url"
+          mono
+          required
+          inputMode="url"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="https://discord.com/api/webhooks/…"
+          hint="It has to begin with https:// and be on the internet: Homewarp sends nothing into a home network."
+        />
+        <label className="flex items-start gap-2">
+          <input type="checkbox" name="everything" defaultChecked={notices?.everything ?? false} className="mt-0.5 size-4 accent-accent" />
+          <span>
+            Everything on the Activity page
+            <span className="block text-small text-ink-subtle">And not only what happens by itself: every sign-in, start, stop and change, as it is done.</span>
+          </span>
+        </label>
+        {setting.error && <Problem>{setting.error.message}</Problem>}
+        <div>
+          <Button type="submit" busy={setting.isPending}>
+            {notices ? 'Tell this one instead' : 'Save'}
           </Button>
         </div>
       </form>

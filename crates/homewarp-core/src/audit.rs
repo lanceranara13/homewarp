@@ -13,7 +13,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::{AppState, Owner, Problem, ProblemBody, User},
-    auth,
+    auth, notify,
 };
 
 /// How long a line is kept: half a year.
@@ -68,22 +68,35 @@ async fn write(
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(LONGEST_DETAIL)
         .collect();
+    let at = auth::now();
     let written = sqlx::query(
         "INSERT INTO audit_log (at, user_id, username, server_id, server, action, detail)
          VALUES (?, ?, ?, ?, (SELECT name FROM servers WHERE id = ?), ?, ?)",
     )
-    .bind(auth::now())
+    .bind(at)
     .bind(user_id)
     .bind(username)
     .bind(server)
     .bind(server)
     .bind(action)
-    .bind(detail)
+    .bind(&detail)
     .execute(db)
     .await;
     if let Err(error) = written {
         tracing::error!("{action} by {username} could not be written down: {error}");
     }
+    // And told to the owner's address, where there is one and this is something it is told of.
+    notify::tell(
+        db,
+        notify::Happened {
+            by: username.to_owned(),
+            by_itself: user_id.is_none(),
+            server_id: server,
+            action,
+            detail,
+            at,
+        },
+    );
 }
 
 /// Drops the lines that are older than what is kept. Done when Homewarp starts.

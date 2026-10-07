@@ -1,5 +1,7 @@
 //! Text from the internet, fetched on the owner's word (PLAN.md §11, Phase 6):
 //! an egg from the address it is published at, and the list of eggs there are.
+//! And, since Phase 7, a notice sent to an address the owner gave (`notify`),
+//! which is held to the same.
 //!
 //! Core sits inside a home network, and an address is somebody else's text.
 //! So what is fetched is held to what an egg's address looks like: `https`, on
@@ -17,14 +19,18 @@ use std::{
 
 use axum::http::{
     Request, StatusCode, Uri,
-    header::{ACCEPT, HOST, LOCATION, USER_AGENT},
+    header::{ACCEPT, CONTENT_TYPE, HOST, LOCATION, USER_AGENT},
 };
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::{body::Bytes, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use rustls::{ClientConfig, RootCertStore, crypto::ring, pki_types::ServerName};
-use tokio::{net::TcpStream, time::timeout};
-use tokio_rustls::TlsConnector;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+    time::timeout,
+};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 /// How long one fetch may take, redirections and all.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -155,9 +161,9 @@ enum Answered {
     Elsewhere(String),
 }
 
-/// Asks one address once, having made sure of where its name leads.
-async fn ask(place: &Place, at_most: usize) -> Result<Answered, Unfetched> {
-    let host = place.host.as_str();
+/// A connection to where a name leads, with TLS on it: made to an address
+/// that was looked at first, and to no other.
+async fn reach(host: &str) -> Result<TlsStream<TcpStream>, Unfetched> {
     let found: Vec<SocketAddr> = tokio::net::lookup_host((host, 443))
         .await
         .map_err(|_| format!("{host} could not be looked up."))?
@@ -182,12 +188,32 @@ async fn ask(place: &Place, at_most: usize) -> Result<Answered, Unfetched> {
     let stream = stream.ok_or_else(|| format!("{host} could not be reached."))?;
     let name = ServerName::try_from(host.to_owned())
         .map_err(|_| format!("{host} is not a name a certificate can be for."))?;
-    let stream = TlsConnector::from(trusting()?)
+    TlsConnector::from(trusting()?)
         .connect(name, stream)
         .await
-        .map_err(|error| {
-            format!("{host} did not show a certificate this machine trusts: {error}.")
-        })?;
+        .map_err(|error| format!("{host} did not show a certificate this machine trusts: {error}."))
+}
+
+/// What a site said to one request: its status, where it sends on to if it
+/// does, and what it sent. That last is nothing where it was more than was
+/// asked for, or was cut short.
+struct Said {
+    status: StatusCode,
+    onward: Option<String>,
+    sent: Option<Bytes>,
+}
+
+/// One request over a connection that is there, and what came back, up to
+/// `at_most` bytes of it.
+async fn exchange<S>(
+    stream: S,
+    host: &str,
+    request: Request<Full<Bytes>>,
+    at_most: usize,
+) -> Result<Said, Unfetched>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let said =
         |error: &dyn std::fmt::Display| format!("{host} did not answer as a site does: {error}.");
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
@@ -195,50 +221,124 @@ async fn ask(place: &Place, at_most: usize) -> Result<Answered, Unfetched> {
         .map_err(|error| said(&error))?;
     // The connection is driven for as long as the answer is being read.
     let driving = tokio::spawn(connection);
-    let request = Request::get(place.path.as_str())
-        .header(HOST, host)
-        .header(USER_AGENT, AGENT)
-        .header(ACCEPT, "*/*")
-        .body(Empty::<Bytes>::new())
-        .map_err(|error| said(&error))?;
     let response = sender
         .send_request(request)
         .await
         .map_err(|error| said(&error))?;
     let status = response.status();
-    let answered = if status.is_redirection() {
-        let to = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|to| to.to_str().ok())
+    let onward = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|to| to.to_str().ok())
+        .map(str::to_owned);
+    let sent = Limited::new(response.into_body(), at_most)
+        .collect()
+        .await
+        .ok()
+        .map(|body| body.to_bytes());
+    driving.abort();
+    Ok(Said {
+        status,
+        onward,
+        sent,
+    })
+}
+
+/// Asks one address once, having made sure of where its name leads.
+async fn ask(place: &Place, at_most: usize) -> Result<Answered, Unfetched> {
+    let host = place.host.as_str();
+    let stream = reach(host).await?;
+    let request = Request::get(place.path.as_str())
+        .header(HOST, host)
+        .header(USER_AGENT, AGENT)
+        .header(ACCEPT, "*/*")
+        .body(Full::default())
+        .map_err(|error| format!("{host} cannot be asked for that: {error}."))?;
+    let said = exchange(stream, host, request, at_most).await?;
+    let status = said.status;
+    if status.is_redirection() {
+        let to = said
+            .onward
             .ok_or_else(|| format!("{host} sent on to nowhere."))?;
         // To another place on the same site, or to another site altogether.
-        Answered::Elsewhere(match to.starts_with('/') {
+        Ok(Answered::Elsewhere(match to.starts_with('/') {
             true => format!("https://{host}{to}"),
-            false => to.to_owned(),
-        })
+            false => to,
+        }))
     } else if status == StatusCode::OK {
-        let body = Limited::new(response.into_body(), at_most)
-            .collect()
-            .await
-            .map_err(|_| {
-                format!(
-                    "What is at that address is more than {} kB, or was cut short.",
-                    at_most / 1024
-                )
-            })?;
-        Answered::Text(body.to_bytes())
+        said.sent.map(Answered::Text).ok_or_else(|| {
+            format!(
+                "What is at that address is more than {} kB, or was cut short.",
+                at_most / 1024
+            )
+        })
     } else if status == StatusCode::NOT_FOUND {
-        return Err(format!("{host} has nothing at that address."));
+        Err(format!("{host} has nothing at that address."))
     } else if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
-        return Err(format!(
+        Err(format!(
             "{host} would not answer just now ({status}). It may have been asked too often: try again in a while."
-        ));
+        ))
     } else {
-        return Err(format!("{host} answered {status}."));
+        Err(format!("{host} answered {status}."))
+    }
+}
+
+/// How much of an answer to a notice is read. What it says is of no use here.
+const ANSWER_TO_A_NOTICE: usize = 4096;
+
+/// Sends JSON over a connection that is there, as a notice is sent, and says
+/// whether the site took it.
+async fn deliver<S>(stream: S, place: &Place, json: &serde_json::Value) -> Result<(), Unfetched>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let host = place.host.as_str();
+    let request = Request::post(place.path.as_str())
+        .header(HOST, host)
+        .header(USER_AGENT, AGENT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(json.to_string())))
+        .map_err(|error| format!("{host} cannot be sent that: {error}."))?;
+    let status = exchange(stream, host, request, ANSWER_TO_A_NOTICE)
+        .await?
+        .status;
+    if status.is_success() {
+        Ok(())
+    } else if status.is_redirection() {
+        // Followed, a notice would go to an address nobody chose.
+        Err(format!(
+            "{host} sends on to another address ({status}). Give the address it sends on to."
+        ))
+    } else if matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+    ) {
+        Err(format!(
+            "{host} did not take it ({status}): that address is not one it takes notices at, or no longer is."
+        ))
+    } else {
+        Err(format!("{host} did not take it ({status})."))
+    }
+}
+
+/// The site an address names, if it is an address that is fetched from at all.
+pub(crate) fn site(url: &str) -> Result<String, Unfetched> {
+    Ok(place(url)?.host)
+}
+
+/// Sends JSON to an address, as a notice is sent to Discord, Slack and their
+/// like. It is held to everything a fetch is held to, and is sent to the one
+/// address: not on to another.
+pub(crate) async fn send_json(url: &str, json: &serde_json::Value) -> Result<(), Unfetched> {
+    let sent = async {
+        let place = place(url)?;
+        let stream = reach(&place.host).await?;
+        deliver(stream, &place, json).await
     };
-    driving.abort();
-    Ok(answered)
+    match timeout(PATIENCE, sent).await {
+        Ok(sent) => sent,
+        Err(_) => Err("That address took too long to answer.".to_owned()),
+    }
 }
 
 /// The text at an address, up to `at_most` bytes of it.
@@ -266,7 +366,7 @@ pub(crate) async fn text(url: &str, at_most: usize) -> Result<String, Unfetched>
 mod tests {
     use std::net::IpAddr;
 
-    use super::{Place, place, public, text};
+    use super::{Place, deliver, place, public, send_json, site, text};
 
     #[test]
     fn an_address_is_https_on_the_usual_port_and_by_a_name() {
@@ -350,6 +450,98 @@ mod tests {
         ] {
             assert!(!public(inside.parse::<IpAddr>().unwrap()), "{inside}");
         }
+    }
+
+    /// A site at the other end of a connection: reads one request to its end,
+    /// answers with `status`, and says what it was sent.
+    async fn site_answering(mut theirs: tokio::io::DuplexStream, status: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut got = Vec::new();
+        let mut some = [0u8; 1024];
+        loop {
+            let read = theirs.read(&mut some).await.unwrap();
+            got.extend_from_slice(&some[..read]);
+            let text = String::from_utf8_lossy(&got);
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase()
+                            .strip_prefix("content-length: ")?
+                            .parse()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                if body.len() >= length {
+                    break;
+                }
+            }
+            assert!(read > 0, "the request ended before it was whole");
+        }
+        let answer = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+        theirs.write_all(answer.as_bytes()).await.unwrap();
+        String::from_utf8(got).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_notice_is_sent_as_json_to_the_one_address() {
+        let place = place("https://discord.example/api/webhooks/1/s3cret").unwrap();
+        let json = serde_json::json!({ "content": "Lobby crashed (exit code 1)." });
+
+        let (ours, theirs) = tokio::io::duplex(4096);
+        let site = tokio::spawn(site_answering(theirs, "204 No Content"));
+        assert_eq!(deliver(ours, &place, &json).await, Ok(()));
+        let sent = site.await.unwrap();
+        let (head, body) = sent.split_once("\r\n\r\n").unwrap();
+        let head = head.to_lowercase();
+        assert!(
+            head.starts_with("post /api/webhooks/1/s3cret http/1.1\r\n"),
+            "{head}"
+        );
+        assert!(head.contains("\r\nhost: discord.example"), "{head}");
+        assert!(
+            head.contains("\r\ncontent-type: application/json"),
+            "{head}"
+        );
+        assert!(
+            head.contains(&format!("\r\ncontent-length: {}", body.len())),
+            "{head}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json
+        );
+
+        // A site that does not take it, and one that would send it on elsewhere.
+        for (status, why) in [
+            ("404 Not Found", "no longer is"),
+            ("429 Too Many Requests", "did not take it (429"),
+            ("500 Internal Server Error", "did not take it (500"),
+            ("302 Found", "sends on to another address"),
+        ] {
+            let (ours, theirs) = tokio::io::duplex(4096);
+            let site = tokio::spawn(site_answering(theirs, status));
+            let refused = deliver(ours, &place, &json).await.unwrap_err();
+            assert!(refused.contains(why), "{status}: {refused}");
+            site.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_notice_is_held_to_what_a_fetch_is_held_to() {
+        let json = serde_json::json!({ "content": "x" });
+        for (url, why) in [
+            ("http://example.com/hook", "https://"),
+            ("https://192.168.1.10/hook", "name a site"),
+            ("https://example.com:8443/hook", "usual port"),
+        ] {
+            let refused = send_json(url, &json).await.unwrap_err();
+            assert!(refused.contains(why), "{url}: {refused}");
+        }
+        assert_eq!(
+            site("https://Discord.com/api/webhooks/1/x").unwrap(),
+            "discord.com"
+        );
     }
 
     #[tokio::test]

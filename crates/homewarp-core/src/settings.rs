@@ -15,16 +15,22 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::{AppState, Owner, Problem, ProblemBody},
-    audit,
+    audit, fetch,
+    notify::{self, Delivery, Webhook},
 };
 
 /// As many as a resolver's own list holds.
 const MOST_RESOLVERS: usize = 3;
 /// The fewest and the most new connections a second that can be set.
 const NEW_CONNECTIONS: std::ops::RangeInclusive<u32> = 1..=10_000;
+/// Longer than any address a site gives out to be told at.
+const LONGEST_ADDRESS: usize = 500;
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(get_settings, change_settings))
+    OpenApiRouter::new()
+        .routes(routes!(get_settings, change_settings))
+        .routes(routes!(set_notices, remove_notices))
+        .routes(routes!(test_notices))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -36,6 +42,32 @@ struct Settings {
     /// the internet open to the servers, with twice as many at once. More
     /// are dropped at the VPS, so that one address cannot crowd the rest out.
     new_connections: u32,
+    /// Where this Homewarp tells what happens to it. Nothing if nowhere.
+    notices: Option<Notices>,
+}
+
+/// Where notices go, as the page is told: the address is a secret of the
+/// site's making, and is not given back whole.
+#[derive(Serialize, ToSchema)]
+struct Notices {
+    /// The site, and the last few characters of the address.
+    address: String,
+    /// Whether every line of the Activity page is told, and not only what
+    /// happened by itself.
+    everything: bool,
+    /// How the last notice went, once one has been sent.
+    last: Option<Delivery>,
+}
+
+/// Where notices are to go.
+#[derive(Deserialize, ToSchema)]
+struct NoticesChange {
+    /// An address that takes a message as JSON, as a Discord or a Slack
+    /// webhook does: `https`, by a name, on the internet.
+    url: String,
+    /// Every line of the Activity page, and not only what happens by itself.
+    #[serde(default)]
+    everything: bool,
 }
 
 /// What is to be changed. What is not named is left as it is.
@@ -76,9 +108,15 @@ async fn all(state: &AppState) -> Result<Settings, Problem> {
     // Neither read depends on the other, so neither waits for the other.
     let (resolvers, new_connections) =
         tokio::try_join!(resolvers(&state.db), new_connections(&state.db))?;
+    let (webhook, last) = tokio::join!(notify::webhook(&state.db), notify::last(&state.db));
     Ok(Settings {
         resolvers,
         new_connections,
+        notices: webhook.map(|webhook| Notices {
+            address: notify::shortened(&webhook.url),
+            everything: webhook.everything,
+            last,
+        }),
     })
 }
 
@@ -196,5 +234,98 @@ async fn change_settings(
         )
         .await;
     }
+    Ok(Json(all(&state).await?))
+}
+
+/// Has this Homewarp tell an address what happens to it: by itself what
+/// nobody was at the panel for (a crash, a server put to sleep or woken, what
+/// a schedule did, a VPS that stopped answering), or every line of the
+/// Activity page. The address is one that takes a message as JSON.
+#[utoipa::path(
+    put,
+    path = "/api/v1/settings/notices",
+    request_body = NoticesChange,
+    responses(
+        (status = OK, body = Settings),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account is not the owner's."),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "That is not an address notices can be sent to."),
+    )
+)]
+async fn set_notices(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+    Json(asked): Json<NoticesChange>,
+) -> Result<Json<Settings>, Problem> {
+    let url = asked.url.trim();
+    if url.len() > LONGEST_ADDRESS {
+        return Err(Problem::Invalid(
+            "That address is too long to be one.".into(),
+        ));
+    }
+    fetch::site(url).map_err(|why| Problem::Invalid(why.into()))?;
+    let webhook = Webhook {
+        url: url.to_owned(),
+        everything: asked.everything,
+    };
+    notify::set(&state.db, &webhook).await?;
+    // Written down without the address, which is a secret.
+    let detail = format!(
+        "notices: to {}, {}",
+        notify::shortened(url),
+        match webhook.everything {
+            true => "of everything",
+            false => "of what happens by itself",
+        }
+    );
+    audit::record(&state.db, &who, None, "settings.change", &detail).await;
+    Ok(Json(all(&state).await?))
+}
+
+/// Has this Homewarp tell nobody.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/settings/notices",
+    responses(
+        (status = OK, body = Settings),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account is not the owner's."),
+    )
+)]
+async fn remove_notices(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+) -> Result<Json<Settings>, Problem> {
+    notify::unset(&state.db).await?;
+    audit::record(
+        &state.db,
+        &who,
+        None,
+        "settings.change",
+        "notices: to nobody",
+    )
+    .await;
+    Ok(Json(all(&state).await?))
+}
+
+/// Sends a notice that says only that notices arrive, and waits for the site
+/// to take it.
+#[utoipa::path(
+    post,
+    path = "/api/v1/settings/notices/test",
+    responses(
+        (status = OK, body = Settings, description = "The site took it."),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account is not the owner's."),
+        (status = CONFLICT, body = ProblemBody, description = "The site did not take it, or there is no address."),
+    )
+)]
+async fn test_notices(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+) -> Result<Json<Settings>, Problem> {
+    notify::test(&state.db, &who.username)
+        .await
+        .map_err(|why| Problem::Conflict(why.into()))?;
     Ok(Json(all(&state).await?))
 }

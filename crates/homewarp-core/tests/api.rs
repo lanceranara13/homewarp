@@ -1632,13 +1632,13 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
     let first = panel.get(settings, cookie).await;
     assert_eq!(
         first.body,
-        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30 })
+        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30, "notices": null })
     );
     // Kept each once, as addresses are written.
     let quad9 = json!({ "resolvers": ["9.9.9.9", " 9.9.9.9 ", "149.112.112.112"] });
     let changed = panel.put(settings, quad9, cookie).await;
     assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
-    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30 });
+    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30, "notices": null });
     assert_eq!(changed.body, kept);
 
     for (wrong, said) in [
@@ -1686,6 +1686,90 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
         panel.get(settings, None).await.status,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn where_notices_go_is_the_owners_to_say_and_is_not_given_back() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let cookie = Some(cookie.as_str());
+    let settings = "/api/v1/settings";
+    let notices = "/api/v1/settings/notices";
+    let test = "/api/v1/settings/notices/test";
+
+    // With no address there is nobody to tell.
+    let nobody = panel.post(test, json!({}), cookie).await;
+    assert_eq!(nobody.status, StatusCode::CONFLICT, "{}", nobody.body);
+    assert_eq!(nobody.body["error"], "There is no address to tell.");
+
+    // An address is one on the internet, by a name, over https.
+    for (wrong, why) in [
+        ("http://discord.com/api/webhooks/1/x", "https://"),
+        ("https://192.168.1.10/hook", "name a site"),
+        ("https://localhost/hook", "name a site"),
+        ("https://example.com:8443/hook", "usual port"),
+        ("discord.com/api/webhooks/1/x", "https://"),
+    ] {
+        let answer = panel.put(notices, json!({ "url": wrong }), cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{wrong}");
+        let said = answer.body["error"].as_str().unwrap();
+        assert!(said.contains(why), "{wrong}: {said}");
+    }
+    assert_eq!(
+        panel.get(settings, cookie).await.body["notices"],
+        json!(null)
+    );
+
+    // Kept, it is shown by its site and its last few characters, and no more.
+    let secret = "https://hooks.example.invalid/services/T000/B000/s3cretT0kenAbCd";
+    let set = panel.put(notices, json!({ "url": secret }), cookie).await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    let shown =
+        json!({ "address": "hooks.example.invalid/…AbCd", "everything": false, "last": null });
+    assert_eq!(set.body["notices"], shown);
+    let asked = panel.get(settings, cookie).await;
+    assert_eq!(asked.body["notices"], shown);
+    assert!(!asked.body.to_string().contains("s3cret"));
+    // Nor is it written down whole.
+    let activity = panel.get("/api/v1/activity", cookie).await;
+    assert_eq!(activity.body[0]["action"], "settings.change");
+    assert_eq!(
+        activity.body[0]["detail"],
+        "notices: to hooks.example.invalid/…AbCd, of what happens by itself"
+    );
+    assert!(!activity.body.to_string().contains("s3cret"));
+
+    // A site that is not there does not take one, and how that went is kept.
+    let sent = panel.post(test, json!({}), cookie).await;
+    assert_eq!(sent.status, StatusCode::CONFLICT, "{}", sent.body);
+    let why = sent.body["error"].as_str().unwrap().to_owned();
+    assert!(why.contains("hooks.example.invalid"), "{why}");
+    let after = panel.get(settings, cookie).await;
+    assert_eq!(after.body["notices"]["last"]["problem"], why);
+
+    // Another address in its place, and for everything. That it was changed is
+    // itself something this one is told, so how its last notice went is not asked here.
+    let other = json!({ "url": "https://chat.example.invalid/hooks/zyxw9876", "everything": true });
+    let changed = panel.put(notices, other, cookie).await;
+    assert_eq!(
+        changed.body["notices"]["address"],
+        "chat.example.invalid/…9876"
+    );
+    assert_eq!(changed.body["notices"]["everything"], true);
+
+    // Taken away again.
+    let removed = panel.delete(notices, cookie).await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+    assert_eq!(removed.body["notices"], json!(null));
+
+    // And none of it is anybody's but the owner's.
+    for answer in [
+        panel.put(notices, json!({ "url": secret }), None).await,
+        panel.delete(notices, None).await,
+        panel.post(test, json!({}), None).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
 }
 
 #[tokio::test]

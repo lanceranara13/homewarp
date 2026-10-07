@@ -16,7 +16,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, AtomicU16, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -60,6 +60,9 @@ const WG_PORT: u16 = 51820;
 /// Where a Gate answers Core, on its tunnel address.
 const API_PORT: u16 = 4857;
 const EVERY: Duration = Duration::from_secs(10);
+/// How many rounds in a row a Gate may go unanswered before it is written
+/// down as having stopped answering: half a minute.
+const LOST_AFTER: u32 = 3;
 /// How often a VPS that has been handed its join token is looked for.
 const EVERY_WHILE_WAITING: Duration = Duration::from_secs(2);
 /// How long a join token counts (PLAN.md §5.5).
@@ -180,6 +183,10 @@ pub(crate) struct Tunnel {
     counted: Mutex<BTreeMap<(u16, Protocol), u64>>,
     /// Set once it has been said that servers could not be kept from the home network.
     keep_failed: AtomicBool,
+    /// How many rounds in a row a Gate that is connected has not answered.
+    unanswered: AtomicU32,
+    /// Set once it has been written down that the Gate stopped answering.
+    lost: AtomicBool,
     /// The port the panel is served on over TLS, here and on the VPS alike.
     /// None, written 0, where this Core has no door for it.
     panel_port: AtomicU16,
@@ -218,6 +225,8 @@ impl Tunnel {
             check_due: AtomicBool::new(false),
             counted: Mutex::default(),
             keep_failed: AtomicBool::new(false),
+            unanswered: AtomicU32::new(0),
+            lost: AtomicBool::new(false),
             panel_port: AtomicU16::new(0),
         })
     }
@@ -341,6 +350,9 @@ impl Tunnel {
             Ok(Some(gate)) => gate,
             Ok(None) => {
                 self.take_down().await;
+                // No Gate is not a Gate that stopped answering.
+                self.unanswered.store(0, Ordering::Relaxed);
+                self.lost.store(false, Ordering::Relaxed);
                 return false;
             }
             Err(error) => {
@@ -384,6 +396,22 @@ impl Tunnel {
                 ..Heard::default()
             },
         };
+        // Written down when it stops answering and when it answers again, so
+        // that the owner is told of a VPS that is down. Not at the first round
+        // without an answer: a tunnel misses one now and then.
+        if !waiting {
+            if heard.status.is_some() {
+                self.unanswered.store(0, Ordering::Relaxed);
+                if self.lost.swap(false, Ordering::Relaxed) {
+                    audit::record_by_homewarp(&self.db, None, "gate.back", "").await;
+                }
+            } else if self.unanswered.fetch_add(1, Ordering::Relaxed) + 1 == LOST_AFTER
+                && !self.lost.swap(true, Ordering::Relaxed)
+            {
+                let why = heard.problem.clone().unwrap_or_default();
+                audit::record_by_homewarp(&self.db, None, "gate.lost", &why).await;
+            }
+        }
         *lock(&self.heard) = heard;
         waiting
     }

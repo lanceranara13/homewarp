@@ -3547,6 +3547,146 @@
         }
       }
     },
+    "/api/v1/settings/notices": {
+      "put": {
+        "summary": "Has this Homewarp tell an address what happens to it: by itself what\nnobody was at the panel for (a crash, a server put to sleep or woken, what\na schedule did, a VPS that stopped answering), or every line of the\nActivity page. The address is one that takes a message as JSON.",
+        "operationId": "set_notices",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NoticesChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That is not an address notices can be sent to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Has this Homewarp tell nobody.",
+        "operationId": "remove_notices",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/notices/test": {
+      "post": {
+        "summary": "Sends a notice that says only that notices arrive, and waits for the site\nto take it.",
+        "operationId": "test_notices",
+        "responses": {
+          "200": {
+            "description": "The site took it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The site did not take it, or there is no address.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/setup": {
       "post": {
         "summary": "Creates the first account and signs it in. Works once.",
@@ -4429,6 +4569,27 @@
           }
         }
       },
+      "Delivery": {
+        "type": "object",
+        "description": "How the last notice went.",
+        "required": [
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When, in Unix seconds."
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the site did not take it. Nothing if it did."
+          }
+        }
+      },
       "DiskUse": {
         "type": "object",
         "required": [
@@ -5069,6 +5230,52 @@
             }
           }
         ]
+      },
+      "Notices": {
+        "type": "object",
+        "description": "Where notices go, as the page is told: the address is a secret of the\nsite's making, and is not given back whole.",
+        "required": [
+          "address",
+          "everything"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The site, and the last few characters of the address."
+          },
+          "everything": {
+            "type": "boolean",
+            "description": "Whether every line of the Activity page is told, and not only what\nhappened by itself."
+          },
+          "last": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Delivery",
+                "description": "How the last notice went, once one has been sent."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "NoticesChange": {
+        "type": "object",
+        "description": "Where notices are to go.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "everything": {
+            "type": "boolean",
+            "description": "Every line of the Activity page, and not only what happens by itself."
+          },
+          "url": {
+            "type": "string",
+            "description": "An address that takes a message as JSON, as a Discord or a Slack\nwebhook does: `https`, by a name, on the internet."
+          }
+        }
       },
       "OwnPassword": {
         "type": "object",
@@ -5867,6 +6074,17 @@
             "format": "int32",
             "description": "How many new connections a second a connected VPS lets one address on\nthe internet open to the servers, with twice as many at once. More\nare dropped at the VPS, so that one address cannot crowd the rest out.",
             "minimum": 0
+          },
+          "notices": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Notices",
+                "description": "Where this Homewarp tells what happens to it. Nothing if nowhere."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "resolvers": {
             "type": "array",

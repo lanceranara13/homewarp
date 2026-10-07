@@ -14,6 +14,7 @@ mod files;
 mod guard;
 mod limits;
 mod minecraft;
+mod notify;
 mod panel;
 mod passkeys;
 mod runtime;

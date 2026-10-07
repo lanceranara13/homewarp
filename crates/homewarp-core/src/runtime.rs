@@ -1103,6 +1103,8 @@ impl Runtime {
                     "The server stopped by itself, with exit code {code}."
                 ));
                 watch.set(State::Crashed);
+                let detail = format!("exit code {code}");
+                audit::record_by_homewarp(&self.db, Some(server.id), "server.crash", &detail).await;
                 Ended::Crashed
             }
             // Not a crash of the server's: the same would happen again at once.
@@ -1157,6 +1159,9 @@ impl Runtime {
                 watch.say(format!(
                     "That is {crashes} crashes one after another. Homewarp will not start it again by itself."
                 ));
+                let detail = format!("{crashes} crashes one after another");
+                audit::record_by_homewarp(&self.db, Some(server.id), "server.gave_up", &detail)
+                    .await;
                 return;
             }
             let wait = FIRST_WAIT * 3u32.pow(crashes - 1);

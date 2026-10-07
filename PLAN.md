@@ -1690,6 +1690,31 @@ Each phase ends with something that works on the homelab.
     port 25565 whatever the server's port was, at every start. Such a file is left for
     the server to make now, and said so in the console; from the second start the port
     is in it. Files that are set key by key are made as before, with their keys.
+  - *Notices* (the plan's "webhooks"; Settings, Notices). Homewarp tells an address of
+    the owner's what happens while nobody is at the panel: a server that crashed, and
+    that Homewarp has given up starting it again; one put to sleep, or woken, and by
+    whom; what a schedule did; a new certificate; a VPS that has stopped answering, and
+    that it answers again. Or, if asked, every line of the Activity page.
+    - *A notice is a line of the Activity page, sent on.* Whatever is told was written
+      down first, so there is one list of what counts as having happened. Three things
+      that were only said in a console are written down now for that: a crash, the
+      giving up, and the VPS lost and found (after three rounds without an answer, not
+      at the first).
+    - *As Discord and Slack take a message:* JSON to an address that is itself the
+      secret, with the sentence under both the names it is read by (`content`, `text`)
+      and the line's parts beside it for a program. Sent one after another, in the
+      order things happened; tried three times; sixty-four may wait, and one more is
+      let go.
+    - *The address is held to what a fetch is held to:* `https`, a name, an address on
+      the internet, and no sending on to another. So nothing is sent into a home
+      network, and a receiver there is not served. It is kept and not shown again: the
+      page and the Activity page have the site and its last four characters.
+    - *Tried* against an address that keeps what it is sent, on the internet (a
+      throwaway one, deleted after): "Send one now"; a server made to end by itself,
+      whose four crashes and the giving up arrived in that order; and, with the real
+      VPS connected to a throwaway copy, its Gate stopped and started, which arrived as
+      lost and as back. Discord itself was not tried: there is no webhook of the
+      owner's here to try it with.
 - *Not done, and why:*
   - *Answering for a server that is stopped, and from the Gate while home is away.*
     The stand-in could say "offline" as well as "asleep", at the price of a container
