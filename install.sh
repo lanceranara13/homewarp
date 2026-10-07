@@ -30,7 +30,7 @@ set -eu
 # nothing at all, and nothing in it can read the rest of it as its own input.
 main() {
 RELEASES="${HOMEWARP_RELEASES:-https://lanceranara13.github.io/homewarp}"
-VERSION="1.0.0"
+VERSION="1.1.0"
 DIR="${HOMEWARP_DIR:-/opt/homewarp}"
 PORT="${HOMEWARP_PORT:-3600}"
 SFTP_PORT="${HOMEWARP_SFTP_PORT:-2022}"

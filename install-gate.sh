@@ -17,7 +17,7 @@ set -eu
 # nothing at all, and nothing in it can read the rest of it as its own input.
 main() {
 RELEASES="${HOMEWARP_RELEASES:-https://lanceranara13.github.io/homewarp}"
-VERSION="1.0.0"
+VERSION="1.1.0"
 PROGRAM=/usr/local/bin/homewarp-gate
 
 say() { printf '%s\n' "$*"; }
@@ -58,8 +58,15 @@ banner() {
 }
 banner
 
-[ "$#" -ge 1 ] || stop "usage: sh -s -- <join token>. The panel gives the whole command: Network, then Connect a VPS."
+[ "$#" -ge 1 ] || stop "usage: sh -s -- <join token>, or sh -s -- update. The panel gives the whole command: Network, then Connect a VPS."
 [ "$(id -u)" = 0 ] || stop "run this as root: it sets up the network."
+# With "update" in place of a token, the Gate that is here is replaced by this
+# release's and started again. Nothing else of it is touched: its keys, what
+# it forwards and its guard are as they were.
+UNIT=/etc/systemd/system/homewarp-gate.service
+if [ "$1" = update ]; then
+  [ -x "$PROGRAM" ] || stop "there is no Gate on this machine to update. The panel gives the command that connects one."
+fi
 
 case "$(uname -m)" in
   x86_64 | amd64) target=x86_64 ;;
@@ -109,6 +116,17 @@ say "Homewarp Gate $("$PROGRAM" version | cut -d' ' -f2) is on this machine."
 # and nothing of this script is left to do it afterwards.
 rm -rf "$work"
 trap - EXIT
+if [ "$1" = update ]; then
+  # The service runs the program from where it was just put. Where nothing
+  # starts the Gate for this machine, whoever does has to start it again.
+  if [ -e "$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl restart homewarp-gate || stop "the new Gate is in place, and its service would not start again. See: journalctl -u homewarp-gate"
+    say "It has been started again. Players who were connected stay connected."
+  else
+    say "Nothing starts the Gate on this machine by itself: stop the one that is running and start it again."
+  fi
+  exit 0
+fi
 exec "$PROGRAM" join "$@"
 }
 
