@@ -285,7 +285,7 @@ async fn keep<T: Serialize>(db: &SqlitePool, key: &str, value: &T) -> anyhow::Re
 /// The list of releases, fetched from where releases are and believed for its signature.
 async fn look(state: &AppState) -> Result<(Listed, Vec<u8>), String> {
     let base = state.releases.as_deref().ok_or(
-        "This Homewarp was not told where its releases are, so it cannot look for a newer one. One that the installer set up is told.",
+        "This Homewarp was not told where its releases are, so it cannot check for updates. One that the installer set up is told.",
     )?;
     let key = key().ok_or(
         "This Homewarp was built without the key its releases are signed with, so it could not tell a release from anything else. One that was installed from a release has it.",

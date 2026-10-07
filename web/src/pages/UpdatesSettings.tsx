@@ -65,7 +65,7 @@ export function Updates() {
             ) : update.newest ? (
               <>It is the newest there is on the {update.channel} channel.</>
             ) : (
-              update.checked_at == null && <>It has not looked for a newer one yet.</>
+              update.checked_at == null && <>It has not checked for updates yet.</>
             )}
           </p>
           {update.problem && <Problem>{update.problem}</Problem>}
@@ -73,9 +73,9 @@ export function Updates() {
           {!update.updating && (
             <div className="flex flex-wrap items-center gap-3">
               <Button busy={looking.isPending} onClick={() => looking.mutate()}>
-                Look for a newer one
+                Check for updates
               </Button>
-              {update.checked_at != null && <span className="text-small text-ink-subtle">Last looked {when(update.checked_at)}.</span>}
+              {update.checked_at != null && <span className="text-small text-ink-subtle">Last checked {when(update.checked_at)}.</span>}
             </div>
           )}
         </div>
