@@ -197,7 +197,7 @@ function Vps({
             <Figure label="Ping">{gate.latency_ms == null ? '—' : `${gate.latency_ms} ms`}</Figure>
             <Figure label="CPU usage">{gate.load_percent == null ? '—' : `${gate.load_percent} %`}</Figure>
             <Figure label="Servers">{gate.servers}</Figure>
-            <Figure label="Data, last 24 h">{bytes(gate.traffic_bytes)}</Figure>
+            <Figure label="Traffic, last day">{bytes(gate.traffic_bytes)}</Figure>
           </dl>
           {owner && <TrafficChart samples={samples} slots={slots} labels={['To servers', 'To players']} compact />}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-small">
@@ -348,7 +348,7 @@ function Ports({ network }: { network: Network }) {
                 <th className={cell}>Protocol</th>
                 <th className={cell}>Server</th>
                 {several && <th className={cell}>Through</th>}
-                {connected && <th className={`${cell} text-right`}>Data, last 24 h</th>}
+                {connected && <th className={`${cell} text-right`}>Traffic, last day</th>}
               </tr>
             </thead>
             <tbody>
