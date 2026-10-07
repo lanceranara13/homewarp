@@ -1,6 +1,9 @@
 //! Passwords, session tokens and the first-run setup code (PLAN.md §6).
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use argon2::{
     Argon2,
@@ -8,9 +11,23 @@ use argon2::{
 };
 use axum::http::{HeaderMap, HeaderValue, header::COOKIE};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
+
+use crate::api::Problem;
 
 const COOKIE_NAME: &str = "homewarp_session";
 pub const SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;
+const DEVICE_COOKIE: &str = "homewarp_device";
+/// How long a browser that has signed in is known for: a year.
+const DEVICE_SECONDS: i64 = 365 * 24 * 60 * 60;
+
+/// How many passwords are hashed at once. Anybody may ask for one to be, by
+/// trying to sign in, and each takes a processor and some megabytes for as
+/// long as it lasts.
+const HASHING_AT_ONCE: usize = 4;
+/// How long one waits for its turn before whoever asked is told to come back.
+const TURN: Duration = Duration::from_secs(10);
+static HASHING: Semaphore = Semaphore::const_new(HASHING_AT_ONCE);
 
 /// No I, O, 0 or 1: the code is read off a log and typed by hand.
 const CODE_SYMBOLS: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -46,6 +63,42 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     })
 }
 
+/// Does one piece of slow work on a password when its turn comes, off the
+/// async threads. Only a few are done at once, however many are asked for.
+async fn in_turn<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Problem> {
+    const BUSY: Problem = Problem::Unavailable(
+        "Homewarp is checking as many passwords as it does at once. Try again in a moment.",
+    );
+    let Ok(Ok(_turn)) = tokio::time::timeout(TURN, HASHING.acquire()).await else {
+        return Err(BUSY);
+    };
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| Problem::Internal(error.into()))
+}
+
+/// [`hash_password`], in its turn.
+pub(crate) async fn hash(password: String) -> Result<String, Problem> {
+    Ok(in_turn(move || hash_password(&password)).await??)
+}
+
+/// [`verify_password`], in its turn. With no hash to hold it against, the same
+/// work is done for nothing: an unknown name then costs what a wrong password
+/// does, and how long the answer takes does not say which of the two it was.
+pub(crate) async fn verify(password: String, hash: Option<String>) -> Result<bool, Problem> {
+    in_turn(move || {
+        static NOBODY: OnceLock<String> = OnceLock::new();
+        let hash = match &hash {
+            Some(hash) => hash,
+            None => NOBODY.get_or_init(|| hash_password("").unwrap_or_default()),
+        };
+        verify_password(&password, hash)
+    })
+    .await
+}
+
 /// A new session token: what the browser's cookie holds.
 pub fn new_token() -> String {
     random::<32>()
@@ -76,14 +129,33 @@ pub fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
-/// The session token a request carries, if any.
-pub fn token_from(headers: &HeaderMap) -> Option<&str> {
+/// What a request's cookie of this name holds, if it carries one.
+fn cookie_named<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|cookies| cookies.split(';'))
-        .find_map(|cookie| cookie.trim().strip_prefix(COOKIE_NAME)?.strip_prefix('='))
+        .find_map(|cookie| cookie.trim().strip_prefix(name)?.strip_prefix('='))
+}
+
+/// The session token a request carries, if any.
+pub fn token_from(headers: &HeaderMap) -> Option<&str> {
+    cookie_named(headers, COOKIE_NAME)
+}
+
+/// The token of a browser that says it has signed in here before, if it says so.
+pub fn device_from(headers: &HeaderMap) -> Option<&str> {
+    cookie_named(headers, DEVICE_COOKIE)
+}
+
+/// The `Set-Cookie` value by which a browser is known from now on. It is of
+/// use to a sign-in and to nothing else, so that is all it is sent back with.
+pub fn device_cookie(token: &str) -> HeaderValue {
+    let cookie = format!(
+        "{DEVICE_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/api/v1/login; Max-Age={DEVICE_SECONDS}"
+    );
+    HeaderValue::from_str(&cookie).expect("a hex token and a number are valid in a header")
 }
 
 /// The `Set-Cookie` value for a session. An empty token and no lifetime clear it.
@@ -164,6 +236,37 @@ mod tests {
         assert_eq!(token_from(&headers), Some("abc123"));
         headers.insert(COOKIE, HeaderValue::from_static("homewarp_session_old=zzz"));
         assert_eq!(token_from(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn passwords_are_hashed_a_few_at_a_time_and_the_rest_wait() {
+        let hash = hash("correct horse battery".to_owned()).await.unwrap();
+        // Every turn taken: one more waits, and is done once there is a turn.
+        let all = u32::try_from(HASHING_AT_ONCE).unwrap();
+        let turns = HASHING.acquire_many(all).await.unwrap();
+        assert_eq!(HASHING.available_permits(), 0);
+        let mut waiting = tokio::spawn(verify("correct horse battery".to_owned(), Some(hash)));
+        let waited = tokio::time::timeout(Duration::from_millis(100), &mut waiting).await;
+        assert!(waited.is_err());
+        drop(turns);
+        assert!(waiting.await.unwrap().unwrap());
+        // Held against nobody's password, a guess is wrong, and takes its turn as any does.
+        assert!(!verify("a guess".to_owned(), None).await.unwrap());
+    }
+
+    #[test]
+    fn the_cookie_a_browser_is_known_by_goes_to_sign_ins_only() {
+        let cookie = device_cookie("abc123");
+        let cookie = cookie.to_str().unwrap();
+        assert!(cookie.starts_with("homewarp_device=abc123; HttpOnly; SameSite=Strict; "));
+        assert!(cookie.contains("Path=/api/v1/login;"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("homewarp_session=s; homewarp_device=abc123"),
+        );
+        assert_eq!(device_from(&headers), Some("abc123"));
+        assert_eq!(token_from(&headers), Some("s"));
     }
 
     #[test]

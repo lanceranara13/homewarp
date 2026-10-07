@@ -348,6 +348,11 @@ elif ! openssl pkeyutl -verify -pubin -inkey "$work/release.pub" -rawin \
   -in "$work/SHA256SUMS" -sigfile "$work/SHA256SUMS.sig" >/dev/null 2>&1; then
   stop "the list of checksums is not signed with Homewarp's key. Nothing was installed."
 fi
+# And the list is this version's own: every release's list is signed, and
+# names the same files, so the version is among what is listed.
+named=$(printf '%s\n' "$VERSION" | sha256sum | cut -d' ' -f1)
+[ "${HOMEWARP_UNSIGNED:-}" = 1 ] || grep -q "^$named [ *]VERSION\$" "$work/SHA256SUMS" ||
+  stop "the list of checksums is not that of Homewarp $VERSION. Nothing was installed."
 # Then the program against the list.
 (cd "$work" && grep " $file\$" SHA256SUMS | sha256sum -c - >/dev/null 2>&1) ||
   stop "$file is not the file that was released. Nothing was installed."

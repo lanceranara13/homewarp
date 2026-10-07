@@ -298,9 +298,7 @@ async fn begin_passkey(
         .bind(who.id)
         .fetch_one(&state.db)
         .await?;
-    let right = tokio::task::spawn_blocking(move || auth::verify_password(&asked.password, &hash))
-        .await
-        .map_err(anyhow::Error::new)?;
+    let right = auth::verify(asked.password, Some(hash)).await?;
     if !right {
         trying.failed(&state.limits);
         return Err(Problem::Forbidden("That is not your password."));
@@ -493,7 +491,9 @@ async fn sign_in(
     let named = found
         .as_ref()
         .map_or("(no such passkey)", |found| found.2.as_str());
-    let trying = Trying::new(client, named);
+    let trying = Trying::new(client, named)
+        .known(&state.db, named, &headers)
+        .await;
     trying.may(&state.limits)?;
     let from = client.0.to_string();
 
@@ -559,7 +559,8 @@ async fn sign_in(
         .await?;
     let detail = format!("{from}, with a passkey");
     audit::record(&state.db, &user, None, "account.sign_in", &detail).await;
-    api::sign_in(&state, user).await
+    let known = trying.is_known();
+    api::sign_in(&state, user, known).await
 }
 
 #[cfg(test)]

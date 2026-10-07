@@ -21,7 +21,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     accounts::{self, Permission},
-    api::{AppState, Problem, ProblemBody, SignedIn},
+    api::{AppState, Problem, ProblemBody, SignedIn, User},
     audit, auth, backups,
     clock::Cron,
     runtime::{self, Power},
@@ -155,6 +155,76 @@ struct Checked {
     cron: String,
     tasks: String,
     next_run_at: Option<i64>,
+}
+
+/// What an account has to be let do with a server for a schedule of its own to
+/// do this there: what the same thing asks when it is done by hand.
+fn needs(action: Action) -> Permission {
+    match action {
+        Action::Command => Permission::Console,
+        Action::Start | Action::Stop | Action::Restart | Action::Kill => Permission::Power,
+        Action::Backup => Permission::Backups,
+    }
+}
+
+/// Refuses tasks that do what whoever asks may not do with the server by
+/// hand. A schedule runs with nobody at the panel, and what it does, it does
+/// with the leave of the account that made it or set it off.
+async fn within(
+    db: &SqlitePool,
+    who: &User,
+    server_id: i64,
+    tasks: &[Task],
+) -> Result<(), Problem> {
+    let granted = accounts::permissions_of(db, who, server_id)
+        .await?
+        .unwrap_or_default();
+    match tasks
+        .iter()
+        .all(|task| granted.contains(&needs(task.action)))
+    {
+        true => Ok(()),
+        false => Err(Problem::Forbidden(
+            "Your account has not been let do, with this server, what that schedule does.",
+        )),
+    }
+}
+
+/// Switches off the schedules an account made that it could not make now: all
+/// of them where `granted` is nothing, which is an account taken out of a
+/// server (or, with no server named, removed), and otherwise those whose tasks
+/// need what it is no longer let do. A schedule that is switched off says why.
+pub(crate) async fn withdraw(
+    db: &SqlitePool,
+    server_id: Option<i64>,
+    user_id: i64,
+    granted: &[Permission],
+) -> Result<(), sqlx::Error> {
+    let theirs: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, tasks FROM schedules
+         WHERE user_id = ?1 AND enabled = 1 AND (?2 IS NULL OR server_id = ?2)",
+    )
+    .bind(user_id)
+    .bind(server_id)
+    .fetch_all(db)
+    .await?;
+    for (id, tasks) in theirs {
+        let tasks: Vec<Task> = serde_json::from_str(&tasks).unwrap_or_default();
+        let may = granted.contains(&Permission::Schedules)
+            && tasks
+                .iter()
+                .all(|task| granted.contains(&needs(task.action)));
+        if !may {
+            sqlx::query(
+                "UPDATE schedules SET enabled = 0, next_run_at = NULL, last_result = ? WHERE id = ?",
+            )
+            .bind("Switched off: the account that set it may no longer do this with this server.")
+            .bind(id)
+            .execute(db)
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn check(settings: &ScheduleSettings) -> Result<Checked, Problem> {
@@ -428,6 +498,7 @@ async fn create_schedule(
 ) -> Result<(StatusCode, Json<Schedule>), Problem> {
     accounts::may(&state.db, &who, id, Some(Permission::Schedules)).await?;
     let checked = check(&settings)?;
+    within(&state.db, &who, id, &settings.tasks).await?;
     let had: Option<i64> = sqlx::query_scalar(
         "SELECT (SELECT COUNT(*) FROM schedules WHERE server_id = servers.id) FROM servers WHERE id = ?",
     )
@@ -441,8 +512,9 @@ async fn create_schedule(
     }
     let made = sqlx::query(
         "INSERT INTO schedules
-             (server_id, name, cron, utc_offset, enabled, only_running, tasks, next_run_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (server_id, name, cron, utc_offset, enabled, only_running, tasks, next_run_at,
+              created_at, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(&checked.name)
@@ -453,6 +525,7 @@ async fn create_schedule(
     .bind(&checked.tasks)
     .bind(checked.next_run_at)
     .bind(auth::now())
+    .bind(who.id)
     .execute(&state.db)
     .await?
     .last_insert_rowid();
@@ -485,9 +558,11 @@ async fn change_schedule(
 ) -> Result<Json<Schedule>, Problem> {
     accounts::may(&state.db, &who, id, Some(Permission::Schedules)).await?;
     let checked = check(&settings)?;
+    within(&state.db, &who, id, &settings.tasks).await?;
     let changed = sqlx::query(
         "UPDATE schedules
-         SET name = ?, cron = ?, utc_offset = ?, enabled = ?, only_running = ?, tasks = ?, next_run_at = ?
+         SET name = ?, cron = ?, utc_offset = ?, enabled = ?, only_running = ?, tasks = ?,
+             next_run_at = ?, user_id = ?
          WHERE id = ? AND server_id = ?",
     )
     .bind(&checked.name)
@@ -497,6 +572,8 @@ async fn change_schedule(
     .bind(settings.only_running)
     .bind(&checked.tasks)
     .bind(checked.next_run_at)
+    // It is whoever changed it last that it now runs with the leave of.
+    .bind(who.id)
     .bind(schedule_id)
     .bind(id)
     .execute(&state.db)
@@ -562,6 +639,7 @@ async fn run_schedule(
 ) -> Result<StatusCode, Problem> {
     accounts::may(&state.db, &who, id, Some(Permission::Schedules)).await?;
     let schedule = one(&state.db, id, schedule_id).await?;
+    within(&state.db, &who, id, &schedule.tasks).await?;
     audit::record(&state.db, &who, Some(id), "schedule.run", &schedule.name).await;
     let due = Due {
         id: schedule_id,

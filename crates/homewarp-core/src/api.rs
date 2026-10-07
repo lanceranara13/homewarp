@@ -1,12 +1,7 @@
 //! The HTTP API under `/api/v1` (PLAN.md §5.8). The OpenAPI document is built
 //! from the handlers here, and the web client's types are generated from it.
 
-use std::{
-    borrow::Cow,
-    path::Path,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{borrow::Cow, path::Path, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -72,6 +67,11 @@ pub struct AppState {
     pub(crate) challenges: Arc<Challenges>,
     /// What is known of newer releases, and an update that is being made.
     pub(crate) updates: Arc<Updates>,
+    /// Told whenever something is taken from an account: a server, a
+    /// permission, its password, a session. What stays open on an account's
+    /// behalf after the request that began it (an SFTP connection, a
+    /// console's socket) listens here, and asks again whether it still may.
+    pub(crate) taken: tokio::sync::broadcast::Sender<()>,
 }
 
 impl AppState {
@@ -105,6 +105,7 @@ impl AppState {
             panel: Arc::default(),
             challenges: Arc::default(),
             updates: Arc::default(),
+            taken: tokio::sync::broadcast::channel(16).0,
         })
     }
 
@@ -166,6 +167,12 @@ impl AppState {
     /// read it can read this machine's logs, which is the proof setup asks for.
     pub fn setup_code(&self) -> Option<&str> {
         self.setup_code.as_deref()
+    }
+
+    /// Says that something has just been taken from an account (`taken`).
+    pub(crate) fn taken_away(&self) {
+        // With nothing open there is nobody to tell.
+        let _ = self.taken.send(());
     }
 }
 
@@ -436,13 +443,18 @@ const TRIES_FROM_AN_ADDRESS: u32 = 5;
 const TRIES_AT_AN_ACCOUNT: u32 = 20;
 
 /// Who is trying to sign in, as the limits know them: the address they come
-/// from and the account they name.
+/// from, the account they name and, where the account has signed in from it
+/// before, the browser.
 pub(crate) struct Trying {
     /// None for the Gate's own address in the tunnel. Where the Gate stands in
     /// for whoever comes through it, that is everybody on the internet at
     /// once, and a count kept of it would let anyone shut the rest out.
     from: Option<String>,
     account: String,
+    /// A browser the account has signed in from before. It is counted by
+    /// itself and not with the account: the wrong tries others make at the
+    /// account, from wherever, do not keep its owner's own browser out.
+    device: Option<String>,
 }
 
 impl Trying {
@@ -451,7 +463,39 @@ impl Trying {
         Self {
             from: one.then(|| format!("from {}", client.0)),
             account: format!("account {}", account.trim().to_lowercase()),
+            device: None,
         }
+    }
+
+    /// The same, for a request that may come from a browser the account has
+    /// signed in from before: its cookie says so, and is held against what
+    /// was kept when it did.
+    pub(crate) async fn known(
+        mut self,
+        db: &SqlitePool,
+        account: &str,
+        headers: &HeaderMap,
+    ) -> Self {
+        let Some(token) = auth::device_from(headers) else {
+            return self;
+        };
+        let known: Result<Option<i64>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT 1 FROM known_devices JOIN users ON users.id = known_devices.user_id
+             WHERE known_devices.token_hash = ? AND users.username = ?",
+        )
+        .bind(auth::token_hash(token))
+        .bind(account.trim())
+        .fetch_optional(db)
+        .await;
+        if let Ok(Some(_)) = known {
+            self.device = Some(format!("device {token}"));
+        }
+        self
+    }
+
+    /// Whether the try comes from a browser the account is known by.
+    pub(crate) fn is_known(&self) -> bool {
+        self.device.is_some()
     }
 
     /// Refuses a try that comes after too many wrong ones, before anything is
@@ -461,7 +505,10 @@ impl Trying {
             self.from
                 .as_ref()
                 .and_then(|from| limits.wait(from, TRIES_FROM_AN_ADDRESS)),
-            limits.wait(&self.account, TRIES_AT_AN_ACCOUNT),
+            match &self.device {
+                Some(device) => limits.wait(device, TRIES_FROM_AN_ADDRESS),
+                None => limits.wait(&self.account, TRIES_AT_AN_ACCOUNT),
+            },
         ];
         match waits.into_iter().flatten().max() {
             Some(wait) => Err(Problem::TooMany(wait)),
@@ -470,17 +517,18 @@ impl Trying {
     }
 
     pub(crate) fn failed(&self, limits: &Limiter) {
-        if let Some(from) = &self.from {
-            limits.failed(from);
+        for who in [&self.from, &self.device].into_iter().flatten() {
+            limits.failed(who);
         }
         limits.failed(&self.account);
     }
 
-    /// The address has got it right, and starts afresh. What the account has
-    /// been failed at by others still counts.
+    /// The address has got it right, and so has the browser: both start
+    /// afresh. What the account has been failed at by others still counts,
+    /// for whoever is not known to it.
     pub(crate) fn passed(&self, limits: &Limiter) {
-        if let Some(from) = &self.from {
-            limits.passed(from);
+        for who in [&self.from, &self.device].into_iter().flatten() {
+            limits.passed(who);
         }
     }
 }
@@ -547,7 +595,7 @@ async fn setup(
     }
     let username = valid_username(&request.username)?.to_owned();
     valid_password(&request.password)?;
-    let hash = blocking(move || auth::hash_password(&request.password)).await??;
+    let hash = auth::hash(request.password).await?;
 
     // One statement, so that two people finishing setup at the same moment
     // cannot both come away with an account.
@@ -569,7 +617,7 @@ async fn setup(
         owner: true,
     };
     audit::record(&state.db, &user, None, "account.setup", "").await;
-    sign_in(&state, user).await
+    sign_in(&state, user, false).await
 }
 
 #[utoipa::path(
@@ -584,9 +632,12 @@ async fn setup(
 async fn login(
     State(state): State<AppState>,
     client: Client,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response, Problem> {
-    let trying = Trying::new(client, &request.username);
+    let trying = Trying::new(client, &request.username)
+        .known(&state.db, &request.username, &headers)
+        .await;
     trying.may(&state.limits)?;
     let found: Option<(i64, String, String, bool)> =
         sqlx::query_as("SELECT id, username, password_hash, owner FROM users WHERE username = ?")
@@ -606,14 +657,7 @@ async fn login(
     };
     // An unknown name costs the same work as a wrong password, so how long the
     // answer takes does not say which of the two it was.
-    let correct = blocking(move || {
-        static NOBODY: OnceLock<String> = OnceLock::new();
-        let hash = hash
-            .as_ref()
-            .unwrap_or_else(|| NOBODY.get_or_init(|| auth::hash_password("").unwrap_or_default()));
-        auth::verify_password(&request.password, hash)
-    })
-    .await?;
+    let correct = auth::verify(request.password, hash).await?;
     let from = client.0.to_string();
     let user = match user {
         Some(user) if correct => user,
@@ -652,7 +696,8 @@ async fn login(
         .execute(&state.db)
         .await?;
     audit::record(&state.db, &user, None, "account.sign_in", &from).await;
-    sign_in(&state, user).await
+    let known = trying.is_known();
+    sign_in(&state, user, known).await
 }
 
 #[utoipa::path(post, path = "/api/v1/logout", responses((status = NO_CONTENT, description = "Signed out.")))]
@@ -665,12 +710,23 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
             .bind(auth::token_hash(token))
             .execute(&state.db)
             .await?;
+        state.taken_away();
     }
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, auth::cookie("", 0))]).into_response())
 }
 
-/// Starts a session for `user` and answers with its cookie.
-pub(crate) async fn sign_in(state: &AppState, user: User) -> Result<Response, Problem> {
+/// How many browsers an account is known by at once. One more, and the
+/// oldest is forgotten.
+const MOST_DEVICES: i64 = 20;
+
+/// Starts a session for `user` and answers with its cookie. A browser the
+/// account was not `known` by is given a second cookie, by which it is known
+/// from now on (`Trying::known`).
+pub(crate) async fn sign_in(
+    state: &AppState,
+    user: User,
+    known: bool,
+) -> Result<Response, Problem> {
     let token = auth::new_token();
     let now = auth::now();
     sqlx::query(
@@ -682,17 +738,47 @@ pub(crate) async fn sign_in(state: &AppState, user: User) -> Result<Response, Pr
     .bind(now + auth::SESSION_SECONDS)
     .execute(&state.db)
     .await?;
+    let device = match known {
+        true => None,
+        false => {
+            let device = auth::new_token();
+            sqlx::query(
+                "INSERT INTO known_devices (token_hash, user_id, created_at) VALUES (?, ?, ?)",
+            )
+            .bind(auth::token_hash(&device))
+            .bind(user.id)
+            .bind(now)
+            .execute(&state.db)
+            .await?;
+            sqlx::query(
+                "DELETE FROM known_devices WHERE user_id = ?1 AND token_hash NOT IN (
+                     SELECT token_hash FROM known_devices WHERE user_id = ?1
+                     ORDER BY created_at DESC, token_hash LIMIT ?2)",
+            )
+            .bind(user.id)
+            .bind(MOST_DEVICES)
+            .execute(&state.db)
+            .await?;
+            Some(device)
+        }
+    };
     let session = Session {
         setup_required: false,
         user: Some(user),
         version: VERSION,
         sftp_port: state.sftp_port,
     };
-    Ok((
+    let mut response = (
         [(SET_COOKIE, auth::cookie(&token, auth::SESSION_SECONDS))],
         Json(session),
     )
-        .into_response())
+        .into_response();
+    if let Some(device) = device {
+        response
+            .headers_mut()
+            .append(SET_COOKIE, auth::device_cookie(&device));
+    }
+    Ok(response)
 }
 
 pub(crate) async fn has_users(db: &SqlitePool) -> Result<bool, sqlx::Error> {
@@ -703,15 +789,25 @@ pub(crate) async fn has_users(db: &SqlitePool) -> Result<bool, sqlx::Error> {
 }
 
 async fn current_user(db: &SqlitePool, headers: &HeaderMap) -> Result<Option<User>, sqlx::Error> {
-    let Some(token) = auth::token_from(headers) else {
-        return Ok(None);
-    };
+    match auth::token_from(headers) {
+        Some(token) => signed_in_by(db, &auth::token_hash(token)).await,
+        None => Ok(None),
+    }
+}
+
+/// Whom a session's token signs in, by its hash. Asked with every request,
+/// and again by what stays open after one when something is taken from an
+/// account (`AppState::taken`).
+pub(crate) async fn signed_in_by(
+    db: &SqlitePool,
+    token_hash: &[u8],
+) -> Result<Option<User>, sqlx::Error> {
     let found: Option<(i64, String, bool)> = sqlx::query_as(
         "SELECT users.id, users.username, users.owner
          FROM sessions JOIN users ON users.id = sessions.user_id
          WHERE sessions.token_hash = ? AND sessions.expires_at > ?",
     )
-    .bind(auth::token_hash(token))
+    .bind(token_hash)
     .bind(auth::now())
     .fetch_optional(db)
     .await?;

@@ -11,7 +11,7 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Response,
     routing::get,
 };
@@ -322,7 +322,23 @@ impl Checked {
     /// Refuses a port that another server has. The database would refuse the
     /// first port by itself; the further ones it does not know one by one.
     async fn free(&self, db: &SqlitePool, except: Option<i64>) -> Result<(), Problem> {
-        match clash(db, except, &self.numbers()).await? {
+        // Nor the port a VPS keeps its tunnel on. Forwarded, it would send the
+        // tunnel into itself, and the VPS refuses all it is asked to forward
+        // rather than that.
+        let tunnels: Vec<i64> = sqlx::query_scalar("SELECT wg_port FROM gates")
+            .fetch_all(db)
+            .await?;
+        let numbers = self.numbers();
+        if let Some(port) = numbers
+            .iter()
+            .find(|port| tunnels.contains(&i64::from(**port)))
+        {
+            return Err(Problem::Invalid(
+                format!("Port {port} is the one a VPS keeps its tunnel to this Homewarp on.")
+                    .into(),
+            ));
+        }
+        match clash(db, except, &numbers).await? {
             Some(port) => Err(Problem::Conflict(
                 format!("Port {port} belongs to another server.").into(),
             )),
@@ -718,17 +734,35 @@ async fn change_server(
         "Stop this server before changing it.",
     ));
     accounts::may(&state.db, &who, id, Some(Permission::Settings)).await?;
-    let found: Option<(String, String, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT servers.uuid, templates.definition, servers.installed, servers.gate_id
+    type Row = (String, String, i64, Option<i64>, i64, String, String);
+    let found: Option<Row> = sqlx::query_as(
+        "SELECT servers.uuid, templates.definition, servers.installed, servers.gate_id,
+                servers.port, servers.protocol, servers.ports
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
-    let (uuid, definition, installed, has) = found.ok_or(MISSING)?;
+    let (uuid, definition, installed, has, port, protocol, ports) = found.ok_or(MISSING)?;
     let template = templates::read(&definition)?;
     let checked = check(&template, settings)?.apart(&state)?;
+    // Where it is reached is the owner's to say. A port is opened on this
+    // machine and forwarded by a VPS, where it takes the place of whatever
+    // else that machine has on it: an account that may change the rest of a
+    // server leaves its ports, and the VPS it is reached through, as they are.
+    let as_it_is = i64::from(checked.port) == port
+        && checked.protocol.as_str() == protocol
+        && serde_json::from_str::<Vec<ExtraPort>>(&ports)
+            .ok()
+            .as_deref()
+            == Some(checked.ports.as_slice())
+        && checked.gate_id.is_none_or(|asked| Some(asked) == has);
+    if !who.owner && !as_it_is {
+        return Err(Problem::Forbidden(
+            "Only the owner of this Homewarp changes a server's ports, or the VPS it is reached through.",
+        ));
+    }
     // A running server was started as it was. Changed under itself, it would
     // no longer be what is written down for it.
     if state
@@ -980,12 +1014,40 @@ async fn follow_server(
     SignedIn(who): SignedIn,
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, Problem> {
     accounts::may(&state.db, &who, id, None).await?;
     let runtime = state.runtime.clone().ok_or(NO_DOCKER)?;
     let (snapshot, events) = runtime.follow(id).ok_or(MISSING)?;
-    Ok(upgrade.on_upgrade(move |socket| follow(socket, runtime, id, snapshot, events)))
+    let following = Following {
+        db: state.db.clone(),
+        session: crate::auth::token_from(&headers).map(crate::auth::token_hash),
+        taken: state.taken.subscribe(),
+    };
+    Ok(upgrade.on_upgrade(move |socket| follow(socket, runtime, id, snapshot, events, following)))
+}
+
+/// What a socket asks again by, whether whoever opened it may still look:
+/// their session, and where to hear that something was taken from an account.
+struct Following {
+    db: SqlitePool,
+    session: Option<Vec<u8>>,
+    taken: broadcast::Receiver<()>,
+}
+
+impl Following {
+    /// Whether the session that opened the socket is still one, of an account
+    /// that may still look at the server.
+    async fn may_still(&self, server_id: i64) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        match crate::api::signed_in_by(&self.db, session).await {
+            Ok(Some(who)) => accounts::may(&self.db, &who, server_id, None).await.is_ok(),
+            _ => false,
+        }
+    }
 }
 
 async fn follow(
@@ -994,9 +1056,11 @@ async fn follow(
     id: i64,
     snapshot: Event,
     mut events: broadcast::Receiver<Event>,
+    mut following: Following,
 ) {
     let (mut page, mut from_page) = socket.split();
     let mut next = Some(snapshot);
+    let mut listening = true;
     loop {
         if let Some(event) = next.take() {
             let Ok(json) = serde_json::to_string(&event) else {
@@ -1018,6 +1082,16 @@ async fn follow(
                 }
                 // The server has been removed.
                 Err(RecvError::Closed) => break,
+            },
+            // Something was taken from some account. If it was from the one
+            // this socket was opened by, the socket is closed.
+            told = following.taken.recv(), if listening => match told {
+                Err(RecvError::Closed) => listening = false,
+                _ => {
+                    if !following.may_still(id).await {
+                        break;
+                    }
+                }
             },
             // Read only so that the page's leaving is noticed.
             message = from_page.next() => match message {

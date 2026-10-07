@@ -2339,3 +2339,416 @@ fn the_api_description_in_web_is_current() {
     let committed = include_str!("../../../web/openapi.json");
     assert_eq!(committed.trim(), openapi().to_pretty_json().unwrap().trim());
 }
+
+/// A sign-in as it comes from one address, with the cookies a browser there
+/// holds: the status, and every cookie the answer sets.
+async fn sign_in_from(
+    panel: &Panel,
+    from: [u8; 4],
+    password: &str,
+    cookies: &str,
+) -> (StatusCode, Vec<String>) {
+    use axum::extract::ConnectInfo;
+    use homewarp_core::Client;
+
+    let body = json!({ "username": "alice", "password": password });
+    let mut request = Request::post("/api/v1/login")
+        .header(CONTENT_TYPE, "application/json")
+        .header(COOKIE, cookies)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(Client(std::net::IpAddr::from(from))));
+    let response = panel.app.clone().oneshot(request).await.unwrap();
+    let set = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|cookie| cookie.to_str().unwrap().to_owned())
+        .collect();
+    (response.status(), set)
+}
+
+#[tokio::test]
+async fn wrong_tries_from_elsewhere_do_not_keep_a_known_browser_out() {
+    let panel = panel().await;
+    panel.set_up().await;
+    // A first sign-in makes the browser known: it is given a cookie for that,
+    // which goes back with sign-ins and with nothing else.
+    let (status, set) = sign_in_from(&panel, [198, 51, 100, 7], PASSWORD, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(set.len(), 2, "{set:?}");
+    assert!(set[0].starts_with("homewarp_session="));
+    assert!(set[1].starts_with("homewarp_device="), "{}", set[1]);
+    assert!(set[1].contains("; HttpOnly; SameSite=Strict; Path=/api/v1/login; "));
+    let known = set[1].split(';').next().unwrap().to_owned();
+
+    // Twenty wrong tries at the account, each from an address of its own.
+    for last in 1..=20 {
+        let (status, _) = sign_in_from(&panel, [203, 0, 113, last], "not the password", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "try {last}");
+    }
+    // A browser the account is not known by now waits, right password or not.
+    let (status, set) = sign_in_from(&panel, [198, 51, 100, 8], PASSWORD, "").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(set.is_empty());
+    // A cookie that is nobody's is no better.
+    let made_up =
+        "homewarp_device=0000000000000000000000000000000000000000000000000000000000000000";
+    let (status, _) = sign_in_from(&panel, [198, 51, 100, 9], PASSWORD, made_up).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // The owner's own browser is let in, and is not made known a second time.
+    let (status, set) = sign_in_from(&panel, [198, 51, 100, 10], PASSWORD, &known).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(set.len(), 1, "{set:?}");
+
+    // It is counted by itself, though: whoever has it guesses no faster with it.
+    for last in 30..35 {
+        let (status, _) = sign_in_from(&panel, [203, 0, 113, last], "a guess", &known).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = sign_in_from(&panel, [198, 51, 100, 11], PASSWORD, &known).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// Makes the account `sam`, lets it into server 1 for `permissions`, signs it
+/// in and returns its id and its cookie.
+async fn sam(panel: &Panel, owner: Option<&str>, permissions: Value) -> (i64, String) {
+    let password = "another long password";
+    let new = json!({ "username": "sam", "password": password });
+    let made = panel.post("/api/v1/users", new.clone(), owner).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    let id = made.body["id"].as_i64().unwrap();
+    let grant = json!({ "permissions": permissions });
+    let let_in = panel
+        .put(&format!("/api/v1/servers/1/users/{id}"), grant, owner)
+        .await;
+    assert_eq!(let_in.status, StatusCode::NO_CONTENT, "{}", let_in.body);
+    let signed_in = panel.post("/api/v1/login", new, None).await;
+    assert_eq!(signed_in.status, StatusCode::OK, "{}", signed_in.body);
+    (id, signed_in.cookie())
+}
+
+#[tokio::test]
+async fn a_schedule_does_only_what_whoever_set_it_may_do_by_hand() {
+    let panel = panel().await;
+    let owner = panel.set_up().await;
+    let owner = Some(owner.as_str());
+    panel.a_server().await;
+    let (id, cookie) = sam(&panel, owner, json!(["schedules"])).await;
+    let sam = Some(cookie.as_str());
+    let schedules = "/api/v1/servers/1/schedules";
+    let grant = format!("/api/v1/servers/1/users/{id}");
+    let with = |tasks: Value| json!({ "name": "Nightly", "cron": "0 4 * * *", "utc_offset": 0, "enabled": true, "tasks": tasks });
+    let refused = "Your account has not been let do, with this server, what that schedule does.";
+
+    // Let set schedules and nothing else, it can set none that does anything
+    // it may not do by hand: each kind of task asks for what doing it asks.
+    for task in [
+        json!({ "action": "command", "command": "op sam" }),
+        json!({ "action": "kill" }),
+        json!({ "action": "restart" }),
+        json!({ "action": "backup" }),
+    ] {
+        let answer = panel.post(schedules, with(json!([task])), sam).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::FORBIDDEN,
+            "{task}: {}",
+            answer.body
+        );
+        assert_eq!(answer.body["error"], refused);
+    }
+    assert_eq!(panel.get(schedules, owner).await.body, json!([]));
+
+    // Let type commands as well, it may have a schedule type them, and no more.
+    let more = json!({ "permissions": ["console", "schedules"] });
+    assert_eq!(
+        panel.put(&grant, more.clone(), owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let typing = json!([{ "action": "command", "command": "say hi" }]);
+    let made = panel.post(schedules, with(typing.clone()), sam).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    let one = format!("{schedules}/{}", made.body["id"]);
+    let both = json!([{ "action": "command", "command": "say hi" }, { "action": "stop" }]);
+    for answer in [
+        panel.post(schedules, with(both.clone()), sam).await,
+        panel.put(&one, with(both), sam).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+    }
+    // One the owner set to do more is not its to set off.
+    let killing = panel
+        .post(schedules, with(json!([{ "action": "kill" }])), owner)
+        .await;
+    assert_eq!(killing.status, StatusCode::CREATED, "{}", killing.body);
+    let owners = format!("{schedules}/{}", killing.body["id"]);
+    let set_off = panel.post(&format!("{owners}/run"), json!({}), sam).await;
+    assert_eq!(set_off.status, StatusCode::FORBIDDEN, "{}", set_off.body);
+    assert_eq!(
+        panel
+            .post(&format!("{one}/run"), json!({}), sam)
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+
+    // No longer let type commands, its schedule that does is switched off,
+    // and says why. The owner's is as it was.
+    let of = |all: &Value, id: &Value| {
+        let found = all.as_array().unwrap().iter().find(|one| one["id"] == *id);
+        found.unwrap().clone()
+    };
+    let less = json!({ "permissions": ["schedules"] });
+    assert_eq!(
+        panel.put(&grant, less, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let listed = panel.get(schedules, owner).await.body;
+    let sams = of(&listed, &made.body["id"]);
+    assert_eq!(sams["enabled"], false);
+    assert_eq!(sams["next_run_at"], Value::Null);
+    assert_eq!(
+        sams["last_result"],
+        "Switched off: the account that set it may no longer do this with this server."
+    );
+    assert_eq!(of(&listed, &killing.body["id"])["enabled"], true);
+    let set_off = panel.post(&format!("{one}/run"), json!({}), sam).await;
+    assert_eq!(set_off.status, StatusCode::FORBIDDEN);
+
+    // Let again, it switches it on again; taken out of the server, it is off.
+    assert_eq!(
+        panel.put(&grant, more, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let on_again = panel.put(&one, with(typing), sam).await;
+    assert_eq!(on_again.status, StatusCode::OK, "{}", on_again.body);
+    assert_eq!(on_again.body["enabled"], true);
+    assert_eq!(
+        panel.delete(&grant, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let listed = panel.get(schedules, owner).await.body;
+    assert_eq!(of(&listed, &made.body["id"])["enabled"], false);
+    assert_eq!(of(&listed, &killing.body["id"])["enabled"], true);
+}
+
+#[tokio::test]
+async fn where_a_server_is_reached_is_the_owners_to_change() {
+    let panel = panel().await;
+    let owner = panel.set_up().await;
+    let owner = Some(owner.as_str());
+    // A server whose template can be read, as one that was made here has.
+    let imported = panel
+        .post("/api/v1/templates", json!({ "egg": EGG }), owner)
+        .await;
+    assert_eq!(imported.status, StatusCode::CREATED, "{}", imported.body);
+    sqlx::query(
+        "INSERT INTO servers
+             (uuid, name, template_id, image, memory_mb, cpu_percent, port, variables, eula,
+              installed, created_at)
+         VALUES ('a-server', 'Survival', 1, 'example.invalid/java:21', 1024, 0, 25565, '[]', 0,
+                 1, 0)",
+    )
+    .execute(&panel.db)
+    .await
+    .unwrap();
+    let (_, cookie) = sam(&panel, owner, json!(["settings"])).await;
+    let sam = Some(cookie.as_str());
+    let server = "/api/v1/servers/1";
+    let asked = |name: &str, port: u16, ports: Value| json!({ "name": name, "memory_mb": 2048, "port": port, "ports": ports });
+
+    // The rest of a server it may change, with the ports left as they are.
+    let renamed = panel
+        .put(server, asked("Mine", 25565, json!([])), sam)
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    assert_eq!(renamed.body["name"], "Mine");
+    assert_eq!(renamed.body["memory_mb"], 2048);
+    // Its ports it may not: they are opened on this machine and on a VPS.
+    for moved in [
+        asked("Mine", 8080, json!([])),
+        asked("Mine", 25565, json!([{ "port": 8080, "protocol": "udp" }])),
+        json!({ "name": "Mine", "memory_mb": 2048, "port": 25565, "protocol": "tcp" }),
+    ] {
+        let answer = panel.put(server, moved, sam).await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+        assert_eq!(
+            answer.body["error"],
+            "Only the owner of this Homewarp changes a server's ports, or the VPS it is reached through."
+        );
+    }
+    let further = json!([{ "port": 8080, "protocol": "udp" }]);
+    let moved = panel
+        .put(server, asked("Mine", 25570, further.clone()), owner)
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+    assert_eq!(moved.body["port"], 25570);
+    // And then the account leaves them as the owner set them.
+    let kept = panel.put(server, asked("Ours", 25570, further), sam).await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
+
+    // Nobody gives a server the port a VPS keeps its tunnel on.
+    sqlx::query(
+        "INSERT INTO gates
+             (tunnel, name, address, wg_port, api_port, private_key, gate_public_key,
+              preshared_key, token, join_token, join_expires_at, mode, created_at)
+         VALUES (0, 'Frankfurt', '203.0.113.10', 51820, 4857, 'k', 'g', 'p', 't', 'j', 0,
+                 'transparent', 0)",
+    )
+    .execute(&panel.db)
+    .await
+    .unwrap();
+    for ports in [(51820, json!([])), (25570, json!([{ "port": 51820 }]))] {
+        let answer = panel
+            .put(server, asked("Ours", ports.0, ports.1), owner)
+            .await;
+        assert_eq!(
+            answer.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            answer.body
+        );
+        assert_eq!(
+            answer.body["error"],
+            "Port 51820 is the one a VPS keeps its tunnel to this Homewarp on."
+        );
+    }
+}
+
+/// An SFTP client that takes whatever key the server shows: the server is
+/// this test's own.
+struct AnyKey;
+
+impl russh::client::Handler for AnyKey {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+/// An SFTP session at `at` as `user`, or nothing if the sign-in is refused or
+/// nothing is listening there yet.
+async fn sftp_as(
+    at: &str,
+    user: &str,
+    password: &str,
+) -> Option<(
+    russh::client::Handle<AnyKey>,
+    russh_sftp::client::SftpSession,
+)> {
+    let stream = tokio::net::TcpStream::connect(at).await.ok()?;
+    let config = std::sync::Arc::new(russh::client::Config::default());
+    let mut handle = russh::client::connect_stream(config, stream, AnyKey)
+        .await
+        .ok()?;
+    let signed_in = handle.authenticate_password(user, password).await.ok()?;
+    if !signed_in.success() {
+        return None;
+    }
+    let channel = handle.channel_open_session().await.ok()?;
+    channel.request_subsystem(true, "sftp").await.ok()?;
+    let session = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .ok()?;
+    Some((handle, session))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_sftp_connection_ends_when_what_let_it_in_is_taken_away() {
+    const AT: &str = "127.0.0.1:42022";
+    let password = "another long password";
+    let files = tempfile::tempdir().unwrap();
+    let db = open(&files.path().join("homewarp.db")).await.unwrap();
+    let state = AppState::start(db.clone(), files.path(), None)
+        .await
+        .unwrap();
+    let setup_code = state.setup_code().unwrap().to_owned();
+    tokio::spawn(homewarp_core::serve_sftp(state.clone(), AT.to_owned()));
+    let panel = Panel {
+        app: app(state),
+        setup_code,
+        db,
+        files,
+    };
+    let owner = panel.set_up().await;
+    let owner = Some(owner.as_str());
+    let folder = panel.a_server().await;
+    let (id, _) = sam(&panel, owner, json!(["files"])).await;
+    let grant = format!("/api/v1/servers/1/users/{id}");
+
+    // Signed in while it may, it reads and writes.
+    let connect = || async {
+        for _ in 0..50 {
+            if let Some(connected) = sftp_as(AT, "sam.1", password).await {
+                return connected;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("no SFTP session");
+    };
+    // Whether the connection still writes: a moment is given for it to have been let go of.
+    let writes = |session: russh_sftp::client::SftpSession, name: &'static str| async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let wrote = tokio::time::timeout(Duration::from_secs(15), session.create(name)).await;
+        matches!(wrote, Ok(Ok(_)))
+    };
+    let (_first, session) = connect().await;
+    assert!(session.create("before.txt").await.is_ok());
+    assert!(folder.join("before.txt").exists());
+
+    // No longer let touch the files, the connection it had open is closed.
+    let looking = json!({ "permissions": [] });
+    assert_eq!(
+        panel.put(&grant, looking, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert!(!writes(session, "after-files-were-taken.txt").await);
+    assert!(!folder.join("after-files-were-taken.txt").exists());
+    assert!(sftp_as(AT, "sam.1", password).await.is_none());
+
+    // Let again, and then taken out of the server altogether.
+    let again = json!({ "permissions": ["files"] });
+    assert_eq!(
+        panel.put(&grant, again.clone(), owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let (_second, session) = connect().await;
+    assert_eq!(
+        panel.delete(&grant, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert!(!writes(session, "after-turned-out.txt").await);
+    assert!(!folder.join("after-turned-out.txt").exists());
+
+    // Let again, and given another password by the owner.
+    assert_eq!(
+        panel.put(&grant, again, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let (_third, session) = connect().await;
+    let new = json!({ "password": "a third long password" });
+    let reset = panel
+        .put(&format!("/api/v1/users/{id}/password"), new, owner)
+        .await;
+    assert_eq!(reset.status, StatusCode::NO_CONTENT);
+    assert!(!writes(session, "after-another-password.txt").await);
+    assert!(!folder.join("after-another-password.txt").exists());
+
+    // What somebody else is taken out of is nothing to a connection that still may.
+    let (_fourth, session) = sftp_as(AT, "sam.1", "a third long password").await.unwrap();
+    let other = json!({ "username": "pat", "password": password });
+    let made = panel.post("/api/v1/users", other, owner).await;
+    let removed = panel
+        .delete(&format!("/api/v1/users/{}", made.body["id"]), owner)
+        .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    assert!(writes(session, "still-in.txt").await);
+    assert!(folder.join("still-in.txt").exists());
+}

@@ -546,6 +546,53 @@ because of the reading; they are marked *changed*.
 | Join token leaks | Holds. The lab checks that the key and the token the command carried open nothing afterwards. | |
 | Home IP leaks through the game server | Not built. What a server sends out leaves by the home's own line, which the lab shows. A game that announces itself to a public list announces the home's address there. | Phase 7: servers' own traffic out through the Gate. |
 
+### Audited (2026-10-07)
+
+Read once more from the outside in, with a method made for it (Cloudflare's
+security-audit-skill; one reviewer, source first, proofs run in a container with no
+network). The parts that face strangers held: sessions, the same-site check, the second
+step, passkeys, what Core fetches, file downloads, the Gate's own door, the containers.
+Eight things one step further in did not, and were changed:
+
+- *A schedule did what its maker could not do by hand.* Setting schedules asked for that
+  one permission, and a schedule's tasks typed commands, killed the server and made
+  backups with no more asked. Each task now asks for what doing it by hand asks, when a
+  schedule is made, changed and set off. A schedule knows whose it is, and is switched
+  off, saying why, when that account is taken out of the server or loses what a task needs.
+- *What was open stayed open.* An SFTP connection, and a console's socket, were let in
+  once and never asked again. Whatever takes something from an account (a server, a
+  permission, a password, a session) is now said aloud inside Core; each open connection
+  asks again whether it still may, and is ended if not.
+- *Wrong tries by others shut an account's owner out.* Twenty at one account made every
+  sign-in at it wait, the right password included. A browser that has signed in to an
+  account is now known by a cookie of its own, and is counted by itself: others' wrong
+  tries do not keep it out, and whoever has it guesses no faster with it.
+- *Every sign-in hashed at once.* Each try, right or wrong, by anybody, began an Argon2
+  computation with nothing bounding how many ran. Four run at a time now and the rest
+  wait their turn, ten seconds at the most.
+- *A release's signed list did not say which release it was of.* Every list is signed and
+  names the same files, so an older release could be served as a newer one. The version
+  is among what is listed now (a file `VERSION`), and Core and both install scripts hold
+  the list against the version they asked for. A list without it is refused.
+- *The signing key sat on the runner while other people's code ran there.* The release
+  workflow is three jobs now: one reads the public half of the key, one builds with
+  neither the key nor leave to write to the repository, one signs what was built with
+  this repository's own script and publishes. Actions are pinned to commits.
+- *A server's port was anybody's with Settings.* It is opened on this machine and
+  forwarded by a VPS, in place of whatever else that machine has on it. Ports, and the VPS
+  a server is reached through, are the owner's alone to change now, and nobody gives a
+  server the port a VPS keeps its tunnel on.
+- *What an account typed went to chat as a message.* A schedule's name, a command: sent
+  to a webhook as Homewarp's own words. Discord is now told to mention nobody for it,
+  and Slack is given its three marks written out.
+
+Left as it is, and worth knowing: a console's socket is asked again only when something
+is taken away, not on a timer; a flood of sign-ins can still fill the four turns and
+make an honest one wait or be told to come back; a browser nobody has signed in from is
+still shut out with the account for five minutes; a webhook still shows a link somebody
+typed as a link. The tunnel's enrolment, eggs, backups and the store, the certificate
+and the way servers are started and put to sleep were not read in that pass.
+
 ## 7. Performance
 
 - Forwarding is in-kernel on both ends; the Rust processes are control plane only and

@@ -118,6 +118,15 @@ impl Version {
         let before = match before {
             None => Before::Nothing,
             Some("") => return None,
+            // Letters, digits and hyphens between the dots, as versions are
+            // written: a version goes into addresses, and into a script.
+            Some(before)
+                if !before.split('.').all(|part| {
+                    !part.is_empty() && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                }) =>
+            {
+                return None;
+            }
             Some(before) => Before::Release(
                 before
                     .split('.')
@@ -518,6 +527,15 @@ fn checksum_of<'a>(sums: &'a str, file: &str) -> Option<&'a str> {
     })
 }
 
+/// Whether a release's signed list of checksums is the list of this version
+/// and of no other. Every release's list is signed and names the same files,
+/// so the version is among what is listed: the checksum of a file `VERSION`
+/// that holds its number and a line break (scripts/release.sh).
+fn is_of(sums: &str, version: &str) -> bool {
+    let named = hex(&Sha256::digest(format!("{version}\n")));
+    checksum_of(sums, "VERSION").is_some_and(|sum| sum.eq_ignore_ascii_case(&named))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -553,6 +571,10 @@ async fn update(state: &AppState, to: &str, servers: bool) -> anyhow::Result<()>
     );
     let file = program()?;
     let sums = String::from_utf8_lossy(&sums).into_owned();
+    ensure!(
+        is_of(&sums, to),
+        "the list of checksums served for {to} is not that version's own. Nothing was changed"
+    );
     let wanted = checksum_of(&sums, file)
         .with_context(|| format!("the release {to} has no {file}"))?
         .to_lowercase();
@@ -851,7 +873,25 @@ async fn install_update(
 
 #[cfg(test)]
 mod tests {
-    use super::{Channel, Listed, SCRIPT, Version, checksum_of, end_of, hex, newer, signed};
+    use super::{Channel, Listed, SCRIPT, Version, checksum_of, end_of, hex, is_of, newer, signed};
+
+    #[test]
+    fn a_list_of_checksums_is_of_the_version_it_names_and_of_no_other() {
+        // As `sha256sum homewarp-* VERSION` writes it, for a VERSION that holds "1.1.0\n".
+        let named = hex(&<sha2::Sha256 as sha2::Digest>::digest(b"1.1.0\n"));
+        let sums = format!("ade76660c2d5  homewarp-x86_64\n{named}  VERSION\n");
+        assert!(is_of(&sums, "1.1.0"));
+        // An older release's list, served in a newer one's place.
+        assert!(!is_of(&sums, "1.2.0"));
+        // A list from before versions were listed says nothing of which it is.
+        assert!(!is_of("ade76660c2d5  homewarp-x86_64\n", "1.1.0"));
+        // What goes into an address and a script is a version and nothing else.
+        for odd in ["1.2.0-beta';id;'", "1.2.0-a/b", "1.2.0-a..b", "1.2.0-a$b"] {
+            assert_eq!(Version::read(odd), None, "{odd}");
+        }
+        assert!(Version::read("1.2.0-beta.1").is_some());
+        assert!(Version::read("1.2.0-rc-2").is_some());
+    }
 
     #[test]
     fn versions_are_ordered_as_releases_are_numbered() {

@@ -9,14 +9,21 @@
 #
 # The tag has to be made from a commit that is on main, and its number has to be
 # the one in Cargo.toml.
+#
+# It is three jobs, so that the signing key and what builds the programs never
+# meet. Building runs other people's code: every package the web interface and
+# the programs are made of, and whatever those run while they are installed and
+# compiled. No step of that job has the key, or a token that can write to this
+# repository. The job that signs runs this repository's own release script on
+# what was built, and nothing else.
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+# Each job is given what it needs, and no more.
+permissions: {}
 
 # Two releases at once would push to gh-pages over one another.
 concurrency:
@@ -24,46 +31,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # The public half of the signing key, which Core is built with: what an
+  # installed Homewarp holds the list of releases, and a newer release, against.
+  # Nothing runs here but openssl, and the key goes into no file.
+  key:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 5
     # An environment called release can hold the secret and say who may use it.
     environment: release
+    outputs:
+      public: ${{ steps.public.outputs.public }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: The tag, the version and the channel
-        run: |
-          set -eu
-          tag=$GITHUB_REF_NAME
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::$tag is not a version tag such as v1.2.0 or v1.2.0-beta.1"; exit 1 ;;
-          esac
-          version=${tag#v}
-          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [ "$crate" != "$version" ]; then
-            echo "::error::The tag says $version and Cargo.toml says $crate. Set the version, commit it, and tag that commit."
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$tag is not on main. A release is signed, so it is made from main."
-            exit 1
-          fi
-          case "$version" in
-            *-*) channel=beta ;;
-            *) channel=stable ;;
-          esac
-          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          {
-            echo "VERSION=$version"
-            echo "CHANNEL=$channel"
-            echo "RELEASES=https://$owner.github.io/${GITHUB_REPOSITORY#*/}"
-          } >> "$GITHUB_ENV"
-
-      - name: The signing key
+      - name: The public half of the signing key
+        id: public
         env:
           RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
         run: |
@@ -72,15 +52,33 @@ jobs:
             echo "::error::The secret RELEASE_KEY is not set. It is the Ed25519 private key, in PEM (docs/releasing.md)."
             exit 1
           fi
-          umask 077
-          printf '%s\n' "$RELEASE_KEY" > "$RUNNER_TEMP/release.key"
-          # The public half, as Core is built with it: what an installed Homewarp
-          # holds the list of releases, and a newer release, against.
-          public=$(openssl pkey -in "$RUNNER_TEMP/release.key" -pubout -outform DER | tail -c 32 | base64)
-          echo "HOMEWARP_RELEASE_KEY=$public" >> "$GITHUB_ENV"
-          echo "KEY=$RUNNER_TEMP/release.key" >> "$GITHUB_ENV"
+          public=$(printf '%s\n' "$RELEASE_KEY" | openssl pkey -pubout -outform DER | tail -c 32 | base64)
+          echo "public=$public" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+  build:
+    needs: key
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      HOMEWARP_RELEASE_KEY: ${{ needs.key.outputs.public }}
+    steps:
+      # Nothing is kept of the token the checkout was made with: what is built
+      # here could read it out of the checkout otherwise.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: The key to build with
+        run: |
+          set -eu
+          if [ -z "$HOMEWARP_RELEASE_KEY" ]; then
+            echo "::error::The public half of the signing key did not arrive from the job before."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -116,35 +114,109 @@ jobs:
         run: |
           set -eu
           built=$(deploy/out/homewarp-gate version | cut -d' ' -f2)
-          if [ "$built" != "$VERSION" ]; then
-            echo "::error::The program says $built and the tag says $VERSION."
+          if [ "$built" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::The program says $built and the tag says ${GITHUB_REF_NAME#v}."
             exit 1
           fi
           docker run --rm -v "$PWD/deploy/out:/out:ro" alpine:3.20 sh -c \
             'apk add -q --no-cache qemu-aarch64 >/dev/null 2>&1 && printf "on ARM64: " && qemu-aarch64 /out/homewarp-gate-arm64 version &&
              mkdir /tmp/data && printf "on ARM64, Core: " && HOMEWARP_DATA=/tmp/data qemu-aarch64 /out/homewarp-static-arm64 two-steps-off nobody'
 
+      # The four programs, and nothing else of what this job made or changed.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: programs
+          path: |
+            deploy/out/homewarp-gate
+            deploy/out/homewarp-static
+            deploy/out/homewarp-gate-arm64
+            deploy/out/homewarp-static-arm64
+          if-no-files-found: error
+          retention-days: 1
+
+  # Signs and publishes. It starts from the repository as the tag has it, not
+  # from what the job before left behind, and takes from that job the programs
+  # alone. None of them is run here.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag, the version and the channel
+        run: |
+          set -eu
+          tag=$GITHUB_REF_NAME
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::$tag is not a version tag such as v1.2.0 or v1.2.0-beta.1"; exit 1 ;;
+          esac
+          version=${tag#v}
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$crate" != "$version" ]; then
+            echo "::error::The tag says $version and Cargo.toml says $crate. Set the version, commit it, and tag that commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag is not on main. A release is signed, so it is made from main."
+            exit 1
+          fi
+          case "$version" in
+            *-*) channel=beta ;;
+            *) channel=stable ;;
+          esac
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "VERSION=$version"
+            echo "CHANNEL=$channel"
+            echo "RELEASES=https://$owner.github.io/${GITHUB_REPOSITORY#*/}"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: programs
+          path: deploy/out
+
       # What is served already is laid over, so that the older versions stay and
       # the list keeps the line of the other channel.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: gh-pages
           path: pages
+          persist-credentials: false
 
+      # The one step that has the key. It is in a file for as long as the
+      # release script and the checks after it take, and no longer.
       - name: The release folder
+        env:
+          RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
         run: |
           set -eu
-          sh scripts/release.sh deploy/out pages "$VERSION" "$RELEASES" "$KEY" "$CHANNEL"
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$RELEASE_KEY" > "$key")
+          sh scripts/release.sh deploy/out pages "$VERSION" "$RELEASES" "$key" "$CHANNEL"
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/release.pub"
+          rm -f "$key"
           # What an installer does, done before anyone can.
           cd pages
-          openssl pkey -in "$KEY" -pubout -out "$RUNNER_TEMP/release.pub"
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/release.pub" -rawin -in RELEASES -sigfile RELEASES.sig
           cd "$VERSION"
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/release.pub" -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
           sha256sum -c SHA256SUMS
+          [ "$(cat VERSION)" = "$VERSION" ]
 
       - name: Publish on gh-pages
         working-directory: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           git config user.name "github-actions[bot]"
@@ -154,16 +226,17 @@ jobs:
             echo "gh-pages already holds this release."
           else
             git commit -q -m "Release $VERSION"
-            git push
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:gh-pages
           fi
 
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -eu
           cd "pages/$VERSION"
-          files="homewarp-x86_64 homewarp-arm64 homewarp-gate-x86_64 homewarp-gate-arm64 SHA256SUMS SHA256SUMS.sig"
+          files="homewarp-x86_64 homewarp-arm64 homewarp-gate-x86_64 homewarp-gate-arm64 VERSION SHA256SUMS SHA256SUMS.sig"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             # A run again of the same tag: the files are replaced, the text stays.
             gh release upload "$GITHUB_REF_NAME" $files --clobber
@@ -178,7 +251,3 @@ jobs:
           if [ "$CHANNEL" = beta ]; then flag=--prerelease; fi
           gh release create "$GITHUB_REF_NAME" $files \
             --verify-tag --title "Homewarp $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes $flag
-
-      - name: Take the key off the runner
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release.key" "$RUNNER_TEMP/release.pub"

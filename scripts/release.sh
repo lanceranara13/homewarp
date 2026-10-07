@@ -52,7 +52,11 @@ for needed in homewarp-x86_64 homewarp-gate-x86_64; do
   }
 done
 
-(cd "$to/$version" && sha256sum homewarp-* > SHA256SUMS)
+# The version is among what is listed, and so among what is signed: a list
+# says which release it is of, and cannot be served as another's. An installed
+# Homewarp and both install scripts hold it against the version they asked for.
+printf '%s\n' "$version" > "$to/$version/VERSION"
+(cd "$to/$version" && sha256sum homewarp-* VERSION > SHA256SUMS)
 openssl pkeyutl -sign -inkey "$key" -rawin -in "$to/$version/SHA256SUMS" -out "$to/$version/SHA256SUMS.sig"
 # What an install script holds the list against: the public half, in PEM.
 PUBLIC=$(openssl pkey -in "$key" -pubout)

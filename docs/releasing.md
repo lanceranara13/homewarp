@@ -28,7 +28,11 @@ Set up once, in the repository's Settings:
    Environments, `release`): `RELEASE_KEY`, the contents of the private key file,
    `-----BEGIN PRIVATE KEY-----` line and all.
 2. **Environments, `release`**: allow deployments from `v*` tags only, and name
-   yourself a required reviewer. A release is then one click to approve.
+   yourself a required reviewer. The workflow asks twice: before it reads the
+   public half of the key, which the programs are built with, and before it
+   signs. A release is then two clicks to approve. What builds the programs
+   runs between the two, in a job that has neither the key nor leave to write
+   to the repository.
 3. **Pages**: the source is the branch `gh-pages`, as it already is.
 
 This puts the signing key in GitHub, which the rest of this page does not. Whoever

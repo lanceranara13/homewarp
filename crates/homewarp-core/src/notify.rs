@@ -330,11 +330,21 @@ fn sentence(happened: &Happened, server: Option<&str>) -> String {
 /// What is sent: the sentence under the two names it is read by (`content` is
 /// Discord's, `text` is Slack's and Mattermost's), and the line's parts for a
 /// program that would rather have those.
+///
+/// Much of a sentence was typed by somebody: a schedule's name, a command, a
+/// file's. It is told as what they typed and not as a message of their
+/// making: Discord is to mention nobody for it, and Slack is given its three
+/// marks written out, so that none of it is read as a mention or a link.
 fn body(happened: &Happened, server: Option<&str>) -> serde_json::Value {
     let said = sentence(happened, server);
+    let written_out = said
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     json!({
         "content": said,
-        "text": said,
+        "allowed_mentions": { "parse": [] },
+        "text": written_out,
         "event": happened.action,
         "server": server,
         "by": happened.by,
@@ -541,6 +551,19 @@ mod tests {
         assert_eq!(sent["event"], "server.crash");
         assert_eq!(sent["server"], "Lobby");
         assert_eq!(sent["at"], 1_791_333_715);
+        // What somebody typed mentions nobody, and is no link of Slack's making.
+        let typed = body(
+            &happened(
+                "schedule.ran",
+                "@everyone <!channel> & <https://example.com|here>: Done.",
+            ),
+            Some("Lobby"),
+        );
+        assert_eq!(typed["allowed_mentions"]["parse"], serde_json::json!([]));
+        assert_eq!(
+            typed["text"],
+            "Lobby, schedule @everyone &lt;!channel&gt; &amp; &lt;https://example.com|here&gt;: Done."
+        );
     }
 
     #[test]

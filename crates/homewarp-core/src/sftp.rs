@@ -12,7 +12,7 @@ use std::{
     io,
     os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
@@ -29,6 +29,7 @@ use russh_sftp::protocol::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, UnixListener},
+    sync::broadcast::error::RecvError,
     time::timeout,
 };
 
@@ -138,19 +139,85 @@ async fn connection<S>(config: Arc<Config>, stream: S, state: AppState, from: Cl
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let holder = Arc::new(Mutex::new(None));
+    let mut taken = state.taken.subscribe();
     let ssh = Ssh {
-        state,
+        state: state.clone(),
         from,
         files: None,
         channels: HashMap::new(),
+        holder: Arc::clone(&holder),
     };
     let ended = match russh::server::run_stream(config, stream, ssh).await {
-        Ok(session) => session.await,
+        Ok(session) => {
+            // What ends the connection from this side. Letting go of the
+            // session would not: it goes on by itself.
+            let ending = session.handle();
+            tokio::pin!(session);
+            let mut listening = true;
+            loop {
+                tokio::select! {
+                    ended = &mut session => break ended,
+                    // Something was taken from some account. If it was from
+                    // this one, the connection is ended: being let in once
+                    // is not being let in for good.
+                    told = taken.recv(), if listening => {
+                        if matches!(told, Err(RecvError::Closed)) {
+                            listening = false;
+                            continue;
+                        }
+                        let signed_in = holder.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                        if let Some(signed_in) = signed_in
+                            && !still(&state, &signed_in).await
+                        {
+                            let said = "This account may no longer reach these files.".to_owned();
+                            let _ = ending
+                                .disconnect(russh::Disconnect::ByApplication, said, "en".to_owned())
+                                .await;
+                            break Ok(());
+                        }
+                    }
+                }
+            }
+        }
         Err(error) => Err(error),
     };
     // A scanner that hangs up half way is the usual case, and nobody's news.
     if let Err(error) = ended {
         tracing::debug!("an SFTP connection ended badly: {error:#}");
+    }
+}
+
+/// Who a connection signed in as, to which server's files, and with the
+/// password as it was kept then.
+#[derive(Clone)]
+struct Holder {
+    user_id: i64,
+    server_id: i64,
+    password_hash: String,
+}
+
+/// Whether whoever signed in to a connection would still be let in: the
+/// account is there, its password is the one it signed in with, and it may
+/// still do what the Files tab does with that server.
+async fn still(state: &AppState, holder: &Holder) -> bool {
+    let found: Result<Option<(String, String, bool)>, sqlx::Error> =
+        sqlx::query_as("SELECT username, password_hash, owner FROM users WHERE id = ?")
+            .bind(holder.user_id)
+            .fetch_optional(&state.db)
+            .await;
+    match found {
+        Ok(Some((username, password_hash, owner))) if password_hash == holder.password_hash => {
+            let who = User {
+                id: holder.user_id,
+                username,
+                owner,
+            };
+            accounts::may(&state.db, &who, holder.server_id, Some(Permission::Files))
+                .await
+                .is_ok()
+        }
+        _ => false,
     }
 }
 
@@ -163,6 +230,9 @@ struct Ssh {
     files: Option<Arc<ServerDir>>,
     /// Channels that are open and have not asked for SFTP yet.
     channels: HashMap<ChannelId, Channel<Msg>>,
+    /// Who signed in, once somebody has: for whoever watches the connection
+    /// to ask again by, when something is taken from an account.
+    holder: Arc<Mutex<Option<Holder>>>,
 }
 
 impl Ssh {
@@ -210,9 +280,10 @@ impl Ssh {
             Some(at) if two_steps && password.is_char_boundary(at) => password.split_at(at),
             _ => (password, ""),
         };
-        let password = password.to_owned();
-        let right =
-            tokio::task::spawn_blocking(move || auth::verify_password(&password, &hash)).await?;
+        // In its turn, as every password is. One that finds no turn is not let in.
+        let right = auth::verify(password.to_owned(), Some(hash.clone()))
+            .await
+            .unwrap_or(false);
         let right = right && matches!(totp::second_step(db, id, code).await?, totp::Step::Passed);
         if !right {
             trying.failed(limits);
@@ -239,6 +310,11 @@ impl Ssh {
         let (uid, gid) = files::owner();
         let files = tokio::task::spawn_blocking(move || ServerDir::open(&path, uid, gid)).await??;
         audit::record(db, &who, Some(server_id), "sftp.sign_in", &from).await;
+        *self.holder.lock().unwrap_or_else(PoisonError::into_inner) = Some(Holder {
+            user_id: id,
+            server_id,
+            password_hash: hash,
+        });
         Ok(Some(Arc::new(files)))
     }
 }

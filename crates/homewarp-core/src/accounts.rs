@@ -18,11 +18,8 @@ use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    api::{
-        AppState, Owner, Problem, ProblemBody, SignedIn, User, blocking, valid_password,
-        valid_username,
-    },
-    audit, auth,
+    api::{AppState, Owner, Problem, ProblemBody, SignedIn, User, valid_password, valid_username},
+    audit, auth, schedules,
     servers::MISSING,
     totp,
 };
@@ -228,7 +225,7 @@ async fn create_account(
 ) -> Result<(StatusCode, Json<Account>), Problem> {
     let username = valid_username(&new.username)?.to_owned();
     valid_password(&new.password)?;
-    let hash = blocking(move || auth::hash_password(&new.password)).await??;
+    let hash = auth::hash(new.password).await?;
     let created_at = auth::now();
     let inserted =
         sqlx::query("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)")
@@ -288,10 +285,13 @@ async fn remove_account(
             "The owner's account cannot be removed.".into(),
         ));
     }
+    // What it set servers to do by the clock is not done in its name once it is gone.
+    schedules::withdraw(&state.db, None, id, &[]).await?;
     sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(id)
         .execute(&state.db)
         .await?;
+    state.taken_away();
     audit::record(&state.db, &who, None, "account.remove", &username).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -323,7 +323,7 @@ async fn set_password(
         .await?;
     let username = username.ok_or(NO_ACCOUNT)?;
     valid_password(&new.password)?;
-    let hash = blocking(move || auth::hash_password(&new.password)).await??;
+    let hash = auth::hash(new.password).await?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(hash)
         .bind(id)
@@ -336,6 +336,7 @@ async fn set_password(
             .execute(&state.db)
             .await?;
     }
+    state.taken_away();
     audit::record(&state.db, &who, None, "account.password", &username).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -363,14 +364,13 @@ async fn change_own_password(
         .bind(who.id)
         .fetch_one(&state.db)
         .await?;
-    let current = asked.current;
-    if !blocking(move || auth::verify_password(&current, &hash)).await? {
+    if !auth::verify(asked.current, Some(hash)).await? {
         return Err(Problem::Forbidden(
             "That is not your password as it is now.",
         ));
     }
     valid_password(&asked.password)?;
-    let hash = blocking(move || auth::hash_password(&asked.password)).await??;
+    let hash = auth::hash(asked.password).await?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(hash)
         .bind(who.id)
@@ -382,6 +382,7 @@ async fn change_own_password(
         .bind(this.map(|hash| hash.to_vec()))
         .execute(&state.db)
         .await?;
+    state.taken_away();
     audit::record(&state.db, &who, None, "account.password", &who.username).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -484,6 +485,10 @@ async fn let_in(
     .bind(serde_json::to_string(&permissions).map_err(anyhow::Error::new)?)
     .execute(&state.db)
     .await?;
+    // What it may no longer do, it no longer does: by the clock, or over a
+    // connection it opened while it still might.
+    schedules::withdraw(&state.db, Some(id), user_id, &permissions).await?;
+    state.taken_away();
     let named: Vec<&str> = permissions.iter().map(|one| one.as_str()).collect();
     let may = if named.is_empty() {
         "looking only".to_owned()
@@ -533,6 +538,8 @@ async fn turn_out(
         .bind(user_id)
         .execute(&state.db)
         .await?;
+    schedules::withdraw(&state.db, Some(id), user_id, &[]).await?;
+    state.taken_away();
     audit::record(&state.db, &who, Some(id), "server.turn_out", &username).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -728,7 +735,7 @@ async fn end_two_steps(
         .bind(who.id)
         .fetch_one(&state.db)
         .await?;
-    if !blocking(move || auth::verify_password(&asked.password, &hash)).await? {
+    if !auth::verify(asked.password, Some(hash)).await? {
         return Err(Problem::Forbidden("That is not your password."));
     }
     without_two_steps(&state.db, who.id).await?;
