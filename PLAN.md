@@ -8,6 +8,10 @@
 > anywhere over TLS that is ended at home (tried on the owner's VPS with
 > `homewarp.apixels.net`); sign-ins are limited and take a second step or a passkey; the
 > VPS itself can be hardened on trial. §6 has the security model held against the code.
+> Phase 6 is done but for a public release, which waits for the owner (a licence, an
+> address, a signing key), and for updating by itself. Of Phase 7, "Later", five things
+> are built and tried (who is on a Minecraft server, sleep and wake, notices, mods from
+> Modrinth, a store elsewhere for backups) and four are not, each with its reason.
 
 ## 1. What it is
 
@@ -1667,6 +1671,10 @@ Each phase ends with something that works on the homelab.
       come back in a minute, and the stand-in ends, saying who it was; Core starts the
       server and writes down the name and the address. Asking wakes nothing, and
       neither does anything that is not the first packet of a login with a name in it.
+      Whoever can reach the port can send that packet, though: the stand-in has no
+      way to know a player from a stranger, which the server itself decides only once
+      it is up. A server that is woken by strangers costs a start each time, and is
+      asleep again after its minutes.
     - *Stop, of one that is asleep, keeps it down:* the stand-in goes, and nothing wakes
       it after that. Start wakes it by hand.
     - *Not Bedrock, and not other games.* Bedrock speaks over UDP, where there is no
@@ -1789,6 +1797,15 @@ Each phase ends with something that works on the homelab.
     sees the program's address and not the player's, unless it is one that reads the
     PROXY header (Paper and Velocity do, others do not). The DNS records above give a
     name to each server without that.
+  - *An importer for another panel's servers.* It would read a Pelican or Pterodactyl
+    database and a Wings node's files, and there is neither here to read: the owner's
+    old panel left a database on the VPS and no node. What can be had without one is
+    written down instead (`docs/moving.md`): the egg is imported as it is, and the
+    old panel's own backup is uploaded and unpacked. Of that, only the unpacking has
+    been done with a real archive.
+  - *More than one Gate, and more than one home.* Everything from the tunnel's
+    addresses to the one table of rules assumes one of each. It is a design of its
+    own, and not a thing to add at the end of another.
 
 ## 12. Risks
 

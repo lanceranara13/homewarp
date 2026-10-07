@@ -22,7 +22,11 @@ home address stays hidden and your router needs no setup.
 > It installs with one line on each machine from a signed release, and eggs are fetched
 > from where the community publishes them; there is no public release yet, so that line
 > has nowhere to point but a release you make yourself ([installing](docs/installing.md),
-> [releasing](docs/releasing.md)). The
+> [releasing](docs/releasing.md)). A Minecraft server shows who is on it, can be put to
+> sleep when it is empty and woken by the player who joins, and takes mods and plugins
+> from Modrinth, each checked against its checksum. Homewarp can tell a Discord or Slack
+> channel what happens while nobody is at the panel, and copy every backup to a bucket
+> elsewhere ([moving and recovering](docs/moving.md)). The
 > plan is in [PLAN.md](PLAN.md) and the interface design in [DESIGN.md](DESIGN.md).
 
 ## How it works
