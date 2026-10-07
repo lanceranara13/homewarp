@@ -69,7 +69,7 @@ banner() {
   row '██╔══██║' '██║   ██║' '██║╚██╔╝██║' '██╔══╝  ' '██║███╗██║' '██╔══██║' '██╔══██╗' '██╔═══╝ '
   row '██║  ██║' '╚██████╔╝' '██║ ╚═╝ ██║' '███████╗' '╚███╔███╔╝' '██║  ██║' '██║  ██║' '██║     '
   row '╚═╝  ╚═╝' ' ╚═════╝ ' '╚═╝     ╚═╝' '╚══════╝' ' ╚══╝╚══╝ ' '╚═╝  ╚═╝' '╚═╝  ╚═╝' '╚═╝     '
-  printf '\n  %s◆%s %sGate%s %sthe VPS end of Homewarp: players arrive here.%s\n\n' \
+  printf '\n  %s◆%s %sGate%s %s· the VPS end of Homewarp, where players arrive.%s\n\n' \
     "$accent" "$plain" "$bold" "$plain" "$dim" "$plain"
 }
 banner

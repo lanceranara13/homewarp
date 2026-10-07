@@ -131,9 +131,16 @@ good_dir() {
     *) why="a folder is written in full, starting with /."; return 1 ;;
   esac
   case "$1" in
-    */) why="leave the last / off."; return 1 ;;
     *[!A-Za-z0-9_./+-]*) why="letters, digits and . _ + - / only: Docker is given this path unquoted."; return 1 ;;
   esac
+  case "$1" in
+    *[!/]*) ;;
+    *) why="that is the whole disk: choose a folder in it."; return 1 ;;
+  esac
+}
+# A folder without the / that may have been left on the end of it.
+tidy() {
+  while [ "${DIR%/}" != "$DIR" ] && [ "$DIR" != / ]; do DIR=${DIR%/}; done
 }
 can_write() {
   place=$1
@@ -242,32 +249,46 @@ case "$(openssl version | cut -d' ' -f2)" in
 esac
 
 # A Homewarp that is running already is updated where it is, not made again
-# somewhere else beside it to fight it for its ports.
+# somewhere else beside it to fight it for its ports. Its folder and its name
+# are then not asked: a changed one would be a second Homewarp over the first's
+# servers, which docs/moving.md is about, and not what an update does.
+FOUND=0
 if [ -z "${HOMEWARP_DIR:-}" ]; then
   here=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$NAME" 2>/dev/null) || here=''
-  if [ -n "$here" ] && good_dir "$here"; then DIR=$here; fi
+  if [ -n "$here" ] && good_dir "$here"; then
+    DIR=$here
+    FOUND=1
+  fi
 fi
+tidy
+[ ! -r "$DIR/compose.yml" ] || FOUND=1
 
 if [ "$INTERACTIVE" = 1 ]; then
   heading "Setup"
   say "  Enter keeps the answer in brackets. Nothing is done until the last question."
   echo
   OLD_PORT='' OLD_SFTP_PORT='' OLD_TLS_PORT='' OLD_NAME=''
-  [ ! -r "$DIR/compose.yml" ] || {
-    step "Homewarp is installed in $DIR already: the answers are what it has now."
+  if [ "$FOUND" = 1 ]; then
+    step "Homewarp is installed in $DIR already, and is updated there: its folder and its"
+    say "    name stay as they are (docs/moving.md is about moving it). The ports are asked"
+    say "    with what it has now."
     echo
-  }
-  ask DIR HOMEWARP_DIR "Where should Homewarp keep its files?" \
-    "Everything made with it goes inside: the database, servers' worlds and backups. Pick a disk with room." folder
+  else
+    ask DIR HOMEWARP_DIR "Where should Homewarp keep its files?" \
+      "Everything made with it goes inside: the database, servers' worlds and backups. Pick a disk with room." folder
+    tidy
+  fi
   remember
   ask PORT HOMEWARP_PORT "Which port should the panel be on?" \
     "The panel is a web page: http://<this machine>:<port>. It is the one to open in a browser." open_port
   ask SFTP_PORT HOMEWARP_SFTP_PORT "Which port should SFTP be on?" \
     "Servers' files are reached over SFTP here, for uploading worlds and mods." open_port
   ask TLS_PORT HOMEWARP_TLS_PORT "Which port should the panel's TLS be on?" \
-    "Used once the panel is given a name, to serve it over https. Nothing listens for it until then." open_port
-  ask NAME HOMEWARP_NAME "What should its containers be called?" \
-    "Docker's name for them, as in docker logs <name>. Leave it unless this machine has a Homewarp already." good_name
+    "Used once the panel is given a name, to serve it over https." open_port
+  if [ "$FOUND" != 1 ]; then
+    ask NAME HOMEWARP_NAME "What should its containers be called?" \
+      "Docker's name for them, as in docker logs <name>." good_name
+  fi
 else
   remember
 fi

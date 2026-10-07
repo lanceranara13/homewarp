@@ -104,7 +104,8 @@ VPS, as root. It ends in `sh -s -- update`: the Gate that is there is replaced
 and started again, and its keys, what it forwards and its guard are as they
 were. Homewarp can run nothing on a VPS, so this is not done from the panel.
 
-**To remove it**: `cd /opt/homewarp && sudo docker compose down`, then delete
+**To remove it**: `cd /opt/homewarp && sudo docker compose down` (in the
+folder you chose, if not that one), then delete
 the servers' containers (`docker ps -a --filter label=homewarp.server`) and the
 folder. Deleting the folder deletes every server's files.
 
