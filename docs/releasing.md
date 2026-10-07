@@ -3,11 +3,48 @@
 A release is a folder that a web server serves. Whoever installs from it trusts
 one thing, a signing key, and so the key is the first thing to have.
 
+There are two ways to make one: by pushing a tag, when GitHub Actions does all of
+it (the first section below), or by hand on the machine that builds (the rest).
+
+## By a tag
+
+```sh
+# set the version in Cargo.toml (and web/openapi.json, Cargo.lock), commit it, push main
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+`.github/workflows/release.yml` then builds both programs for x86-64 and for
+ARM64, runs the ARM64 ones in an emulator, signs, checks its own signatures,
+pushes the folder to `gh-pages` and makes a GitHub Release with the same files.
+A tag with a dash in it (`v1.2.0-beta.1`) is a beta, and a prerelease on GitHub.
+It refuses a tag that is not on `main`, or whose number is not the one in
+`Cargo.toml`, so push `main` first. Run again for the same tag, it replaces what
+it made. It takes about twenty minutes.
+
+Set up once, in the repository's Settings:
+
+1. **Secrets and variables, Actions, New repository secret** (or the same under
+   Environments, `release`): `RELEASE_KEY`, the contents of the private key file,
+   `-----BEGIN PRIVATE KEY-----` line and all.
+2. **Environments, `release`**: allow deployments from `v*` tags only, and name
+   yourself a required reviewer. A release is then one click to approve.
+3. **Pages**: the source is the branch `gh-pages`, as it already is.
+
+This puts the signing key in GitHub, which the rest of this page does not. Whoever
+can run a workflow here, or has the account, can sign a release that every
+install accepts. The environment's tag rule and reviewer are what stand in the
+way of that, so use them. Keep a copy of the key somewhere that is not GitHub.
+If that is not acceptable, make releases by hand, below.
+
 ## The key, once
 
 ```sh
-ssh home 'umask 077; openssl genpkey -algorithm ed25519 -out /home/lance/homewarp/release.key'
+ssh <homelab> 'umask 077; openssl genpkey -algorithm ed25519 -out <REMOTE>/release.key'
 ```
+
+(`<homelab>` and `<REMOTE>` are what `scripts/dev.env` names: the ssh host the
+builds run on, and its folder for Homewarp. See `scripts/dev.env.example`.)
 
 It is an Ed25519 private key. Whoever has it can sign a release that every
 install script already out there will accept, so it stays with its owner: not
@@ -15,7 +52,7 @@ in the repository, and with a copy somewhere that is not the homelab. If it is
 lost, a new key means new install scripts, and machines that update with an old
 script will refuse what the new key signed, which is what they should do.
 
-## The release
+## The release, by hand
 
 ```sh
 RELEASES=https://lanceranara13.github.io/homewarp bash scripts/dev.sh release
@@ -32,7 +69,7 @@ so it has to be the real address before the release is made.
 
 On the homelab this builds the web interface, then both programs for x86-64 and
 for ARM64 as single files that need nothing installed, runs the ARM64 ones in
-an emulator to see that they start, and puts together `/home/lance/homewarp/release`:
+an emulator to see that they start, and puts together `<REMOTE>/release`:
 
 ```
 install.sh                 Homewarp at home, in one line: the newest that was released
@@ -78,7 +115,7 @@ release is laid over what is there and pushed:
 
 ```sh
 git worktree add ../homewarp-pages gh-pages
-ssh home 'tar -C /home/lance/homewarp/release -cf - .' | tar -C ../homewarp-pages -xf -
+ssh <homelab> 'tar -C <REMOTE>/release -cf - .' | tar -C ../homewarp-pages -xf -
 git -C ../homewarp-pages add -A
 git -C ../homewarp-pages commit -m "Release 1.0.0"
 git -C ../homewarp-pages push

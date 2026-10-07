@@ -1,0 +1,184 @@
+# Makes a release when a version tag is pushed (docs/releasing.md):
+#
+#   git tag v1.2.0 && git push origin v1.2.0
+#
+# It builds Core and the Gate for x86-64 and ARM64, signs the checksums and the
+# list of releases with the key in the secret RELEASE_KEY, puts the folder on the
+# branch gh-pages (which GitHub Pages serves), and makes a GitHub Release holding
+# the same files. A tag with a dash in it (v1.2.0-beta.1) is a beta.
+#
+# The tag has to be made from a commit that is on main, and its number has to be
+# the one in Cargo.toml.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+# Two releases at once would push to gh-pages over one another.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # An environment called release can hold the secret and say who may use it.
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The tag, the version and the channel
+        run: |
+          set -eu
+          tag=$GITHUB_REF_NAME
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::$tag is not a version tag such as v1.2.0 or v1.2.0-beta.1"; exit 1 ;;
+          esac
+          version=${tag#v}
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$crate" != "$version" ]; then
+            echo "::error::The tag says $version and Cargo.toml says $crate. Set the version, commit it, and tag that commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag is not on main. A release is signed, so it is made from main."
+            exit 1
+          fi
+          case "$version" in
+            *-*) channel=beta ;;
+            *) channel=stable ;;
+          esac
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "VERSION=$version"
+            echo "CHANNEL=$channel"
+            echo "RELEASES=https://$owner.github.io/${GITHUB_REPOSITORY#*/}"
+          } >> "$GITHUB_ENV"
+
+      - name: The signing key
+        env:
+          RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
+        run: |
+          set -eu
+          if [ -z "$RELEASE_KEY" ]; then
+            echo "::error::The secret RELEASE_KEY is not set. It is the Ed25519 private key, in PEM (docs/releasing.md)."
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$RELEASE_KEY" > "$RUNNER_TEMP/release.key"
+          # The public half, as Core is built with it: what an installed Homewarp
+          # holds the list of releases, and a newer release, against.
+          public=$(openssl pkey -in "$RUNNER_TEMP/release.key" -pubout -outform DER | tail -c 32 | base64)
+          echo "HOMEWARP_RELEASE_KEY=$public" >> "$GITHUB_ENV"
+          echo "KEY=$RUNNER_TEMP/release.key" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Core carries the web interface inside, as it is when Core is compiled.
+      - name: Web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Programs, for x86-64 and ARM64
+        run: |
+          set -eu
+          docker build -q -t homewarp-builder -f deploy/builder.Dockerfile deploy
+          mkdir -p deploy/out
+          docker run --rm --user "$(id -u):$(id -g)" -e HOMEWARP_RELEASE_KEY \
+            -v homewarp-cargo:/cargo -v homewarp-target:/target -v "$PWD:/work" \
+            homewarp-builder bash -euc '
+              for target in x86_64 aarch64; do
+                cargo build --release -p homewarp-gate -p homewarp-core --target $target-unknown-linux-musl
+              done
+              cd /target
+              cp x86_64-unknown-linux-musl/release/homewarp-gate /work/deploy/out/
+              cp x86_64-unknown-linux-musl/release/homewarp /work/deploy/out/homewarp-static
+              cp aarch64-unknown-linux-musl/release/homewarp-gate /work/deploy/out/homewarp-gate-arm64
+              cp aarch64-unknown-linux-musl/release/homewarp /work/deploy/out/homewarp-static-arm64'
+
+      # The ARM64 programs run in an emulator, to see that they start and that
+      # Core gets as far as making its database there.
+      - name: Do they start
+        run: |
+          set -eu
+          built=$(deploy/out/homewarp-gate version | cut -d' ' -f2)
+          if [ "$built" != "$VERSION" ]; then
+            echo "::error::The program says $built and the tag says $VERSION."
+            exit 1
+          fi
+          docker run --rm -v "$PWD/deploy/out:/out:ro" alpine:3.20 sh -c \
+            'apk add -q --no-cache qemu-aarch64 >/dev/null 2>&1 && printf "on ARM64: " && qemu-aarch64 /out/homewarp-gate-arm64 version &&
+             mkdir /tmp/data && printf "on ARM64, Core: " && HOMEWARP_DATA=/tmp/data qemu-aarch64 /out/homewarp-static-arm64 two-steps-off nobody'
+
+      # What is served already is laid over, so that the older versions stay and
+      # the list keeps the line of the other channel.
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+
+      - name: The release folder
+        run: |
+          set -eu
+          sh scripts/release.sh deploy/out pages "$VERSION" "$RELEASES" "$KEY" "$CHANNEL"
+          # What an installer does, done before anyone can.
+          cd pages
+          openssl pkey -in "$KEY" -pubout -out "$RUNNER_TEMP/release.pub"
+          openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/release.pub" -rawin -in RELEASES -sigfile RELEASES.sig
+          cd "$VERSION"
+          openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/release.pub" -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+          sha256sum -c SHA256SUMS
+
+      - name: Publish on gh-pages
+        working-directory: pages
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "gh-pages already holds this release."
+          else
+            git commit -q -m "Release $VERSION"
+            git push
+          fi
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          cd "pages/$VERSION"
+          files="homewarp-x86_64 homewarp-arm64 homewarp-gate-x86_64 homewarp-gate-arm64 SHA256SUMS SHA256SUMS.sig"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # A run again of the same tag: the files are replaced, the text stays.
+            gh release upload "$GITHUB_REF_NAME" $files --clobber
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Homewarp $VERSION, a $CHANNEL release.
+
+          Install, or update, with the line in the README, or the one the panel gives under Settings, Updates. The files here are the same as the ones at $RELEASES/$VERSION, and \`SHA256SUMS.sig\` is signed with the release key.
+          NOTES
+          flag=--latest
+          if [ "$CHANNEL" = beta ]; then flag=--prerelease; fi
+          gh release create "$GITHUB_REF_NAME" $files \
+            --verify-tag --title "Homewarp $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes $flag
+
+      - name: Take the key off the runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.key" "$RUNNER_TEMP/release.pub"
