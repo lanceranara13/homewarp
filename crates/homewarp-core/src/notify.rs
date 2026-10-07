@@ -342,13 +342,13 @@ mod tests {
         );
         // Any other line, for an owner who asked for every line.
         let typed = Happened {
-            by: "lance".to_owned(),
+            by: "alice".to_owned(),
             by_itself: false,
             ..happened("server.command", "say hello")
         };
         assert_eq!(
             sentence(&typed, Some("Lobby")),
-            "lance: server.command, Lobby (say hello)"
+            "alice: server.command, Lobby (say hello)"
         );
         let signed_in = Happened {
             server_id: None,

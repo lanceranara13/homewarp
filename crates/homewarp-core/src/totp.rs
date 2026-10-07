@@ -219,8 +219,8 @@ mod tests {
         assert_eq!(key(&secret).unwrap().len(), 20);
         assert_ne!(secret, new_secret().unwrap());
         assert_eq!(
-            uri("ABC", "lance"),
-            "otpauth://totp/Homewarp:lance?secret=ABC&issuer=Homewarp"
+            uri("ABC", "alice"),
+            "otpauth://totp/Homewarp:alice?secret=ABC&issuer=Homewarp"
         );
     }
 }

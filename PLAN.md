@@ -6,7 +6,7 @@
 > server's files, backups, schedules and further accounts are in the panel, which is
 > staged on the homelab at port 3600. The panel can be given a name and reached from
 > anywhere over TLS that is ended at home (tried on the owner's VPS with
-> `homewarp.apixels.net`); sign-ins are limited and take a second step or a passkey; the
+> `homewarp.example.com`); sign-ins are limited and take a second step or a passkey; the
 > VPS itself can be hardened on trial. §6 has the security model held against the code.
 > Phase 6 is done but for updating by itself: 1.0.0 was released on 2026-10-07, signed
 > with the owner's key and served from `https://lanceranara13.github.io/homewarp` (the
@@ -671,7 +671,7 @@ binary small and auditable.
 ## 10. Development and testing — nothing installed locally
 
 The workstation only edits files. Every build, test and deploy runs on the homelab
-over `ssh home`, inside containers.
+over `ssh homelab`, inside containers.
 
 ### What the homelab looks like (probed 2026-10-05)
 
@@ -681,28 +681,28 @@ over `ssh home`, inside containers.
 | `nft` 1.0.9, `ip_forward=1`, `rp_filter=2` | Transparent mode prerequisites already met. |
 | Docker 29.2.1, Compose 5.1, iptables backend | Core runs as a Compose project like the other services. |
 | No Rust, Node or Go on `PATH` (an `nvm` install exists under the home directory) | Toolchains live in builder containers only. |
-| `lance` is in the `docker` group; **no passwordless sudo** | Core deploys as a container with `network_mode: host` + `NET_ADMIN`; no host packages, no systemd units, no sudo. |
+| The deploy user is in the `docker` group; **no passwordless sudo** | Core deploys as a container with `network_mode: host` + `NET_ADMIN`; no host packages, no systemd units, no sudo. |
 | **ufw is active: what arrives for the machine itself is dropped unless allowed** (found 2026-10-06; it was not looked for on the 5th) | A port that Docker publishes is passed on, not received, and so is not shut: that is how every service here is reached. A program in the host's own network is behind ufw. Moving Core there shut the panel's port to the home network, which a check made from the homelab itself did not show. So Core listens on a socket in its data directory, and a second container of the same image, with the port published, passes connections to it: the *door* of `deploy/compose.yml`. Nothing on the host is changed for it. |
 | **2 vCPU** | Cold release builds will take several minutes. Iterate with `cargo check` in a warm builder container; cap the builder below 2 CPUs so running services are not starved. |
 | **Disk 89 % full, 28 GB free** (was 91 % / 24 GB before the Docker cleanup on 2026-10-05) | Hard budget: ~8 GB for build caches, pruned by script. Worlds and backups compete for the rest — free space or add a volume before running real servers. |
-| Where the 205 GB goes: `media-server` 138 GB, Docker ≈ 28 GB, `file-browser` 17 GB, Suwayomi 5.5 GB, `.vscode-server` 4.3 GB | Docker has little left to give (≈ 1.9 GB of old Pelican images, 0.6 GB of unattached volumes). The media library is the lever. |
+| Where the 205 GB goes: mostly a media library (138 GB), Docker ≈ 28 GB, and a few other services | Docker has little left to give (≈ 1.9 GB of old Pelican images, 0.6 GB of unattached volumes). The media library is the lever. |
 | A stopped Pelican Wings container and two stopped server containers exist, data under `/var/lib/pelican` | Real material for testing an "import from Pelican" path later. Not touched by this project. |
 | 13 GiB RAM, ~8.5 GiB available | Enough for the build plus one or two Minecraft servers; not for several heavy SteamCMD games at once. |
 | Ports 80/443/81 and 3100–3500 in use | Panel goes on **3600**, the next free port in the existing series. |
 
 ### What the VPS looks like (probed 2026-10-05)
 
-The owner's VPS, reachable as `ssh server1` (root). It is a working machine with other
+The owner's VPS, reachable as `ssh vps` (root). It is a working machine with other
 jobs, not a blank box.
 
 | Fact | Consequence |
 |---|---|
-| Hong Kong, KVM, 1 vCPU, 2 GB RAM, 19 GB disk; about 47 ms from home | Inside the §7.1 ceiling. |
+| KVM, 1 vCPU, 2 GB RAM, 19 GB disk; about 47 ms from home | Inside the §7.1 ceiling. |
 | Ubuntu 22.04, kernel 5.15, `nft` 1.0.2, iptables 1.8.7 (nf_tables) | Older userland than the homelab: rulesets must stay within what nft 1.0.2 accepts. |
 | WireGuard module shipped but not loaded; no `wg`, no `iperf3` | The Gate must configure WireGuard itself and depend on no package. |
 | ufw active: inbound default drop, routed default allow | See *Host firewalls* in §5.3. |
 | nginx on 80/443 serving several sites, Docker with one container, Tailscale | The Gate must coexist. Port 443 is taken, so "public via Gate" (§5.9) cannot use it here. |
-| Old Pelican forwards (DNAT + masquerade of TCP 25565–25579, 30000–30050, 40000–40050, 50000–50010 and matching UDP ranges, to a tailnet address that no longer exists) — **removed 2026-10-05**, with the ufw opening for 25565 and the dead `pelican` nginx site | 25565 is free. Copies of what was removed are in `/root/backup-2026-10-05/` on the VPS. The old panel's database is still there in two small Docker volumes: material for the import path of Phase 7. |
+| Old Pelican forwards (DNAT + masquerade of TCP 25565–25579, 30000–30050, 40000–40050, 50000–50010 and matching UDP ranges, to a tailnet address that no longer exists) — **removed 2026-10-05**, with the ufw opening for 25565 and the dead `pelican` nginx site | 25565 is free. Copies of what was removed were kept on the VPS. The old panel's database is still there in two small Docker volumes: material for the import path of Phase 7. |
 | Disk 34 % used, 12 GB free (it was 100 % and had stopped logging on 4 October) | An abandoned app that crash-looped 1.5 million times had written most of 12 GB of logs, and logrotate was missing. On 2026-10-05 the app was removed, the owner cleared the logs, and logrotate was installed with Ubuntu's stock settings. |
 | SSH accepts root and passwords, no fail2ban, constant login attempts | Makes the "harden this VPS" toggle (§6) worth having. Owner's call. |
 | CPU steal 17 % at rest | See the spike results below. |
@@ -746,7 +746,7 @@ What this does and does not show:
 
 ### Dev loop
 
-`scripts/dev.sh <cmd>` tars the working tree to `/home/lance/homewarp` and runs:
+`scripts/dev.sh <cmd>` tars the working tree to `~/homewarp` and runs:
 
 | Command | Runs on the homelab |
 |---|---|
@@ -760,9 +760,9 @@ What this does and does not show:
 | `deploy` | `build`, then `docker compose up -d`; check `:3600` answers. Servers it runs stay running |
 | `scratch` | a throwaway copy of the last build on `:3601`, with data of its own, the same Docker daemon and the same network as the deployment, for trying what needs an account without touching staging's. `scratch down` removes it, its servers' containers, its data and its end of a tunnel |
 | `gate` | the Gate as a VPS runs it, one static binary each for x86_64 and ARM64, and Core built the same way for the lab. The ARM64 one is run once under an emulator, to see that it runs at all |
-| `vps` | `gate`, then the x86_64 binary copied to the VPS (`ssh server1`) by way of the workstation. `vps leave` runs `homewarp-gate leave` there |
+| `vps` | `gate`, then the x86_64 binary copied to the VPS (`ssh vps`) by way of the workstation. `vps leave` runs `homewarp-gate leave` there |
 
-The tree goes to `/home/lance/homewarp/src`, replaced whole on every sync; `data/` beside
+The tree goes to `~/homewarp/src`, replaced whole on every sync; `data/` beside
 it belongs to the server. The builder runs as the homelab user, capped at 1.5 CPUs, and
 `Cargo.lock` is copied back so it is committed from the workstation.
 
@@ -926,9 +926,9 @@ standing corpus of §12 is still to build.
 
 ### Real-world tests
 
-- Staging Core on the homelab itself (Compose project at `/home/lance/homewarp`, port 3600).
+- Staging Core on the homelab itself (Compose project at `~/homewarp`, port 3600).
 - Browser end-to-end tests driven against that deployment, never a local server.
-- The owner's VPS (`ssh server1`) for tunnel tests against a real machine, with
+- The owner's VPS (`ssh vps`) for tunnel tests against a real machine, with
   `lab/real-vps-spike.sh` until the Gate exists.
 
 ## 11. Phases
@@ -951,7 +951,7 @@ Each phase ends with something that works on the homelab.
 - Workspace, config, SQLite + migrations, first-run setup code, login, sessions.
 - OpenAPI + generated client; embedded UI shell (login, empty Servers page), with the
   donation heart in its corner from the first build.
-- *Exit:* `http://192.168.1.250:3600` shows the panel; admin account can be created.
+- *Exit:* `http://192.168.1.50:3600` shows the panel; admin account can be created.
   *Met.* Driven in a browser against the deployment: a wrong setup code is refused, the
   right one creates the account, sign-out and sign-in work, a signed-in visit to `/setup`
   goes to the panel, and the shell was looked at 1250, 900 and 390 px wide in the dark
@@ -1137,7 +1137,7 @@ Each phase ends with something that works on the homelab.
   - *Self-probe.* The Gate opens a port for a moment (`POST /v1/probe`); Core connects
     to the VPS's public address from home and sees whether it comes back through the
     tunnel with home's own address. If not, NAT mode, said plainly on the Network page.
-  - *Real machines.* `server1` and the homelab are working machines. Neither is
+  - *Real machines.* `vps` and the homelab are working machines. Neither is
     rebooted for a test: the reboot checks are the lab's, and on the real pair the
     Gate's service and Core's container are restarted and the tunnel's interface
     removed, which is what a reboot does to them.
@@ -1328,7 +1328,7 @@ Each phase ends with something that works on the homelab.
   other than OpenSSH's.
 - Left for the owner, on staging, which has all of it and still no account: the tabs of
   a server's page, Activity and Settings in the sidebar, and
-  `sftp -P 2022 <account>.<server's id>@192.168.1.250`, or the same in a program with
+  `sftp -P 2022 <account>.<server's id>@192.168.1.50`, or the same in a program with
   windows. Staging publishes one port more than it did: 2022.
 - Not in it, each said where it shows: the editor colours nothing; packing makes a
   `tar.gz` and no zip; a folder is not uploaded as a folder; a file moved by SFTP is not
@@ -1361,10 +1361,10 @@ Each phase ends with something that works on the homelab.
     straight after the password. *Not yet looked at in a browser*, and the secret is
     shown as text and a link, with no picture of it to scan.
 - *The panel online (§13 item 5).* The owner, 2026-10-06, asked which domain or whether
-  the home network only: "continue with phase 5 the vps is on ssh server1 ip". Read as:
+  the home network only: "continue with phase 5 the vps is on ssh vps ip". Read as:
   through the VPS, at its address and no domain. That is the last row of §5.9, and what
-  it takes on this VPS, looked at that day and not touched (45.38.42.214, Ubuntu 22.04,
-  nginx 1.18 on 80 and 443 for four sites of `apixels.net`, no stream module, no Gate):
+  it takes on this VPS, looked at that day and not touched (203.0.113.10, Ubuntu 22.04,
+  nginx 1.18 on 80 and 443 for four sites of `example.com`, no stream module, no Gate):
   - the panel on a port of its own there, 8443, which the Gate forwards as it forwards
     a server's and nginx never sees; home's end is one more door, and Core ends TLS;
   - a certificate for the address from Let's Encrypt, which proves an address over
@@ -1376,16 +1376,16 @@ Each phase ends with something that works on the homelab.
     page when it last did;
   - passkeys are bound to a name and not to an address, so there are none without a
     domain. Two-step sign-in is what stands in their place.
-  - *Later the same day* the owner added: "maybe ill create homewarp.apixels.net and
-    point it on server1 IP". With a name the certificate is an ordinary one of ninety
+  - *Later the same day* the owner added: "maybe ill create homewarp.example.com and
+    point it on vps IP". With a name the certificate is an ordinary one of ninety
     days, and passkeys can be had. What does not change is that nginx has ports 80 and
     443 there, which leaves two ways, and the choice is the owner's:
     - *nginx ends TLS*, as it does for the four sites beside it, and passes the panel
-      home through the tunnel. The address is `https://homewarp.apixels.net`, and the
+      home through the tunnel. The address is `https://homewarp.example.com`, and the
       VPS reads everything: passwords, sessions, files. The first row of §6 stops being
       true.
     - *Core ends TLS at home*, and the Gate forwards a port of the panel's own, 8443.
-      The address is `https://homewarp.apixels.net:8443`, nginx gets one small server
+      The address is `https://homewarp.example.com:8443`, nginx gets one small server
       block that passes the certificate's challenge through the tunnel and sends the
       rest to that address, and the VPS never sees the panel. This is the one §5.9 and
       §6 were written for, and the one recommended.
@@ -1397,7 +1397,7 @@ Each phase ends with something that works on the homelab.
       through the tunnel (§6, and the lab checks it), so nginx cannot pass the
       certificate's challenge home. Instead Core, which runs the ACME client and keeps
       every key, asks the Gate over the control channel to put the challenge's answer in
-      a file, and nginx serves that file: `server_name homewarp.apixels.net` on port 80,
+      a file, and nginx serves that file: `server_name homewarp.example.com` on port 80,
       `/.well-known/acme-challenge/` from a directory of the Gate's, everything else
       sent to `https://$host:8443`. The answer is no secret. The Gate gains two
       requests, to put such a file and to take it away, and takes only names made of
@@ -1461,7 +1461,7 @@ Each phase ends with something that works on the homelab.
       place of an address that would not work. A VPS with a firewall and no web server
       needs port 80 opened by hand (Phase 6). No certificate for an address alone.
   - *The panel online, on the real machines (2026-10-07).* A throwaway copy on the
-    homelab, the Gate on the owner's VPS, the name `homewarp.apixels.net`, and Let's
+    homelab, the Gate on the owner's VPS, the name `homewarp.example.com`, and Let's
     Encrypt's staging authority, so that nothing was used up of what the real one allows
     a name in a week. The VPS's nginx was given the one server block the owner allowed
     (port 80 for that name: the answers from the Gate's directory, everything else sent
@@ -1959,7 +1959,7 @@ Decided by the owner on 2026-10-05:
 | Panel access | Home network only (§5.9). |
 | Earning | Free, donations only (§14). |
 | Front end | React (§8). |
-| VPS | The owner has one, reachable as `ssh server1`; described and tested in §10. |
+| VPS | The owner has one, reachable as `ssh vps`; described and tested in §10. |
 
 Still open:
 
@@ -1969,7 +1969,7 @@ Still open:
    works: MIT/Apache maximises adoption; AGPL stops a company taking a modified version
    closed.
 2. **Disk at home** — decided by the owner on 2026-10-06: server data goes in the
-   deployment's own `data/` directory (`/home/lance/homewarp/data`), no separate volume.
+   deployment's own `data/` directory (`~/homewarp/data`), no separate volume.
    The homelab had 31 GB free that day, 87 % used, and a server with its images takes a
    few of them, so free space is the thing to watch and to show.
 3. **The VPS's state** (§10) — SSH accepting passwords, and 197 package updates

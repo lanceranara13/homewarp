@@ -214,9 +214,9 @@ impl Panel {
         self.files.path().join("servers/a-server")
     }
 
-    /// Finishes setup as `lance` and returns the session cookie.
+    /// Finishes setup as `alice` and returns the session cookie.
     async fn set_up(&self) -> String {
-        let request = json!({ "code": self.setup_code, "username": "lance", "password": PASSWORD });
+        let request = json!({ "code": self.setup_code, "username": "alice", "password": PASSWORD });
         let answer = self.post("/api/v1/setup", request, None).await;
         assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
         answer.cookie()
@@ -244,14 +244,14 @@ async fn setup_wants_the_code_and_a_sound_account() {
     };
 
     assert_eq!(
-        attempt("AAAA-AAAA-AAAA", "lance", PASSWORD).await.status,
+        attempt("AAAA-AAAA-AAAA", "alice", PASSWORD).await.status,
         StatusCode::FORBIDDEN
     );
     assert_eq!(
         attempt(&panel.setup_code, "la nce", PASSWORD).await.status,
         StatusCode::UNPROCESSABLE_ENTITY
     );
-    let short = attempt(&panel.setup_code, "lance", "too short").await;
+    let short = attempt(&panel.setup_code, "alice", "too short").await;
     assert_eq!(short.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(short.body["error"].as_str().unwrap().contains("10 to 256"));
     assert_eq!(short.set_cookie, None);
@@ -265,10 +265,10 @@ async fn setup_wants_the_code_and_a_sound_account() {
 #[tokio::test]
 async fn setup_creates_the_account_once_and_signs_it_in() {
     let panel = panel().await;
-    let request = json!({ "code": panel.setup_code.to_lowercase(), "username": " lance ", "password": PASSWORD });
+    let request = json!({ "code": panel.setup_code.to_lowercase(), "username": " alice ", "password": PASSWORD });
     let created = panel.post("/api/v1/setup", request.clone(), None).await;
     assert_eq!(created.status, StatusCode::OK);
-    assert_eq!(created.body["user"]["username"], "lance");
+    assert_eq!(created.body["user"]["username"], "alice");
 
     let set_cookie = created.set_cookie.as_deref().unwrap();
     for attribute in ["HttpOnly", "SameSite=Strict", "Path=/"] {
@@ -283,7 +283,7 @@ async fn setup_creates_the_account_once_and_signs_it_in() {
         .await
         .body;
     assert_eq!(session["setup_required"], false);
-    assert_eq!(session["user"]["username"], "lance");
+    assert_eq!(session["user"]["username"], "alice");
 
     assert_eq!(
         panel.post("/api/v1/setup", request, None).await.status,
@@ -321,7 +321,7 @@ async fn signing_in_takes_the_right_password_and_nothing_else() {
         )
     };
 
-    let wrong = attempt("lance", "correct horse batterz").await;
+    let wrong = attempt("alice", "correct horse batterz").await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
     assert_eq!(wrong.set_cookie, None);
     let nobody = attempt("nobody", PASSWORD).await;
@@ -331,13 +331,13 @@ async fn signing_in_takes_the_right_password_and_nothing_else() {
         "an unknown name reads like a wrong password"
     );
 
-    let signed_in = attempt("Lance", PASSWORD).await;
+    let signed_in = attempt("Alice", PASSWORD).await;
     assert_eq!(signed_in.status, StatusCode::OK);
     let session = panel
         .get("/api/v1/session", Some(&signed_in.cookie()))
         .await
         .body;
-    assert_eq!(session["user"]["username"], "lance");
+    assert_eq!(session["user"]["username"], "alice");
 }
 
 #[tokio::test]
@@ -346,7 +346,7 @@ async fn a_request_made_by_another_site_is_refused() {
     let cookie = panel.set_up().await;
     let logout = |origin: &'static str| {
         let request = Request::post("/api/v1/logout")
-            .header(HOST, "192.168.1.250:3600")
+            .header(HOST, "192.168.1.50:3600")
             .header(ORIGIN, origin)
             .header(COOKIE, &cookie);
         panel.send(request.body(Body::empty()).unwrap())
@@ -358,10 +358,10 @@ async fn a_request_made_by_another_site_is_refused() {
     );
     assert_eq!(
         panel.get("/api/v1/session", Some(&cookie)).await.body["user"]["username"],
-        "lance"
+        "alice"
     );
     assert_eq!(
-        logout("http://192.168.1.250:3600").await.status,
+        logout("http://192.168.1.50:3600").await.status,
         StatusCode::NO_CONTENT
     );
 }
@@ -598,7 +598,7 @@ async fn a_console_is_followed_only_from_this_site_and_signed_in() {
     let cookie = panel.set_up().await;
     let follow = |origin: &'static str, cookie: &str| {
         let request = Request::get("/api/v1/servers/1/console")
-            .header(HOST, "192.168.1.250:3600")
+            .header(HOST, "192.168.1.50:3600")
             .header(ORIGIN, origin)
             .header(COOKIE, cookie);
         panel.send(request.body(Body::empty()).unwrap())
@@ -606,11 +606,11 @@ async fn a_console_is_followed_only_from_this_site_and_signed_in() {
 
     let elsewhere = follow("http://evil.example", &cookie).await;
     assert_eq!(elsewhere.status, StatusCode::FORBIDDEN);
-    let nobody = follow("http://192.168.1.250:3600", "").await;
+    let nobody = follow("http://192.168.1.50:3600", "").await;
     assert_eq!(nobody.status, StatusCode::UNAUTHORIZED);
     // From here and signed in it is let through, as far as being told that an
     // ordinary request is not how a socket is opened.
-    let here = follow("http://192.168.1.250:3600", &cookie).await;
+    let here = follow("http://192.168.1.50:3600", &cookie).await;
     assert_eq!(here.status, StatusCode::BAD_REQUEST);
 }
 
@@ -1254,7 +1254,7 @@ async fn an_account_does_what_it_has_been_let_do_and_no_more() {
         json!([{ "user_id": sam_id, "username": "sam", "permissions": ["files"] }])
     );
     let accounts = panel.get("/api/v1/users", owner).await;
-    assert_eq!(accounts.body[0]["username"], "lance");
+    assert_eq!(accounts.body[0]["username"], "alice");
     assert_eq!(accounts.body[0]["owner"], true);
     assert_eq!(accounts.body[1]["username"], "sam");
     assert_eq!(accounts.body[1]["servers"], 1);
@@ -1361,7 +1361,7 @@ async fn what_is_done_is_written_down_for_the_owner() {
     panel
         .post("/api/v1/servers/1/files/move", onto, cookie)
         .await;
-    let wrong = json!({ "username": "lance", "password": "not the password" });
+    let wrong = json!({ "username": "alice", "password": "not the password" });
     panel.post("/api/v1/login", wrong, None).await;
     let nobody = json!({ "username": "hunter2", "password": "not the password" });
     panel.post("/api/v1/login", nobody, None).await;
@@ -1385,7 +1385,7 @@ async fn what_is_done_is_written_down_for_the_owner() {
     );
     let moved = &log.body[1];
     assert_eq!(moved["detail"], "a.txt to b.txt");
-    assert_eq!(moved["username"], "lance");
+    assert_eq!(moved["username"], "alice");
     assert_eq!(moved["user_id"], 1);
     assert_eq!(moved["server"], "Survival");
     assert_eq!(moved["server_id"], 1);
@@ -1987,7 +1987,7 @@ async fn the_panel_is_given_a_name_by_its_owner_where_it_has_a_door_for_tls() {
 
     for (wrong, said) in [
         (
-            json!({ "name": "192.168.1.250", "agreed": true }),
+            json!({ "name": "192.168.1.50", "agreed": true }),
             "A name is like panel.example.com",
         ),
         (
@@ -2107,14 +2107,14 @@ async fn an_egg_is_fetched_only_from_an_address_on_the_internet_and_by_the_owner
 async fn a_sign_in_that_keeps_failing_has_to_wait() {
     let panel = panel().await;
     panel.set_up().await;
-    let wrong = json!({ "username": "lance", "password": "not the password" });
+    let wrong = json!({ "username": "alice", "password": "not the password" });
     for _ in 0..5 {
         let answer = panel.post("/api/v1/login", wrong.clone(), None).await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     }
     // The sixth is not looked at, and neither is the right password after it:
     // whoever is guessing learns nothing more from here.
-    let right = json!({ "username": "lance", "password": PASSWORD });
+    let right = json!({ "username": "alice", "password": PASSWORD });
     for tried in [wrong, right] {
         let answer = panel.post("/api/v1/login", tried, None).await;
         assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
@@ -2167,7 +2167,7 @@ async fn a_second_step_is_asked_for_once_it_is_turned_on() {
     let two_steps = "/api/v1/account/two-steps";
     let confirm = "/api/v1/account/two-steps/confirm";
     let login = |code: Option<String>| {
-        let mut typed = json!({ "username": "lance", "password": PASSWORD });
+        let mut typed = json!({ "username": "alice", "password": PASSWORD });
         if let Some(code) = code {
             typed["code"] = json!(code);
         }
@@ -2189,7 +2189,7 @@ async fn a_second_step_is_asked_for_once_it_is_turned_on() {
     let secret = begun.body["secret"].as_str().unwrap().to_owned();
     assert_eq!(
         begun.body["uri"],
-        format!("otpauth://totp/Homewarp:lance?secret={secret}&issuer=Homewarp")
+        format!("otpauth://totp/Homewarp:alice?secret={secret}&issuer=Homewarp")
     );
     // Until the app has shown that it has the secret, nothing has changed.
     let wrong = panel
@@ -2225,7 +2225,7 @@ async fn a_second_step_is_asked_for_once_it_is_turned_on() {
     assert_eq!(again.status, StatusCode::UNAUTHORIZED);
     assert_eq!(again.body["code_required"], true);
     // A wrong password is still only a wrong password.
-    let guess = json!({ "username": "lance", "password": "not the password", "code": "123456" });
+    let guess = json!({ "username": "alice", "password": "not the password", "code": "123456" });
     let guessed = panel.post("/api/v1/login", guess, None).await;
     assert_eq!(
         guessed.body,

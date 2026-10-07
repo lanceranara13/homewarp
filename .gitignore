@@ -5,3 +5,6 @@
 /web/dist/
 # Generated from web/openapi.json by `npm run gen`.
 /web/src/api/schema.d.ts
+
+# Which machines scripts/dev.sh runs against (scripts/dev.env.example).
+/scripts/dev.env

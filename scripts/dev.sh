@@ -8,12 +8,15 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
-HOME_SSH=${HOME_SSH:-home}
-REMOTE=${REMOTE:-/home/lance/homewarp}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# Which machines this is run against is yours to say, in scripts/dev.env (not
+# committed; scripts/dev.env.example shows it) or in the environment.
+if [ -f "$ROOT/scripts/dev.env" ]; then . "$ROOT/scripts/dev.env"; fi
+: "${HOME_SSH:?name the homelab, the ssh host the builds run on: HOME_SSH=... (scripts/dev.env.example)}"
+: "${REMOTE:?name the folder on the homelab that holds src/ and data/: REMOTE=/home/you/homewarp (scripts/dev.env.example)}"
 CPUS=${CPUS:-1.5}          # the homelab has 2 vCPUs and other services to keep alive
 BUILDER=homewarp-builder
 NODE=node:24-alpine
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 home() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOME_SSH" "$@"; }
 
@@ -91,7 +94,7 @@ cmd_build() {
   home "docker build -q -t homewarp:dev -f $REMOTE/src/deploy/core.Dockerfile $REMOTE/src/deploy/out >/dev/null"
 }
 
-# Builds, and (re)starts the staging deployment at /home/lance/homewarp
+# Builds, and (re)starts the staging deployment at $REMOTE
 # (deploy/compose.yml), on port 3600. Servers it is running stay running.
 cmd_deploy() {
   cmd_build
@@ -205,7 +208,9 @@ cmd_gate() {
 # the Ed25519 key that signs, kept on the homelab and nowhere in this
 # repository ($REMOTE/release.key unless said otherwise). Whoever installs
 # trusts that key and nothing else, so it is its owner's to make and to keep:
-#   ssh home 'openssl genpkey -algorithm ed25519 -out /home/lance/homewarp/release.key'
+#   ssh <homelab> 'umask 077; openssl genpkey -algorithm ed25519 -out <REMOTE>/release.key'
+# (The same release is made by GitHub Actions when a v* tag is pushed:
+# .github/workflows/release.yml, docs/releasing.md.)
 cmd_release() {
   : "${RELEASES:?say where the release will be served from: RELEASES=https://...}"
   local key=${RELEASE_KEY:-$REMOTE/release.key} version public
@@ -236,8 +241,8 @@ cmd_release() {
 # Puts the Gate just built on a VPS, by way of this machine: the homelab and the
 # VPS need not know each other. Enrolling it is then one command, which the
 # panel gives. `vps leave` takes the Gate off the VPS again, with all it made.
-VPS_SSH=${VPS_SSH:-server1}
 cmd_vps() {
+  : "${VPS_SSH:?name the VPS, an ssh host: VPS_SSH=... (scripts/dev.env.example)}"
   local vps=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_SSH")
   if [ "${1:-}" = leave ]; then
     "${vps[@]}" 'if [ -x /usr/local/bin/homewarp-gate ]; then homewarp-gate leave; else echo "There is no Gate on this machine."; fi'

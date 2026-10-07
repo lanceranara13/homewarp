@@ -706,14 +706,14 @@ mod tests {
 
     #[test]
     fn a_name_is_labels_with_dots_between_and_not_an_address() {
-        for name in ["panel.example.com", "homewarp.apixels.net", "a-b.c0.io"] {
+        for name in ["panel.example.com", "home.example.net", "a-b.c0.io"] {
             assert!(is_name(name), "{name}");
         }
         let long = format!("{}.example.com", "a".repeat(64));
         for odd in [
             "",
             "localhost",
-            "192.168.1.250",
+            "192.168.1.50",
             "Panel.example.com",
             "panel..example.com",
             "-panel.example.com",

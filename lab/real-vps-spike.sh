@@ -18,13 +18,14 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
-HOME_SSH=${HOME_SSH:-home}
-GATE_SSH=${GATE_SSH:-server1}
+if [ -f "$(dirname "$0")/../scripts/dev.env" ]; then . "$(dirname "$0")/../scripts/dev.env"; fi
+: "${HOME_SSH:?name the homelab, an ssh host: HOME_SSH=... (scripts/dev.env.example)}"
+GATE_SSH=${GATE_SSH:-${VPS_SSH:?name the VPS, an ssh host: VPS_SSH=... (scripts/dev.env.example)}}
 WG_PORT=${WG_PORT:-51900}
 PORT=${PORT:-47777}       # echo service, tcp + udp
 IPERF=${IPERF:-47778}     # iperf3 in the game namespace, reached through the VPS
 DIRECT=${DIRECT:-47779}   # iperf3 on the VPS itself, for the with/without comparison
-LAN_PROBE=${LAN_PROBE:-192.168.1.250}   # a home LAN address the VPS must never reach
+LAN_PROBE=${LAN_PROBE:-192.168.1.50}   # a home LAN address the VPS must never reach
 IMAGE=${IMAGE:-alpine:3.20}
 
 gate()      { ssh -o BatchMode=yes -o ConnectTimeout=10 "$GATE_SSH" "$@"; }

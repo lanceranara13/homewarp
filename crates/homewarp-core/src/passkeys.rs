@@ -630,7 +630,7 @@ mod through {
     const NAME: &str = "panel.example.com";
     const HERE: &str = "panel.example.com:8443";
     const ORIGIN: &str = "https://panel.example.com:8443";
-    const HOME: &str = "192.168.1.250:3600";
+    const HOME: &str = "192.168.1.50:3600";
     const PASSWORD: &str = "correct horse battery";
     const KEYS: &str = "/api/v1/account/passkeys";
 
@@ -675,7 +675,7 @@ mod through {
                 app: api::app(state),
                 _files: files,
             };
-            let account = json!({ "code": code, "username": "lance", "password": PASSWORD });
+            let account = json!({ "code": code, "username": "alice", "password": PASSWORD });
             let made = panel
                 .ask("POST", "/api/v1/setup", None, (HERE, true), account)
                 .await;
@@ -832,7 +832,7 @@ mod through {
             .await;
         assert_eq!(begun.status, StatusCode::OK, "{}", begun.body);
         assert_eq!(begun.body["rp_id"], NAME);
-        assert_eq!(begun.body["username"], "lance");
+        assert_eq!(begun.body["username"], "alice");
         assert_eq!(begun.body["exclude"], json!([]));
         let challenge = begun.body["challenge"].as_str().unwrap();
 
@@ -887,7 +887,7 @@ mod through {
         let challenge = panel.challenge().await;
         let signed = panel.sign_in(&mut device, &challenge, ORIGIN).await;
         assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
-        assert_eq!(signed.body["user"]["username"], "lance");
+        assert_eq!(signed.body["user"]["username"], "alice");
         assert_eq!(signed.body["user"]["owner"], true);
         // Over TLS, with a cookie that is sent back over TLS only.
         assert!(signed.set_cookie.as_deref().unwrap().ends_with("; Secure"));
@@ -895,7 +895,7 @@ mod through {
         let whose = panel
             .ask("GET", "/api/v1/session", Some(&session), here, Value::Null)
             .await;
-        assert_eq!(whose.body["user"]["username"], "lance");
+        assert_eq!(whose.body["user"]["username"], "alice");
         let listed = panel.ask("GET", KEYS, cookie, here, Value::Null).await;
         assert!(listed.body["passkeys"][0]["last_used_at"].is_i64());
 
