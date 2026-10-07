@@ -251,6 +251,55 @@ fn shown(line: &str) -> String {
     strip_ansi(line.rsplit('\r').next().unwrap_or(line))
 }
 
+/// Writes what a server's template wants in its files: each of its config
+/// files with the server's settings put in, and the EULA where it was agreed
+/// to. What could not be done is told to `say`, for the server's console.
+fn set_up(
+    files: &ServerDir,
+    server: &Definition,
+    mut say: impl FnMut(String),
+) -> anyhow::Result<()> {
+    for file in &server.template.config_files {
+        let mut replacements = Vec::with_capacity(file.find.len());
+        for replacement in &file.find {
+            let value = substitute(&replacement.value, |name| server.lookup(name));
+            if value.contains("{{") {
+                say(format!(
+                    "{}: {} was left as it is, for there is nothing to put in place of {value}.",
+                    file.path, replacement.key
+                ));
+                continue;
+            }
+            replacements.push(Replacement {
+                value,
+                ..replacement.clone()
+            });
+        }
+        let before = files.read_to_string(&file.path)?;
+        // The `file` parser changes lines that are there, and a file that is
+        // not there has none. Wings makes it all the same, empty, and a server
+        // that writes its settings out only where it finds no file then never
+        // does: Velocity came up on a port of its own choosing that way.
+        if before.is_none() && file.parser == Parser::File {
+            say(format!(
+                "{} is not there yet, and is left for the server to make. Its settings are put in from the next start.",
+                file.path
+            ));
+            continue;
+        }
+        // A file that cannot be set up is said and passed over, as Wings
+        // passes over it: the server may still do without.
+        match config::patch(file.parser, &before.unwrap_or_default(), &replacements) {
+            Ok(after) => files.write(&file.path, &after)?,
+            Err(error) => say(format!("{} was left as it is: {error}.", file.path)),
+        }
+    }
+    if server.eula {
+        files.write("eula.txt", "eula=true\n")?;
+    }
+    Ok(())
+}
+
 /// What a server's task has seen, for the pages that ask.
 struct Seen {
     state: State,
@@ -1142,34 +1191,7 @@ impl Runtime {
     /// Writes what the template wants in the server's files before a start.
     fn prepare(&self, server: &Definition, spec: &Spec, watch: &Watch) -> anyhow::Result<()> {
         let files = ServerDir::open(&spec.dir, USER, USER)?;
-        for file in &server.template.config_files {
-            let mut replacements = Vec::with_capacity(file.find.len());
-            for replacement in &file.find {
-                let value = substitute(&replacement.value, |name| server.lookup(name));
-                if value.contains("{{") {
-                    watch.say(format!(
-                        "{}: {} was left as it is, for there is nothing to put in place of {value}.",
-                        file.path, replacement.key
-                    ));
-                    continue;
-                }
-                replacements.push(Replacement {
-                    value,
-                    ..replacement.clone()
-                });
-            }
-            let before = files.read_to_string(&file.path)?.unwrap_or_default();
-            // A file that cannot be set up is said and passed over, as Wings
-            // passes over it: the server may still do without.
-            match config::patch(file.parser, &before, &replacements) {
-                Ok(after) => files.write(&file.path, &after)?,
-                Err(error) => watch.say(format!("{} was left as it is: {error}.", file.path)),
-            }
-        }
-        if server.eula {
-            files.write("eula.txt", "eula=true\n")?;
-        }
-        Ok(())
+        set_up(&files, server, |line| watch.say(line))
     }
 
     /// The server as Docker needs to know it.
@@ -1212,7 +1234,90 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use super::container_id;
+    use homewarp_runtime::{ServerDir, running_as};
+
+    use super::{Definition, container_id, set_up};
+    use crate::servers::PortProtocol;
+
+    /// A server on port 25590, made from an egg that sets two files up: one
+    /// line by line, as Velocity's is, and one key by key.
+    fn proxy() -> Definition {
+        let files = serde_json::json!({
+            "velocity.toml": {
+                "parser": "file",
+                "find": { "bind = ": "bind = \"0.0.0.0:{{server.build.default.port}}\"" },
+            },
+            "server.properties": {
+                "parser": "properties",
+                "find": { "server-port": "{{server.build.default.port}}" },
+            },
+        });
+        let egg = serde_json::json!({
+            "meta": { "version": "PTDL_v2" },
+            "name": "Proxy",
+            "docker_images": { "Java": "example.invalid/java:latest" },
+            "startup": "java -jar proxy.jar",
+            "config": {
+                "files": files.to_string(),
+                "startup": "{\"done\": \"Done\"}",
+                "stop": "end",
+            },
+            "scripts": { "installation": {
+                "script": null,
+                "container": "example.invalid/installer",
+                "entrypoint": "sh",
+            } },
+            "variables": [],
+        });
+        Definition {
+            id: 1,
+            uuid: "0b0e8a0c-0000-4000-8000-000000000001".to_owned(),
+            name: "Lobby".to_owned(),
+            template: homewarp_template::import(&egg.to_string()).unwrap(),
+            image: "example.invalid/java:latest".to_owned(),
+            memory_mb: 512,
+            cpu_percent: 0,
+            port: 25590,
+            protocol: PortProtocol::Tcp,
+            ports: Vec::new(),
+            variables: Vec::new(),
+            eula: false,
+            installed: true,
+            sleep_minutes: 0,
+            asleep: false,
+        }
+    }
+
+    #[test]
+    fn a_file_set_line_by_line_is_left_for_the_server_to_make() {
+        let directory = tempfile::tempdir().unwrap();
+        let (uid, gid) = running_as();
+        let files = ServerDir::open(directory.path(), uid, gid).unwrap();
+        let server = proxy();
+        let mut said = Vec::new();
+        set_up(&files, &server, |line| said.push(line)).unwrap();
+        // Not made empty: a proxy that found it so would never write its own.
+        assert_eq!(files.read_to_string("velocity.toml").unwrap(), None);
+        assert!(
+            said.iter()
+                .any(|line| line.starts_with("velocity.toml is not there yet")),
+            "{said:?}"
+        );
+        // One that is set key by key is made, with its keys in it, as before.
+        let properties = files.read_to_string("server.properties").unwrap().unwrap();
+        assert!(properties.contains("server-port=25590"), "{properties}");
+
+        // Once the server has written its own, the line is the server's port.
+        let made = "motd = \"A Velocity Server\"\nbind = \"0.0.0.0:25565\"\n";
+        files.write("velocity.toml", made).unwrap();
+        said.clear();
+        set_up(&files, &server, |line| said.push(line)).unwrap();
+        assert_eq!(
+            files.read_to_string("velocity.toml").unwrap().unwrap(),
+            "motd = \"A Velocity Server\"\nbind = \"0.0.0.0:25590\"\n"
+        );
+        assert!(said.is_empty(), "{said:?}");
+    }
 
     #[test]
     fn finds_its_own_container_among_what_is_mounted() {
