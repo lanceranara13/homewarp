@@ -6402,6 +6402,7 @@
           "variables",
           "eula",
           "sleep_minutes",
+          "says_offline",
           "mods",
           "permissions"
         ],
@@ -6478,6 +6479,10 @@
           "protocol": {
             "$ref": "#/components/schemas/PortProtocol",
             "description": "Which protocols that port is open for."
+          },
+          "says_offline": {
+            "type": "boolean",
+            "description": "Whether players are told that it is offline while it is stopped."
           },
           "sleep_minutes": {
             "type": "integer",
@@ -6560,6 +6565,10 @@
           "protocol": {
             "$ref": "#/components/schemas/PortProtocol",
             "description": "Which protocols that port is open for. Both, if none is named."
+          },
+          "says_offline": {
+            "type": "boolean",
+            "description": "While it is stopped, have something small listen on its port and tell\nthe game's list, and a player who joins, that it is offline. For a\nserver of Minecraft's; it is nothing to any other."
           },
           "sleep_minutes": {
             "type": "integer",

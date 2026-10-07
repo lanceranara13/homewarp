@@ -31,13 +31,16 @@ async fn main() -> anyhow::Result<()> {
             return homewarp_core::probe_listen(port).await;
         }
         // What Core runs itself as, in a container, in place of a server that is
-        // asleep: `homewarp stand-in <port> <listed> <joining>`.
+        // asleep or stopped: `homewarp stand-in <port> <listed> <joining> [stay]`.
         Some("stand-in") => {
-            let usage = "usage: homewarp stand-in <port> <listed> <joining>";
+            let usage = "usage: homewarp stand-in <port> <listed> <joining> [stay]";
             let port = arguments.next().context(usage)?.parse()?;
             let saying = StandIn {
                 listed: arguments.next().context(usage)?,
                 joining: arguments.next().context(usage)?,
+                // For one that is asleep it ends when a player joins. For one
+                // that is stopped it stays.
+                wakes: arguments.next().as_deref() != Some("stay"),
             };
             return homewarp_core::stand_in(port, saying).await;
         }

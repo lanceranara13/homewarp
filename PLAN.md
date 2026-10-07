@@ -1677,6 +1677,16 @@ Each phase ends with something that works on the homelab.
       asleep again after its minutes.
     - *Stop, of one that is asleep, keeps it down:* the stand-in goes, and nothing wakes
       it after that. Start wakes it by hand.
+    - *A stopped server that says so* (Settings, Advanced; off unless asked for). The
+      same stand-in, told to stay: a game's list is told that the server is offline,
+      and so is a player who joins, and nothing is started. It is the plan's "friendly
+      offline responses", from home and not from the Gate. It costs a small container
+      for as long as the server is stopped, which is why it is asked for server by
+      server. The lab, where it is tried through the Gate, found what it broke: a
+      server with something standing in for it could not be removed, because the
+      server's own task and the removal both took the stand-in's container away at the
+      same moment and Docker refuses the second. One that is being removed already is
+      taken for removed now.
     - *Not Bedrock, and not other games.* Bedrock speaks over UDP, where there is no
       connection to see the beginning of. A game that cannot be asked who is on it
       cannot be known to be empty.
@@ -1788,10 +1798,11 @@ Each phase ends with something that works on the homelab.
       uploaded under Files and unpacked: the same world, byte for byte. Amazon's own
       was not tried: there is no account of the owner's here to try it with.
 - *Not done, and why:*
-  - *Answering for a server that is stopped, and from the Gate while home is away.*
-    The stand-in could say "offline" as well as "asleep", at the price of a container
-    for every stopped server. From the Gate it would be a port of the Gate's own, which
-    a VPS's firewall shuts until it is asked: one more opening, for a courtesy.
+  - *Answering from the Gate while home is away.* A stopped server can say so now (it
+    is among what is done, above), but that is said from home. With home itself away
+    the answer would have to come from the VPS: a port of the Gate's own, which a
+    VPS's firewall shuts until it is asked. One more opening on somebody's VPS, for a
+    courtesy.
   - *Hostname routing, and PROXY protocol with it.* A program that reads the name a
     player typed has to stand between the player and the server, and the server then
     sees the program's address and not the player's, unless it is one that reads the

@@ -617,6 +617,13 @@ impl Engine {
             | Err(DockerError::DockerResponseServerError {
                 status_code: 404, ..
             }) => Ok(()),
+            // Somebody else is removing it this moment: a server's own task
+            // lets go of what stood in for it just as the server is forgotten.
+            // It is going either way.
+            Err(DockerError::DockerResponseServerError {
+                status_code: 409,
+                message,
+            }) if message.contains("already in progress") => Ok(()),
             Err(other) => Err(other.into()),
         }
     }

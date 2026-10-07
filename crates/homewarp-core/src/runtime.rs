@@ -184,6 +184,35 @@ pub(crate) struct Definition {
     /// Whether it was asleep when Homewarp last wrote that down: read when
     /// Homewarp starts, and nowhere after.
     pub(crate) asleep: bool,
+    /// Whether players are told that it is offline while it is stopped.
+    pub(crate) says_offline: bool,
+}
+
+/// How something stands in for a server that has no process.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// For one that is asleep: a player who joins wakes it.
+    Wakes,
+    /// For one that is stopped: players are told so, and that is all.
+    Stays,
+}
+
+/// What stands in for a server in this state, if anything does. Only a
+/// server of Minecraft's has anything stand in for it: the stand-in speaks
+/// that game's language and no other.
+fn standing(state: State, server: &Definition) -> Option<Standing> {
+    match state {
+        State::Asleep => Some(Standing::Wakes),
+        State::Offline | State::Crashed
+            if server.says_offline
+                && server.installed
+                && server.protocol != PortProtocol::Udp
+                && mods::fits(&server.template) =>
+        {
+            Some(Standing::Stays)
+        }
+        _ => None,
+    }
 }
 
 /// So many minutes, as a sentence says it.
@@ -769,9 +798,10 @@ impl Runtime {
         }
     }
 
-    /// What is asked of a server that is not running, when it is asked. One
-    /// that is asleep has a stand-in listening on its port meanwhile, and a
-    /// player who joins is as good as somebody asking for a start.
+    /// What is asked of a server that is not running, when it is asked.
+    /// Meanwhile something may stand in for it on its port: for one that is
+    /// asleep, where a player who joins is as good as somebody asking for a
+    /// start, and for one that is stopped and is to say so.
     async fn next(
         &self,
         made_of: &Mutex<Definition>,
@@ -779,21 +809,30 @@ impl Runtime {
         inbox: &mut mpsc::Receiver<Asked>,
     ) -> Option<Asked> {
         let mut changes = watch.events.subscribe();
+        // The state in which what says "offline" could not be had. It is not
+        // tried again until the server is in another.
+        let mut given_up: Option<State> = None;
         loop {
-            if watch.state() != State::Asleep {
-                tokio::select! {
-                    asked = inbox.recv() => match asked {
-                        Some(Asked::Changed) => continue,
-                        other => return other,
-                    },
-                    // It may be asleep again, once what held it has let go.
-                    _ = changes.recv() => continue,
-                }
+            let state = watch.state();
+            if given_up != Some(state) {
+                given_up = None;
             }
             let server = current(made_of);
+            let Some(how) = standing(state, &server).filter(|_| given_up.is_none()) else {
+                let asked = tokio::select! {
+                    asked = inbox.recv() => Some(asked),
+                    _ = changes.recv() => None,
+                };
+                match asked {
+                    // Something changed: it may be asleep again, once what
+                    // held it has let go, or be told to say that it is offline.
+                    None | Some(Some(Asked::Changed)) => continue,
+                    Some(other) => return other,
+                }
+            };
             tokio::select! {
-                ended = self.stand_in(&server) => match ended {
-                    Ok(Some(joined)) => {
+                ended = self.stand_in(&server, how) => match (how, ended) {
+                    (Standing::Wakes, Ok(Some(joined))) => {
                         // Not while a backup is being put back: the player was
                         // told to come again, and by then it may be asleep again.
                         if watch.wake() {
@@ -807,17 +846,25 @@ impl Runtime {
                             return Some(Asked::Power(Power::Start));
                         }
                     }
-                    Ok(None) => {
+                    (Standing::Wakes, Ok(None)) => {
                         watch.say("What listened in its place while it slept has ended. It is offline now.");
                         watch.give_up_sleep();
                         self.write_down_sleep(server.id, false).await;
                     }
-                    Err(error) => {
+                    (Standing::Wakes, Err(error)) => {
                         watch.say(format!(
                             "Homewarp could not listen in its place while it slept, so it is offline now: {error:#}"
                         ));
                         watch.give_up_sleep();
                         self.write_down_sleep(server.id, false).await;
+                    }
+                    (Standing::Stays, ended) => {
+                        let why = match ended {
+                            Ok(_) => "what did has ended".to_owned(),
+                            Err(error) => format!("{error:#}"),
+                        };
+                        watch.say(format!("Nothing tells players that it is offline: {why}."));
+                        given_up = Some(state);
                     }
                 },
                 asked = inbox.recv() => {
@@ -832,13 +879,25 @@ impl Runtime {
         }
     }
 
-    /// Has this very program listen where a sleeping server would
+    /// Has this very program listen where a server that has no process would
     /// ([`crate::minecraft::stand_in`]), to its end, and says who joined if it
     /// ended because a player did.
-    async fn stand_in(&self, server: &Definition) -> anyhow::Result<Option<Joined>> {
+    async fn stand_in(&self, server: &Definition, how: Standing) -> anyhow::Result<Option<Joined>> {
         let image = self.own_image().await?;
         let program = std::env::current_exe().context("finding this program")?;
         let name = stand_in_name(&server.uuid);
+        let (listed, joining, mode) = match how {
+            Standing::Wakes => (
+                format!("{} is asleep. Join to wake it up.", server.name),
+                format!("{} is waking up. Join again in a minute.", server.name),
+                "wake",
+            ),
+            Standing::Stays => (
+                format!("{} is offline.", server.name),
+                format!("{} is offline.", server.name),
+                "stay",
+            ),
+        };
         let listener = Listener {
             name: &name,
             network: NETWORK,
@@ -847,8 +906,9 @@ impl Runtime {
                 program.to_string_lossy().into_owned(),
                 "stand-in".to_owned(),
                 server.port.to_string(),
-                format!("{} is asleep. Join to wake it up.", server.name),
-                format!("{} is waking up. Join again in a minute.", server.name),
+                listed,
+                joining,
+                mode.to_owned(),
             ],
             port: server.port,
             user: USER,
@@ -1294,7 +1354,53 @@ mod tests {
             installed: true,
             sleep_minutes: 0,
             asleep: false,
+            says_offline: false,
         }
+    }
+
+    #[test]
+    fn only_a_server_of_minecrafts_has_anything_stand_in_for_it() {
+        use super::{Standing, State, standing};
+        // The egg of `proxy` sets up a file that is Minecraft's.
+        let quiet = proxy();
+        assert!(standing(State::Asleep, &quiet) == Some(Standing::Wakes));
+        // Stopped, nothing stands in for it unless its owner asked.
+        for state in [State::Offline, State::Crashed] {
+            assert!(standing(state, &quiet).is_none());
+        }
+        let telling = Definition {
+            says_offline: true,
+            ..proxy()
+        };
+        for state in [State::Offline, State::Crashed] {
+            assert!(standing(state, &telling) == Some(Standing::Stays));
+        }
+        // Not while it has a process, is being installed, or is held.
+        for state in [
+            State::Running,
+            State::Starting,
+            State::Stopping,
+            State::Installing,
+            State::InstallFailed,
+            State::Restoring,
+        ] {
+            assert!(standing(state, &telling).is_none());
+        }
+        // Nor one whose port is for UDP alone, or that was never installed.
+        let udp = Definition {
+            protocol: PortProtocol::Udp,
+            ..telling.clone()
+        };
+        assert!(standing(State::Offline, &udp).is_none());
+        let never = Definition {
+            installed: false,
+            ..telling.clone()
+        };
+        assert!(standing(State::Offline, &never).is_none());
+        // Nor a server of another game, whatever was asked.
+        let mut other = telling;
+        other.template.config_files.clear();
+        assert!(standing(State::Offline, &other).is_none());
     }
 
     #[test]

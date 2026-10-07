@@ -225,6 +225,9 @@ pub struct StandIn {
     pub listed: String,
     /// Told to a player who joins.
     pub joining: String,
+    /// Whether a player who joins ends it, so that the server is started.
+    /// Where not, it stands in until it is taken away.
+    pub wakes: bool,
 }
 
 /// A player who tried to join a server that is asleep.
@@ -283,7 +286,9 @@ async fn stand(listener: TcpListener, saying: Arc<StandIn>) -> io::Result<Joined
                 let (saying, tell) = (Arc::clone(&saying), tell.clone());
                 tokio::spawn(async move {
                     let _place = place;
-                    if let Ok(Ok(Some(name))) = timeout(HEARD_WITHIN, answer(stream, &saying)).await {
+                    if let Ok(Ok(Some(name))) = timeout(HEARD_WITHIN, answer(stream, &saying)).await
+                        && saying.wakes
+                    {
                         let _ = tell.send(Joined { name, from: from.ip() }).await;
                     }
                 });
@@ -446,6 +451,7 @@ mod tests {
         let saying = Arc::new(StandIn {
             listed: "Survival is asleep. Join to wake it.".to_owned(),
             joining: "Survival is waking up. Try again in a minute.".to_owned(),
+            wakes: true,
         });
         (at, tokio::spawn(stand(listener, saying)))
     }
@@ -504,6 +510,28 @@ mod tests {
                 from: "127.0.0.1".parse().unwrap()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_stand_in_for_a_stopped_server_says_so_and_stays() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let saying = Arc::new(StandIn {
+            listed: "Survival is offline.".to_owned(),
+            joining: "Survival is offline.".to_owned(),
+            wakes: false,
+        });
+        let standing = tokio::spawn(stand(listener, saying));
+        let said: serde_json::Value = serde_json::from_str(&status(at).await.unwrap()).unwrap();
+        assert_eq!(said["description"]["text"], "Survival is offline.");
+        // However many join, each is told, and none of them ends it.
+        for name in ["Steve", "Alex", "Steve"] {
+            let told = join(at, name).await.unwrap();
+            assert!(told.contains("Survival is offline."), "{told}");
+        }
+        tokio::task::yield_now().await;
+        assert!(!standing.is_finished());
+        standing.abort();
     }
 
     #[tokio::test]

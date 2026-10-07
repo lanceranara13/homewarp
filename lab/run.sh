@@ -430,6 +430,13 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   sleep 3
   check "stopped by its owner, it is offline, and nothing listens in its place" "$(sleepy state) $(dc exec -T home docker ps -q --filter publish=$MC | wc -l)" "offline 0"
   check "so a player who joins then wakes nothing" "$(minecraft "$joins" | wc -c) $(sleepy state)" "0 offline"
+  # Stopped, it may say so, where its owner asks for that.
+  core PUT "/servers/$mc" "{\"name\":\"sleepy\",\"memory_mb\":128,\"port\":$MC,\"protocol\":\"tcp\",\"sleep_minutes\":1,\"says_offline\":true}" >/dev/null
+  for _ in $(seq 20); do [ -n "$(dc exec -T home docker ps -q --filter publish=$MC)" ] && break; sleep 1; done
+  sleep 1
+  check "told to say so, a stopped server tells a game's list that it is offline" "$(minecraft "$asks" | grep -c 'sleepy is offline.')" "1"
+  check "and a player who joins is told the same, and starts nothing" "$(minecraft "$joins" | grep -c 'sleepy is offline.') $(sleepy state)" "1 offline"
+  check "and so is the next: it goes on saying so" "$(minecraft "$joins" | grep -c 'sleepy is offline.')" "1"
   core POST "/servers/$mc/power" '{"action":"start"}' >/dev/null
   until_sleepy asleep 150 || true
   check "started again and left alone, it is asleep again" "$(sleepy state)" "asleep"

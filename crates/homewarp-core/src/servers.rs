@@ -198,6 +198,8 @@ struct Server {
     /// How many minutes it may run with nobody on it before it is put to
     /// sleep, to be woken when a player joins. 0 is never.
     sleep_minutes: i64,
+    /// Whether players are told that it is offline while it is stopped.
+    says_offline: bool,
     /// Who is on it, for a running server that says.
     players: Option<Players>,
     /// Whether it is one of Minecraft's, which mods or plugins can be found for.
@@ -235,6 +237,11 @@ struct ServerSettings {
     /// who is on it, which is one of Minecraft's.
     #[serde(default)]
     sleep_minutes: u32,
+    /// While it is stopped, have something small listen on its port and tell
+    /// the game's list, and a player who joins, that it is offline. For a
+    /// server of Minecraft's; it is nothing to any other.
+    #[serde(default)]
+    says_offline: bool,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -256,6 +263,7 @@ struct Checked {
     variables: Vec<(String, String)>,
     eula: bool,
     sleep_minutes: u32,
+    says_offline: bool,
 }
 
 impl Checked {
@@ -315,6 +323,7 @@ impl Checked {
             eula: self.eula,
             installed,
             sleep_minutes: self.sleep_minutes,
+            says_offline: self.says_offline,
             // What is made or changed is not running, and not asleep either.
             asleep: false,
         }
@@ -403,6 +412,7 @@ fn check(
         variables,
         eula: settings.eula,
         sleep_minutes: settings.sleep_minutes,
+        says_offline: settings.says_offline,
     })
 }
 
@@ -450,12 +460,13 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
         String,
         i64,
         i64,
+        i64,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT servers.id, servers.uuid, templates.definition, servers.image, servers.memory_mb,
                 servers.cpu_percent, servers.port, servers.protocol, servers.ports,
                 servers.variables, servers.eula, servers.installed, servers.name,
-                servers.sleep_minutes, servers.asleep
+                servers.sleep_minutes, servers.asleep, servers.says_offline
          FROM servers JOIN templates ON templates.id = servers.template_id",
     )
     .fetch_all(db)
@@ -478,6 +489,7 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
                 name,
                 sleep_minutes,
                 asleep,
+                says_offline,
             )| {
                 Ok(Definition {
                     id,
@@ -485,6 +497,7 @@ pub(crate) async fn definitions(db: &SqlitePool) -> anyhow::Result<Vec<Definitio
                     name,
                     sleep_minutes: sleep_minutes.try_into()?,
                     asleep: asleep != 0,
+                    says_offline: says_offline != 0,
                     template: serde_json::from_str(&template)
                         .context("reading a stored template")?,
                     image,
@@ -592,8 +605,8 @@ async fn create_server(
     let id = sqlx::query(
         "INSERT INTO servers
              (uuid, name, template_id, image, memory_mb, cpu_percent, port, protocol, ports,
-              variables, eula, sleep_minutes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              variables, eula, sleep_minutes, says_offline, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&uuid)
     .bind(&checked.name)
@@ -607,6 +620,7 @@ async fn create_server(
     .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
     .bind(checked.eula)
     .bind(checked.sleep_minutes)
+    .bind(checked.says_offline)
     .bind(created_at)
     .execute(&state.db)
     .await
@@ -630,6 +644,7 @@ async fn create_server(
         variables: checked.variables.iter().cloned().collect(),
         eula: checked.eula,
         sleep_minutes: checked.sleep_minutes.into(),
+        says_offline: checked.says_offline,
         players: None,
         mods: mods::fits(&template),
         permissions: Permission::ALL.to_vec(),
@@ -692,7 +707,7 @@ async fn change_server(
     sqlx::query(
         "UPDATE servers
          SET name = ?, image = ?, memory_mb = ?, cpu_percent = ?, port = ?, protocol = ?,
-             ports = ?, variables = ?, eula = ?, sleep_minutes = ?
+             ports = ?, variables = ?, eula = ?, sleep_minutes = ?, says_offline = ?
          WHERE id = ?",
     )
     .bind(&checked.name)
@@ -705,6 +720,7 @@ async fn change_server(
     .bind(serde_json::to_string(&checked.variables).map_err(anyhow::Error::new)?)
     .bind(checked.eula)
     .bind(checked.sleep_minutes)
+    .bind(checked.says_offline)
     .bind(id)
     .execute(&state.db)
     .await
@@ -756,12 +772,13 @@ async fn get_server(
         i64,
         i64,
         String,
+        i64,
     );
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.name, servers.template_id, templates.name, servers.image,
                 servers.memory_mb, servers.cpu_percent, servers.port, servers.protocol,
                 servers.ports, servers.created_at, servers.variables, servers.eula,
-                servers.sleep_minutes, templates.definition
+                servers.sleep_minutes, templates.definition, servers.says_offline
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
@@ -783,6 +800,7 @@ async fn get_server(
         eula,
         sleep_minutes,
         definition,
+        says_offline,
     ) = found.ok_or(MISSING)?;
     let variables: Vec<(String, String)> = serde_json::from_str(&variables)
         .context("reading a server's variables")
@@ -812,6 +830,7 @@ async fn get_server(
         variables: variables.into_iter().collect(),
         eula: eula != 0,
         sleep_minutes,
+        says_offline: says_offline != 0,
         players: players_of(&state, id),
         // A template that cannot be read is no reason not to show its server.
         mods: templates::read(&definition).is_ok_and(|template| mods::fits(&template)),

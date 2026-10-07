@@ -182,6 +182,7 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
           variables: Object.fromEntries(template.variables.map(({ env }) => [env, typed(`variable.${env}`)])),
           eula: form.get('eula') === 'on',
           sleep_minutes: Number(typed('sleep_minutes')) || 0,
+          says_offline: form.get('says_offline') === 'on',
         })
       }}
     >
@@ -256,6 +257,22 @@ export function ServerForm({ template, start, submit, pending, problem, onSubmit
             defaultValue={start.sleep_minutes ?? 0}
             hint="For a Minecraft server, which says who is on it: stopped when nobody has been for this long, and started again when a player joins. 0 is never."
           />
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              name="says_offline"
+              defaultChecked={start.says_offline ?? false}
+              className="mt-0.5 size-4 accent-accent"
+            />
+            <span>
+              Tell players when it is stopped
+              <span className="block text-small text-ink-subtle">
+                For a Minecraft server: while it is stopped, something small listens on its port and says that it is
+                offline, in the game's list and to a player who joins. Without this they are told only that nothing
+                answers.
+              </span>
+            </span>
+          </label>
           <div className="flex flex-col gap-1.5">
             <label htmlFor={`${id}-protocol`} className="text-caption text-ink-subtle">
               What the port is open for
