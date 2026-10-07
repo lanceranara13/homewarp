@@ -28,22 +28,33 @@ stop() {
 # The name, in its own colour where there is a terminal to show it on and
 # nothing has asked for none.
 banner() {
-  tint='' plain=''
+  c1='' c2='' c3='' c4='' c5='' c6='' c7='' c8='' plain=''
   if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
-    tint=$(printf '\033[38;5;141m') plain=$(printf '\033[0m')
-    case "${COLORTERM:-}" in truecolor | 24bit) tint=$(printf '\033[38;2;143;124;255m') ;; esac
+    plain=$(printf '\033[0m')
+    case "${COLORTERM:-}" in
+      # A shade to a letter, from the deep violet to the pale.
+      truecolor | 24bit)
+        c1=$(printf '\033[38;2;110;86;248m') c2=$(printf '\033[38;2;122;100;249m')
+        c3=$(printf '\033[38;2;135;114;250m') c4=$(printf '\033[38;2;147;128;251m')
+        c5=$(printf '\033[38;2;159;142;252m') c6=$(printf '\033[38;2;171;156;253m')
+        c7=$(printf '\033[38;2;184;170;254m') c8=$(printf '\033[38;2;196;184;255m')
+        ;;
+      # One violet for all of it: it holds until it is taken off.
+      *) c1=$(printf '\033[38;5;141m') ;;
+    esac
   fi
-  printf '%s' "$tint"
-  cat <<'BANNER'
-
-    /\      _   _
-   /  \    | | | | ___  _ __ ___   _____      ____ _ _ __ _ __
-  / /\ \   | |_| |/ _ \| '_ ` _ \ / _ \ \ /\ / / _` | '__| '_ \
-  \ \/ /   |  _  | (_) | | | | | |  __/\ V  V / (_| | |  | |_) |
-   \  /    |_| |_|\___/|_| |_| |_|\___| \_/\_/ \__,_|_|  | .__/
-    \/                                                   |_|   Gate
-BANNER
-  printf '%s\n' "$plain"
+  row() {
+    printf '  %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' "$c1" "$1" "$c2" "$2" "$c3" "$3" "$c4" "$4" \
+      "$c5" "$5" "$c6" "$6" "$c7" "$7" "$c8" "$8" "$plain"
+  }
+  echo
+  row '██╗  ██╗' ' ██████╗ ' '███╗   ███╗' '███████╗' '██╗    ██╗' ' █████╗ ' '██████╗ ' '██████╗ '
+  row '██║  ██║' '██╔═══██╗' '████╗ ████║' '██╔════╝' '██║    ██║' '██╔══██╗' '██╔══██╗' '██╔══██╗'
+  row '███████║' '██║   ██║' '██╔████╔██║' '█████╗  ' '██║ █╗ ██║' '███████║' '██████╔╝' '██████╔╝'
+  row '██╔══██║' '██║   ██║' '██║╚██╔╝██║' '██╔══╝  ' '██║███╗██║' '██╔══██║' '██╔══██╗' '██╔═══╝ '
+  row '██║  ██║' '╚██████╔╝' '██║ ╚═╝ ██║' '███████╗' '╚███╔███╔╝' '██║  ██║' '██║  ██║' '██║     '
+  row '╚═╝  ╚═╝' ' ╚═════╝ ' '╚═╝     ╚═╝' '╚══════╝' ' ╚══╝╚══╝ ' '╚═╝  ╚═╝' '╚═╝  ╚═╝' '╚═╝     '
+  printf '  %sGate%s\n\n' "$c1" "$plain"
 }
 banner
 
