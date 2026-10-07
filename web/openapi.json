@@ -2798,6 +2798,320 @@
         }
       }
     },
+    "/api/v1/servers/{id}/mods": {
+      "get": {
+        "summary": "Mods or plugins on Modrinth for what this server runs: by what was typed,\nor the most downloaded where nothing was. Core asks Modrinth; the page\ndoes not.",
+        "operationId": "find_mods",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "description": "Words to look for. With none, the most downloaded are answered.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "loader",
+            "in": "query",
+            "description": "What loads it on this server: paper, purpur, folia, spigot, bukkit,\nvelocity, bungeecord, waterfall, fabric, quilt, forge or neoforge.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "game",
+            "in": "query",
+            "description": "The version of Minecraft the server runs, such as 1.21.1. Left out, any.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Found"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account has not been let write this server's files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Modrinth could not be asked, or did not answer as expected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The loader or the version is not one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Fetches a release's file from Modrinth and puts it in the folder this\nserver's loader reads: `plugins` or `mods`. It is written only once its\nchecksum is the one Modrinth gives for it, and is loaded when the server\nnext starts. What the release needs beside itself is not installed with it.",
+        "operationId": "install_mod",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Wants"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Installed"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account has not been let write this server's files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The file could not be fetched, was not the file Modrinth describes, or there is no room for it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The release or the loader is not one, or the release is not for that loader.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/servers/{id}/mods/{project}/releases": {
+      "get": {
+        "summary": "The newest releases of one project for what this server runs.",
+        "operationId": "list_releases",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "The project's id on Modrinth.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "description": "Words to look for. With none, the most downloaded are answered.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "loader",
+            "in": "query",
+            "description": "What loads it on this server: paper, purpur, folia, spigot, bukkit,\nvelocity, bungeecord, waterfall, fabric, quilt, forge or neoforge.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "game",
+            "in": "query",
+            "description": "The version of Minecraft the server runs, such as 1.21.1. Left out, any.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Release"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account has not been let write this server's files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Modrinth could not be asked, or did not answer as expected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The project, the loader or the version is not one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/servers/{id}/power": {
       "post": {
         "summary": "Starts, stops or kills a server, or installs one again whose install failed.\nThe answer comes once the request is on its way, not once it is carried out.",
@@ -4893,6 +5207,42 @@
           }
         }
       },
+      "Found": {
+        "type": "object",
+        "description": "A project on Modrinth.",
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "description",
+          "author",
+          "downloads"
+        ],
+        "properties": {
+          "author": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "downloads": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Its id on Modrinth."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The name it has in its address there: modrinth.com/project/<slug>."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "GateState": {
         "type": "string",
         "description": "Where a Gate stands.",
@@ -5046,6 +5396,19 @@
           "egg": {
             "type": "string",
             "description": "The egg as a panel exports it: JSON or YAML."
+          }
+        }
+      },
+      "Installed": {
+        "type": "object",
+        "description": "Where a mod was put.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The file, from the top of the server's files."
           }
         }
       },
@@ -5645,6 +6008,67 @@
           }
         }
       },
+      "Release": {
+        "type": "object",
+        "description": "One release of a project: one file, for some loaders and some versions of Minecraft.",
+        "required": [
+          "id",
+          "name",
+          "number",
+          "channel",
+          "games",
+          "loaders",
+          "file",
+          "size",
+          "requires"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "release, beta or alpha."
+          },
+          "file": {
+            "type": "string",
+            "description": "The name of its file."
+          },
+          "games": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The versions of Minecraft it is for, oldest first."
+          },
+          "id": {
+            "type": "string",
+            "description": "Its id on Modrinth."
+          },
+          "loaders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "number": {
+            "type": "string",
+            "description": "The version its authors gave it."
+          },
+          "requires": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many other projects it needs, which are not installed with it.",
+            "minimum": 0
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "In bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "RemoveRequest": {
         "type": "object",
         "required": [
@@ -5780,6 +6204,7 @@
           "variables",
           "eula",
           "sleep_minutes",
+          "mods",
           "permissions"
         ],
         "properties": {
@@ -5814,6 +6239,10 @@
           "memory_mb": {
             "type": "integer",
             "format": "int64"
+          },
+          "mods": {
+            "type": "boolean",
+            "description": "Whether it is one of Minecraft's, which mods or plugins can be found for."
           },
           "name": {
             "type": "string"
@@ -6580,6 +7009,24 @@
           "trial",
           "kept"
         ]
+      },
+      "Wants": {
+        "type": "object",
+        "description": "The release to install.",
+        "required": [
+          "release",
+          "loader"
+        ],
+        "properties": {
+          "loader": {
+            "type": "string",
+            "description": "What loads it on this server, which says which folder it goes in."
+          },
+          "release": {
+            "type": "string",
+            "description": "The release's id on Modrinth."
+          }
+        }
       }
     }
   }

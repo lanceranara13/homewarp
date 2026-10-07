@@ -41,7 +41,7 @@ pub(crate) const KEPT_FREE: u64 = 1 << 30;
 /// How much of a download is read at a time.
 const CHUNK: usize = 64 << 10;
 
-const NO_ROOM: Problem = Problem::Conflict(Cow::Borrowed(
+pub(crate) const NO_ROOM: Problem = Problem::Conflict(Cow::Borrowed(
     "There is not enough room left on this machine's disk for that.",
 ));
 
@@ -197,7 +197,11 @@ fn unreadable(error: io::Error) -> io::Error {
 }
 
 /// Opens a server's files.
-async fn files_of(state: &AppState, who: &User, id: i64) -> Result<Arc<ServerDir>, Problem> {
+pub(crate) async fn files_of(
+    state: &AppState,
+    who: &User,
+    id: i64,
+) -> Result<Arc<ServerDir>, Problem> {
     accounts::may(&state.db, who, id, Some(Permission::Files)).await?;
     let uuid: Option<String> = sqlx::query_scalar("SELECT uuid FROM servers WHERE id = ?")
         .bind(id)
@@ -211,7 +215,7 @@ async fn files_of(state: &AppState, who: &User, id: i64) -> Result<Arc<ServerDir
 
 /// Does something with a server's files, off the async threads, and puts what
 /// the file system said to it in words.
-async fn with<T: Send + 'static>(
+pub(crate) async fn with<T: Send + 'static>(
     files: &Arc<ServerDir>,
     work: impl FnOnce(&ServerDir) -> io::Result<T> + Send + 'static,
 ) -> Result<T, Problem> {
@@ -221,7 +225,7 @@ async fn with<T: Send + 'static>(
 
 /// How many bytes may still be written to a server's files: what is free on
 /// the disk, less what is kept free.
-async fn room(files: &Arc<ServerDir>) -> Result<u64, Problem> {
+pub(crate) async fn room(files: &Arc<ServerDir>) -> Result<u64, Problem> {
     let free = with(files, |files| files.free()).await?;
     Ok(free.saturating_sub(KEPT_FREE))
 }

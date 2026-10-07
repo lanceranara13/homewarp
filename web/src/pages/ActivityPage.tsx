@@ -38,6 +38,7 @@ const WORDS: Record<string, string> = {
   'server.command': 'Typed a command',
   'server.let_in': 'Let an account in',
   'server.turn_out': 'Took an account out',
+  'mods.install': 'Installed a mod',
   'files.write': 'Wrote a file',
   'files.download': 'Downloaded a file',
   'files.folder': 'Made a folder',

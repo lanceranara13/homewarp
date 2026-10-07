@@ -341,25 +341,34 @@ pub(crate) async fn send_json(url: &str, json: &serde_json::Value) -> Result<(),
     }
 }
 
-/// The text at an address, up to `at_most` bytes of it.
-pub(crate) async fn text(url: &str, at_most: usize) -> Result<String, Unfetched> {
+/// What is at an address, up to `at_most` bytes of it, within `patience`,
+/// redirections and all. A file takes longer than a page of text does.
+pub(crate) async fn bytes(
+    url: &str,
+    at_most: usize,
+    patience: Duration,
+) -> Result<Bytes, Unfetched> {
     let fetched = async {
         let mut place = place(url)?;
         for _ in 0..=REDIRECTIONS {
             match ask(&place, at_most).await? {
-                Answered::Text(bytes) => {
-                    return String::from_utf8(bytes.to_vec())
-                        .map_err(|_| "What is at that address is not text.".to_owned());
-                }
+                Answered::Text(bytes) => return Ok(bytes),
                 Answered::Elsewhere(to) => place = self::place(&to)?,
             }
         }
         Err("That address sends on and on to others.".to_owned())
     };
-    match timeout(PATIENCE, fetched).await {
+    match timeout(patience, fetched).await {
         Ok(fetched) => fetched,
         Err(_) => Err("That address took too long to answer.".to_owned()),
     }
+}
+
+/// The text at an address, up to `at_most` bytes of it.
+pub(crate) async fn text(url: &str, at_most: usize) -> Result<String, Unfetched> {
+    let fetched = bytes(url, at_most, PATIENCE).await?;
+    String::from_utf8(fetched.to_vec())
+        .map_err(|_| "What is at that address is not text.".to_owned())
 }
 
 #[cfg(test)]

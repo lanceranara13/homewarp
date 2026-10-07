@@ -22,6 +22,7 @@ import { ImportTemplatePage } from './pages/ImportTemplatePage'
 import { LoginPage } from './pages/LoginPage'
 import { ConnectPage, NetworkPage } from './pages/NetworkPage'
 import { ChooseTemplatePage, NewServerPage } from './pages/NewServerPage'
+import { ModsTab } from './pages/ModsPage'
 import { SchedulesTab } from './pages/SchedulesPage'
 import { ConsoleTab, ServerLayout, ServerSettingsTab } from './pages/ServerPage'
 import { ServerUsersTab } from './pages/ServerUsersPage'
@@ -297,6 +298,13 @@ const backupsRoute = createRoute({
   component: BackupsTab,
 })
 
+/** Nothing is asked for before it is shown: Modrinth is asked when somebody searches. */
+const modsRoute = createRoute({
+  getParentRoute: () => serverRoute,
+  path: 'mods',
+  component: ModsTab,
+})
+
 const schedulesRoute = createRoute({
   getParentRoute: () => serverRoute,
   path: 'schedules',
@@ -361,6 +369,7 @@ const routeTree = rootRoute.addChildren([
       filesRoute,
       editFileRoute,
       backupsRoute,
+      modsRoute,
       schedulesRoute,
       serverUsersRoute,
       serverSettingsRoute,

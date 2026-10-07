@@ -21,6 +21,8 @@ export type Gate = components['schemas']['GateView']
 export type PortProtocol = components['schemas']['PortProtocol']
 export type ExtraPort = components['schemas']['ExtraPort']
 export type FileEntry = components['schemas']['FileEntry']
+export type FoundMod = components['schemas']['Found']
+export type ModRelease = components['schemas']['Release']
 export type DiskUse = components['schemas']['DiskUse']
 export type Unpacked = components['schemas']['Unpacked']
 export type Account = components['schemas']['Account']
@@ -343,6 +345,30 @@ export async function removeFiles(id: number, paths: string[]): Promise<void> {
     api.POST('/api/v1/servers/{id}/files/remove', { params: { path: { id } }, body: { paths } }),
   )
   if (!response.ok) fail(error)
+}
+
+/** Mods or plugins on Modrinth for what a server runs. Homewarp asks Modrinth; the page does not. */
+export async function findMods(id: number, wanted: { query: string; loader: string; game: string }): Promise<FoundMod[]> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/servers/{id}/mods', { params: { path: { id }, query: wanted } }))
+  return data ?? fail(error)
+}
+
+/** The newest releases of one project on Modrinth for what a server runs. */
+export async function modReleases(id: number, project: string, runs: { loader: string; game: string }): Promise<ModRelease[]> {
+  const { data, error } = await signedIn(() =>
+    api.GET('/api/v1/servers/{id}/mods/{project}/releases', {
+      params: { path: { id, project }, query: { loader: runs.loader, game: runs.game } },
+    }),
+  )
+  return data ?? fail(error)
+}
+
+/** Has Homewarp fetch a release, check it, and put it where the server's loader reads. The answer is where it was put. */
+export async function installMod(id: number, release: string, loader: string): Promise<string> {
+  const { data, error } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/mods', { params: { path: { id } }, body: { release, loader } }),
+  )
+  return data?.path ?? fail(error)
 }
 
 /** Packs what is named, in a folder, into one archive there. The answer is the archive's name. */

@@ -28,6 +28,7 @@ use crate::{
     api::{AppState, FromHere, Owner, Problem, ProblemBody, SignedIn},
     audit, auth,
     minecraft::Players,
+    mods,
     runtime::{self, Definition, Event, Power, Runtime},
     templates,
 };
@@ -199,6 +200,8 @@ struct Server {
     sleep_minutes: i64,
     /// Who is on it, for a running server that says.
     players: Option<Players>,
+    /// Whether it is one of Minecraft's, which mods or plugins can be found for.
+    mods: bool,
     /// What the account that asks may do with it, beyond looking at it.
     permissions: Vec<Permission>,
 }
@@ -628,6 +631,7 @@ async fn create_server(
         eula: checked.eula,
         sleep_minutes: checked.sleep_minutes.into(),
         players: None,
+        mods: mods::fits(&template),
         permissions: Permission::ALL.to_vec(),
     };
     runtime.add(checked.definition(id, uuid, template, false));
@@ -751,12 +755,13 @@ async fn get_server(
         String,
         i64,
         i64,
+        String,
     );
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.name, servers.template_id, templates.name, servers.image,
                 servers.memory_mb, servers.cpu_percent, servers.port, servers.protocol,
                 servers.ports, servers.created_at, servers.variables, servers.eula,
-                servers.sleep_minutes
+                servers.sleep_minutes, templates.definition
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
@@ -777,6 +782,7 @@ async fn get_server(
         variables,
         eula,
         sleep_minutes,
+        definition,
     ) = found.ok_or(MISSING)?;
     let variables: Vec<(String, String)> = serde_json::from_str(&variables)
         .context("reading a server's variables")
@@ -807,6 +813,8 @@ async fn get_server(
         eula: eula != 0,
         sleep_minutes,
         players: players_of(&state, id),
+        // A template that cannot be read is no reason not to show its server.
+        mods: templates::read(&definition).is_ok_and(|template| mods::fits(&template)),
         permissions,
     }))
 }

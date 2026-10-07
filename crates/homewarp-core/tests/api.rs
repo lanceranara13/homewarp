@@ -1185,6 +1185,18 @@ async fn an_account_does_what_it_has_been_let_do_and_no_more() {
         );
     }
 
+    // Nor may it have Homewarp fetch a mod into the server's files, or ask for it what there is.
+    let release = json!({ "release": "abc", "loader": "paper" });
+    for answer in [
+        panel.get("/api/v1/servers/1/mods?loader=paper", sam).await,
+        panel
+            .get("/api/v1/servers/1/mods/abc/releases?loader=paper", sam)
+            .await,
+        panel.post("/api/v1/servers/1/mods", release, sam).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+    }
+
     // Let do one thing, it may do that one.
     assert_eq!(
         panel.put(&grant, files, owner).await.status,
@@ -1770,6 +1782,66 @@ async fn where_notices_go_is_the_owners_to_say_and_is_not_given_back() {
     ] {
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     }
+}
+
+#[tokio::test]
+async fn mods_are_asked_for_by_what_a_server_runs() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    panel.a_server().await;
+    let cookie = Some(cookie.as_str());
+    let mods = "/api/v1/servers/1/mods";
+
+    // What is not a loader, a version or a project is refused before
+    // Modrinth is asked anything: each of them goes into an address.
+    for (asked, why) in [
+        (format!("{mods}?loader=sponge"), "Say what loads it"),
+        (format!("{mods}?loader=..%2Fplugins"), "Say what loads it"),
+        (
+            format!("{mods}?loader=paper&game=1.21%22%5D%5D"),
+            "written like 1.21.1",
+        ),
+        (
+            format!("{mods}/..%2F..%2Fuser/releases?loader=paper"),
+            "not a project on Modrinth",
+        ),
+        (
+            format!("{mods}/abc/releases?loader=paper&game=1%2F2"),
+            "written like 1.21.1",
+        ),
+    ] {
+        let answer = panel.get(&asked, cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{asked}");
+        let said = answer.body["error"].as_str().unwrap();
+        assert!(said.contains(why), "{asked}: {said}");
+    }
+    for (wants, why) in [
+        (
+            json!({ "release": "../x", "loader": "paper" }),
+            "not a release on Modrinth",
+        ),
+        (
+            json!({ "release": "abc", "loader": "sponge" }),
+            "no such loader",
+        ),
+    ] {
+        let answer = panel.post(mods, wants.clone(), cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{wants}");
+        let said = answer.body["error"].as_str().unwrap();
+        assert!(said.contains(why), "{wants}: {said}");
+    }
+
+    // A server that is not there, and nobody signed in.
+    let nowhere = panel
+        .get("/api/v1/servers/9/mods?loader=paper", cookie)
+        .await;
+    assert_eq!(nowhere.status, StatusCode::NOT_FOUND);
+    let nobody = panel.get(&format!("{mods}?loader=paper"), None).await;
+    assert_eq!(nobody.status, StatusCode::UNAUTHORIZED);
+
+    // The template this server was made from says nothing of Minecraft.
+    let server = panel.get("/api/v1/servers/1", cookie).await;
+    assert_eq!(server.body["mods"], false);
 }
 
 #[tokio::test]

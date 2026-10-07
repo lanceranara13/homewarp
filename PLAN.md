@@ -1715,6 +1715,32 @@ Each phase ends with something that works on the homelab.
       VPS connected to a throwaway copy, its Gate stopped and started, which arrived as
       lost and as back. Discord itself was not tried: there is no webhook of the
       owner's here to try it with.
+  - *Mods and plugins, from Modrinth* (a Minecraft server's Mods tab).
+    - *What it does:* searches Modrinth for what the server runs (one of twelve
+      loaders, and a version of Minecraft if one is given), lists a project's newest
+      releases, and installs one: into `plugins/` for Paper and its kin and the
+      proxies, into `mods/` for Fabric, Quilt, Forge and NeoForge. What is installed is
+      listed, and taken out, by the files routes there were already.
+    - *Core asks Modrinth, the page does not.* The panel's pages talk to the panel and
+      to nothing else, and no picture is loaded from anyone.
+    - *Held to more than a fetch is.* A release is named by its id and described by
+      Modrinth, not by the page. Its file is fetched only from Modrinth's own file
+      server, has to be a `.jar` by a plain name, 64 MB at the most, and is written only
+      once its SHA-512 is the one Modrinth gives. What goes into an address (a loader, a
+      version, an id) is held to what such a thing looks like first.
+    - *A mod is somebody's program, and the page says so.* It runs inside the server's
+      container with the server's files, as one uploaded by hand would. Installing is
+      for an account that may write the server's files. What a release needs beside
+      itself is counted and said, and not installed with it.
+    - *The tab is there for a Minecraft server,* which is told by the file its template
+      sets up (`server.properties`, `velocity.toml`): an egg does not say what game it
+      is.
+    - *Tried against Modrinth itself,* from a throwaway copy on the homelab: LuckPerms
+      found for Velocity; its releases listed; the newest installed (1.5 MB, the
+      server's user's, and its checksum the same by `sha512sum` and Modrinth's API
+      asked with `curl`); a release for another loader refused; and Velocity, started
+      again, said "Loaded plugin luckperms 5.5.71". In a browser: search, releases,
+      install, the list, and removal.
 - *Not done, and why:*
   - *Answering for a server that is stopped, and from the Gate while home is away.*
     The stand-in could say "offline" as well as "asleep", at the price of a container

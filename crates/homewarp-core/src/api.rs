@@ -29,6 +29,7 @@ use crate::{
     door::Client,
     files, guard,
     limits::Limiter,
+    mods,
     panel::{self, Authority, Panel},
     passkeys::{self, Challenges},
     runtime::Runtime,
@@ -188,6 +189,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(passkeys::routes())
         .merge(guard::routes())
         .merge(catalogue::routes())
+        .merge(mods::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.

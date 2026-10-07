@@ -84,7 +84,7 @@ export function ServerLayout() {
             come back in a minute. Stop keeps it down.
           </p>
         )}
-        <Tabs serverId={serverId} may={server.permissions} owner={owner} />
+        <Tabs serverId={serverId} may={server.permissions} owner={owner} mods={server.mods} />
         <main className="flex min-w-0 flex-1 flex-col gap-4">
           <Live value={followed}>
             <Outlet />
@@ -111,7 +111,7 @@ const TAB_HERE = { className: 'border-accent text-ink' }
 const TAB_ELSEWHERE = { className: 'border-transparent text-ink-subtle hover:text-ink' }
 
 /** Underline tabs on a hairline. They scroll sideways on a narrow screen, and never wrap (DESIGN.md, Tabs). */
-function Tabs({ serverId, may, owner }: { serverId: string; may: Permission[]; owner: boolean }) {
+function Tabs({ serverId, may, owner, mods }: { serverId: string; may: Permission[]; owner: boolean; mods: boolean }) {
   return (
     // The hairline is the frame's and the underlines are the tabs': the row of tabs sits a pixel
     // into it, as a whole, because a row that scrolls sideways cuts off what hangs out of it.
@@ -138,6 +138,18 @@ function Tabs({ serverId, may, owner }: { serverId: string; may: Permission[]; o
             inactiveProps={TAB_ELSEWHERE}
           >
             Files
+          </Link>
+        )}
+        {/* For a Minecraft server, and for whoever may write its files: a mod is a file among them. */}
+        {mods && may.includes('files') && (
+          <Link
+            to="/servers/$serverId/mods"
+            params={{ serverId }}
+            className={TAB}
+            activeProps={TAB_HERE}
+            inactiveProps={TAB_ELSEWHERE}
+          >
+            Mods
           </Link>
         )}
         {may.includes('backups') && (
