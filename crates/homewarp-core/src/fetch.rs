@@ -367,6 +367,57 @@ pub(crate) async fn bytes(
     }
 }
 
+/// A file of a release, from where this Homewarp's releases are: an address
+/// its owner gave it when it was installed, and not one that was typed into a
+/// page. So it may be a plain `http://` one, on a port and at an address of
+/// any kind: a release served on the owner's own network. Whatever comes from
+/// there is believed for its signature and not for where it came from.
+pub(crate) async fn released(
+    url: &str,
+    at_most: usize,
+    patience: Duration,
+) -> Result<Bytes, Unfetched> {
+    let Some(rest) = url.trim().strip_prefix("http://") else {
+        return bytes(url, at_most, patience).await;
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    let fetched = async {
+        let at = match authority.rsplit_once(':') {
+            Some((_, port)) if port.parse::<u16>().is_ok() => authority.to_owned(),
+            _ => format!("{authority}:80"),
+        };
+        let stream = timeout(CONNECTING, TcpStream::connect(at.as_str()))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(|| format!("{authority} could not be reached."))?;
+        let request = Request::get(path.as_str())
+            .header(HOST, authority)
+            .header(USER_AGENT, AGENT)
+            .header(ACCEPT, "*/*")
+            .body(Full::<Bytes>::default())
+            .map_err(|error| format!("{authority} cannot be asked for that: {error}."))?;
+        let said = exchange(stream, authority, request, at_most).await?;
+        match said.status {
+            StatusCode::OK => said.sent.ok_or_else(|| {
+                format!(
+                    "What is at that address is more than {} kB, or was cut short.",
+                    at_most / 1024
+                )
+            }),
+            StatusCode::NOT_FOUND => Err(format!("{authority} has nothing at that address.")),
+            status => Err(format!("{authority} answered {status}.")),
+        }
+    };
+    match timeout(patience, fetched).await {
+        Ok(fetched) => fetched,
+        Err(_) => Err("That address took too long to answer.".to_owned()),
+    }
+}
+
 /// The text at an address, up to `at_most` bytes of it.
 pub(crate) async fn text(url: &str, at_most: usize) -> Result<String, Unfetched> {
     let fetched = bytes(url, at_most, PATIENCE).await?;

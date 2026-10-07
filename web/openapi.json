@@ -4663,6 +4663,183 @@
         }
       }
     },
+    "/api/v1/update": {
+      "get": {
+        "summary": "Which version runs, whether a newer one is out, and whether this Homewarp\ncan put it in place itself. The one request the Updates page needs.",
+        "operationId": "get_update",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Says which releases this Homewarp takes: only what has been released, or\nwhat is being tried before it is as well.",
+        "operationId": "change_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/update/check": {
+      "post": {
+        "summary": "Looks for a newer release now, where Homewarp otherwise looks every few hours.",
+        "operationId": "check_update",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/update/install": {
+      "post": {
+        "summary": "Puts the newest release of this Homewarp's channel in place of the one\nthat runs. The answer comes at once; the update goes on, and asking how it\nstands shows it. Homewarp stops answering for a moment near the end, and\nanswers again as the new version, or as the old one if the new one did not\nstart. Servers that are running go on running all the while.",
+        "operationId": "install_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The update has begun.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There is nothing newer, an update is being made already, or this Homewarp cannot replace itself.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users": {
       "get": {
         "summary": "Every account, the owner's first. The one request the Users page needs.",
@@ -5286,6 +5463,14 @@
           }
         }
       },
+      "Channel": {
+        "type": "string",
+        "description": "Which releases a Homewarp takes.",
+        "enum": [
+          "stable",
+          "beta"
+        ]
+      },
       "CommandRequest": {
         "type": "object",
         "required": [
@@ -5876,6 +6061,16 @@
           }
         }
       },
+      "InstallUpdate": {
+        "type": "object",
+        "description": "What an update is asked with.",
+        "properties": {
+          "servers": {
+            "type": "boolean",
+            "description": "Back every server up first, as its Backups tab does, and go on only\nonce every backup is made. Homewarp's own database is copied either\nway: it is what is put back if the new version does not start."
+          }
+        }
+      },
       "Installed": {
         "type": "object",
         "description": "Where a mod was put.",
@@ -5899,6 +6094,37 @@
             "type": "integer",
             "format": "int64",
             "description": "From 1 to 20."
+          }
+        }
+      },
+      "Last": {
+        "type": "object",
+        "description": "How the last update went.",
+        "required": [
+          "to",
+          "ok",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When that was found out, in Unix seconds."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What went wrong, where something did: the end of what was written\ndown while it was tried."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Whether that version is the one that runs now."
+          },
+          "to": {
+            "type": "string",
+            "description": "The version it was to."
           }
         }
       },
@@ -7201,6 +7427,15 @@
           "asleep"
         ]
       },
+      "Step": {
+        "type": "string",
+        "description": "Where an update that is being made stands.",
+        "enum": [
+          "fetching",
+          "backing_up",
+          "starting_again"
+        ]
+      },
       "StopBy": {
         "type": "string",
         "enum": [
@@ -7581,6 +7816,128 @@
             "format": "int64",
             "description": "How many entries were left out: those that would have gone outside the\nserver's files, and what is neither a file, a folder nor a link.",
             "minimum": 0
+          }
+        }
+      },
+      "UpdateSettings": {
+        "type": "object",
+        "description": "What can be set about updates.",
+        "required": [
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "$ref": "#/components/schemas/Channel"
+          }
+        }
+      },
+      "UpdateView": {
+        "type": "object",
+        "description": "What there is to know about updates.",
+        "required": [
+          "version",
+          "channel",
+          "available",
+          "installs"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether that is newer than what is running."
+          },
+          "by_hand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it cannot, where it cannot."
+          },
+          "channel": {
+            "$ref": "#/components/schemas/Channel",
+            "description": "Which releases this Homewarp takes."
+          },
+          "checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it last looked for a newer one, in Unix seconds."
+          },
+          "gate_line": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The line that puts this release's Gate in place of an older one, run\nas root on a VPS."
+          },
+          "installs": {
+            "type": "boolean",
+            "description": "Whether this Homewarp can put a newer version in place of itself."
+          },
+          "last": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Last",
+                "description": "How the last one went."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "line": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The line that installs the newest release by hand, on the machine\nHomewarp runs on. Nothing where it is not known where releases are."
+          },
+          "newest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest release for its channel, where the list of them could be read."
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the list could not be read, or why the last update could not be begun."
+          },
+          "updating": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Updating",
+                "description": "An update that is being made now."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "string",
+            "description": "The version that is running."
+          }
+        }
+      },
+      "Updating": {
+        "type": "object",
+        "description": "An update that is being made.",
+        "required": [
+          "to",
+          "step"
+        ],
+        "properties": {
+          "step": {
+            "$ref": "#/components/schemas/Step"
+          },
+          "to": {
+            "type": "string",
+            "description": "The version it is to."
           }
         }
       },

@@ -118,7 +118,8 @@ start_core() {
   dc exec -d home sh -c "HOMEWARP_DATA=/run/hw/core HOMEWARP_LISTEN=0.0.0.0:3600 HOMEWARP_IMAGE=homewarp-lab-core \
     HOMEWARP_TLS=unix:/run/hw/core/run/tls.sock HOMEWARP_TLS_PORT=$TLS \
     HOMEWARP_ACME=https://pebble:14000/dir HOMEWARP_ACME_ROOT=/run/hw/pebble.pem \
-    HOMEWARP_RELEASES=http://$RELEASES_IP homewarp >>/run/hw/core.log 2>&1"
+    HOMEWARP_RELEASES=http://$RELEASES_IP HOMEWARP_RELEASE_KEY=\$(cat /run/hw/release-key 2>/dev/null) \
+    homewarp >>/run/hw/core.log 2>&1"
   for _ in $(seq 40); do core GET /health >/dev/null 2>&1 && break; sleep 0.5; done
 }
 
@@ -180,6 +181,11 @@ EOF
   dc cp pebble:/test/certs/pebble.minica.pem "$root" >/dev/null
   dc cp "$root" home:/run/hw/pebble.pem >/dev/null
   rm -f "$root"
+  # The key the lab's release is signed with, made here and thrown away with
+  # the lab. Core is told its public half, as a released Core is built with it.
+  release=$(mktemp -d)
+  openssl genpkey -algorithm ed25519 -out "$release/key.pem"
+  openssl pkey -in "$release/key.pem" -pubout -outform DER | tail -c 32 | base64 | dc exec -T home sh -c 'cat > /run/hw/release-key'
   start_core
   code=$(dc exec -T home sh -c "grep -o 'setup code: .*' /run/hw/core.log | cut -d' ' -f3")
   core POST /setup "{\"code\":\"$code\",\"username\":\"lab\",\"password\":\"only-in-the-lab\"}" >/dev/null
@@ -192,14 +198,15 @@ EOF
   dc exec -T home docker ps --format '   {{.Names}}  {{.Ports}}' | cut -c1-130
 
   echo "== a release: the programs, a signed list of them, and the install scripts"
-  # Made as a real one is (scripts/release.sh), signed with a key that is made
-  # here and thrown away, and put where the lab's internet fetches releases from.
-  release=$(mktemp -d)
-  openssl genpkey -algorithm ed25519 -out "$release/key.pem"
+  # Made as a real one is (scripts/release.sh), signed with the lab's own key,
+  # and put where the lab's internet fetches releases from. The key is kept
+  # beside that web server, and not in what it serves: the tests sign a later
+  # list of releases with it.
   version=$(../deploy/out/homewarp-gate version | cut -d' ' -f2)
   sh ../scripts/release.sh ../deploy/out "$release/served" "$version" "http://$RELEASES_IP" "$release/key.pem" | sed 's/^/   /'
   dc exec -T releases sh -c 'rm -rf /releases/* /tmp/released'
   dc cp "$release/served/." releases:/releases >/dev/null
+  dc cp "$release/key.pem" releases:/tmp/lab-key.pem >/dev/null
   rm -rf "$release"
 
   if [ "$GATE_FW" = firewalld ]; then
@@ -302,7 +309,7 @@ panel_is() { core GET /panel | field "$1"; }
 fw() { dc exec -T gate firewall-cmd "$@" 2>&1 | tr '\n' ' ' | sed 's/ *$//'; }
 
 cmd_test() {
-  local HOME_PUB joined carried rss size wan token answer wg_port command mc asks joins told restored second
+  local HOME_PUB joined carried rss size wan token answer wg_port command mc asks joins told restored version before second
   echo "home: $(dc exec -T home sh -c 'docker version --format "Docker {{.Server.Version}}"; iptables --version' | tr '\n' ' ') firewall backend $HOME_FW"
 
   echo "== a release is trusted for its signature, and not for where it came from"
@@ -329,6 +336,36 @@ cmd_test() {
   check "the release put back as it was installs again" "$(install) $(installed)" "Error: That is not a join token. Copy the whole command from the panel. there"
   dc exec -T client rm -f /usr/local/bin/homewarp-gate
 
+  echo "== updates: Core looks where its releases are, and believes the list there for its signature"
+  update_is() { core "${2:-GET}" "/update${3:-}" | field "$1"; }  # field, [method], [what follows /update]
+  version=$(../deploy/out/homewarp-gate version | cut -d' ' -f2)
+  check "it finds the release it was made from, and nothing newer" "$(update_is newest POST /check) $(update_is available) $(update_is problem)" "$version False None"
+  # The list as a later release would leave it, signed with the release's own
+  # key, which the lab kept for this; or not signed anew, when that is said.
+  relist() {  # the list's lines, [unsigned]
+    local work
+    work=$(mktemp -d)
+    printf '%b' "$1" > "$work/RELEASES"
+    dc cp releases:/tmp/lab-key.pem "$work/key.pem" >/dev/null
+    openssl pkeyutl -sign -inkey "$work/key.pem" -rawin -in "$work/RELEASES" -out "$work/RELEASES.sig"
+    dc cp "$work/RELEASES" releases:/releases/RELEASES >/dev/null
+    if [ "${2:-signed}" = signed ]; then dc cp "$work/RELEASES.sig" releases:/releases/RELEASES.sig >/dev/null; fi
+    rm -rf "$work"
+  }
+  dc exec -T releases sh -c 'cp /releases/RELEASES /tmp/RELEASES && cp /releases/RELEASES.sig /tmp/RELEASES.sig'
+  relist 'stable 99.0.0\nbeta 99.1.0-beta.1\n'
+  check "a newer release is seen" "$(update_is newest POST /check) $(update_is available)" "99.0.0 True"
+  check "and written down, for an owner who is not at the panel" "$(core GET /activity | python3 -c 'import json, sys; print([e["detail"] for e in json.load(sys.stdin) if e["action"] == "update.available"])')" "['99.0.0']"
+  check "a Homewarp that takes betas sees the beta" "$(core PUT /update '{"channel":"beta"}' | field newest)" "99.1.0-beta.1"
+  check "and one that does not, does not" "$(core PUT /update '{"channel":"stable"}' | field newest)" "99.0.0"
+  relist 'stable 100.0.0\n' unsigned
+  check "a list that was changed after it was signed is not believed" "$(update_is problem POST /check | grep -c 'not signed') $(update_is newest)" "1 99.0.0"
+  check "this Core was not set up by the installer, and says that it cannot replace itself" "$(update_is installs) $(dc exec -T home curl -s -o /dev/null -w '%{http_code}' -b /run/hw/jar -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:3600/api/v1/update/install)" "False 409"
+  check "and gives the line that installs the release by hand" "$(update_is line)" "curl -fsSL http://$RELEASES_IP/99.0.0/install.sh | sh"
+  dc exec -T releases sh -c 'cp /tmp/RELEASES /releases/RELEASES && cp /tmp/RELEASES.sig /releases/RELEASES.sig'
+  check "with the list as it was, there is nothing newer again" "$(update_is available POST /check) $(update_is problem)" "False None"
+  check "a release has its two scripts beside its programs" "$(status client "http://$RELEASES_IP/$version/install.sh") $(status client "http://$RELEASES_IP/$version/install-gate.sh")" "200 200"
+
   echo "== enrolment: the VPS ran one command, and what that command carried no longer counts"
   check "Core has a Gate" "$(gate_is state)" "connected"
   check "which answers through the tunnel" "$(gate_is reachable)" "True"
@@ -344,6 +381,12 @@ print(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode())')
   check "the token the command carried opens nothing" "$(dc exec -T home curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(echo "$joined" | field t)" "http://$GATE_TUN:$API_PORT/v1/status")" "401"
   check "each end has the other as its one peer" "$(dc exec -T gate wg show homewarp0 peers | wc -l) $(dc exec -T home wg show homewarp0 peers | wc -l)" "1 1"
   check "the command cannot be run a second time for another Gate" "$(gate_is command)" "None"
+
+  echo "== the Gate is updated on the VPS itself, by one line that leaves it as it is set up"
+  before=$(dc exec -T gate wg show homewarp0 public-key)
+  check "the line puts the release's Gate in place of the one that is there" "$(dc exec -T gate sh -c "curl -fsSL http://$RELEASES_IP/$version/install-gate.sh | sh -s -- update 2>&1" | tail -2 | head -1)" "Homewarp Gate $version is on this machine."
+  check "its keys are as they were, and home still reaches it" "$(dc exec -T gate wg show homewarp0 public-key) $(gate_is reachable)" "$before True"
+  check "a machine with no Gate on it is told so" "$(dc exec -T client sh -c "curl -fsSL http://$RELEASES_IP/$version/install-gate.sh | sh -s -- update 2>&1 | tail -1")" "Homewarp: there is no Gate on this machine to update. The panel gives the command that connects one."
 
   if [ "$GATE_FW" = firewalld ]; then
     echo "== the VPS's own firewall: firewalld was asked for what the tunnel needs, and for nothing more"

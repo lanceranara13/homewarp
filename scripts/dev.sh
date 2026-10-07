@@ -196,20 +196,27 @@ cmd_gate() {
 # list of their checksums, and the two install scripts.
 #
 #   RELEASES=https://example.com/homewarp bash scripts/dev.sh release
+#   RELEASES=https://example.com/homewarp CHANNEL=beta bash scripts/dev.sh release
 #
 # RELEASES is where that folder will be served from: it is written into the
-# install scripts and is what an installed Homewarp tells a VPS. RELEASE_KEY is
+# install scripts and is what an installed Homewarp tells a VPS. CHANNEL is
+# stable unless it is said to be beta: a beta is numbered as one in Cargo.toml
+# (1.2.0-beta.1), and only a Homewarp that takes betas is offered it. RELEASE_KEY is
 # the Ed25519 key that signs, kept on the homelab and nowhere in this
 # repository ($REMOTE/release.key unless said otherwise). Whoever installs
 # trusts that key and nothing else, so it is its owner's to make and to keep:
 #   ssh home 'openssl genpkey -algorithm ed25519 -out /home/lance/homewarp/release.key'
 cmd_release() {
   : "${RELEASES:?say where the release will be served from: RELEASES=https://...}"
-  local key=${RELEASE_KEY:-$REMOTE/release.key} version
+  local key=${RELEASE_KEY:-$REMOTE/release.key} version public
+  # The public half of the key, as Core is built with it: what an installed
+  # Homewarp holds the list of releases, and a newer release, against.
+  public=$(home "openssl pkey -in $key -pubout -outform DER | tail -c 32 | base64")
+  [ -n "$public" ] || { echo "there is no key at $key on the homelab (docs/releasing.md)" >&2; exit 1; }
   cmd_sync && builder
   # The web interface first: Core carries it inside, as it is when Core is compiled.
   in_node 'npm install --no-save && npm run build'
-  in_builder 'for target in x86_64 aarch64; do
+  in_builder "export HOMEWARP_RELEASE_KEY=$public; "'for target in x86_64 aarch64; do
                 cargo build --release -p homewarp-gate -p homewarp-core --target $target-unknown-linux-musl
               done
               mkdir -p deploy/out && cd /target
@@ -223,7 +230,7 @@ cmd_release() {
     'apk add -q --no-cache qemu-aarch64 >/dev/null 2>&1 && printf \"on ARM64: \" && qemu-aarch64 /out/homewarp-gate-arm64 version &&
      mkdir /tmp/data && printf \"on ARM64, Core: \" && HOMEWARP_DATA=/tmp/data qemu-aarch64 /out/homewarp-static-arm64 two-steps-off nobody'"
   version=$(home "$REMOTE/src/deploy/out/homewarp-gate version | cut -d' ' -f2")
-  home "sh $REMOTE/src/scripts/release.sh $REMOTE/src/deploy/out $REMOTE/release $version '$RELEASES' $key"
+  home "sh $REMOTE/src/scripts/release.sh $REMOTE/src/deploy/out $REMOTE/release $version '$RELEASES' $key ${CHANNEL:-stable}"
 }
 
 # Puts the Gate just built on a VPS, by way of this machine: the homelab and the

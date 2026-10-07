@@ -716,6 +716,33 @@ impl Runtime {
         Ok(())
     }
 
+    /// How the container this Core runs in was made: the image it was asked
+    /// for by name, and the labels on it. None where Core runs in no container.
+    pub(crate) async fn own_making(
+        &self,
+    ) -> anyhow::Result<Option<(String, HashMap<String, String>)>> {
+        let mounts = tokio::fs::read_to_string("/proc/self/mountinfo")
+            .await
+            .context("reading what is mounted here")?;
+        match container_id(&mounts) {
+            Some(id) => Ok(self.engine.made_as(id).await?),
+            None => Ok(None),
+        }
+    }
+
+    /// Starts a program beside everything else that goes on by itself, from
+    /// an image that is fetched first if it is not here.
+    pub(crate) async fn run_apart(
+        &self,
+        apart: &homewarp_runtime::Apart<'_>,
+    ) -> anyhow::Result<()> {
+        self.engine
+            .pull(apart.image)
+            .await
+            .with_context(|| format!("fetching the image {}", apart.image))?;
+        Ok(self.engine.run_apart(apart).await?)
+    }
+
     /// The image this Core runs from: the one image that is sure to be here,
     /// and to have this program in it.
     async fn own_image(&self) -> anyhow::Result<String> {

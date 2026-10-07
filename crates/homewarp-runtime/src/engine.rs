@@ -209,6 +209,18 @@ fn measure(
     })
 }
 
+/// A program that is started and left to itself ([`Engine::run_apart`]).
+#[derive(Debug, Clone)]
+pub struct Apart<'a> {
+    /// What its container is called. One of the same name is replaced.
+    pub name: &'a str,
+    pub image: &'a str,
+    pub command: Vec<String>,
+    /// What it is given of the machine, each as Docker writes a bind:
+    /// `/a/path/outside:/the/path/inside`.
+    pub binds: Vec<String>,
+}
+
 /// An egg's install script and where to put it.
 #[derive(Debug, Clone, Copy)]
 pub struct InstallScript<'a> {
@@ -482,6 +494,54 @@ impl Engine {
             }) => Ok(None),
             Err(other) => Err(other.into()),
         }
+    }
+
+    /// How the container with this id was made: the image it runs, by the
+    /// name it was asked for by, and the labels that were written on it.
+    /// Docker's Compose writes there which project a container is of and
+    /// where that project's file is. None if the daemon knows no such container.
+    pub async fn made_as(
+        &self,
+        container: &str,
+    ) -> Result<Option<(String, HashMap<String, String>)>, Error> {
+        match self.docker.inspect_container(container, None).await {
+            Ok(found) => {
+                let config = found.config.unwrap_or_default();
+                Ok(Some((
+                    config.image.unwrap_or_default(),
+                    config.labels.unwrap_or_default(),
+                )))
+            }
+            Err(DockerError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(None),
+            Err(other) => Err(other.into()),
+        }
+    }
+
+    /// Starts a program that is to go on by itself, whatever becomes of what
+    /// started it, and to clear itself away when it is done. It has no
+    /// network, and of the machine what `binds` gives it.
+    pub async fn run_apart(&self, apart: &Apart<'_>) -> Result<(), Error> {
+        let body = ContainerCreateBody {
+            image: Some(apart.image.to_owned()),
+            entrypoint: Some(apart.command.clone()),
+            cmd: Some(Vec::new()),
+            labels: Some(HashMap::from([(
+                "homewarp.apart".to_owned(),
+                apart.name.to_owned(),
+            )])),
+            host_config: Some(HostConfig {
+                binds: Some(apart.binds.clone()),
+                network_mode: Some("none".to_owned()),
+                auto_remove: Some(true),
+                log_config: Some(small_log()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.create_container(apart.name, body).await?;
+        Ok(self.docker.start_container(apart.name, None).await?)
     }
 
     /// Creates the server's container, replacing one left from an earlier run.

@@ -17,6 +17,7 @@ import {
   serverUsersQuery,
   settingsQuery,
   twoStepsQuery,
+  updateQuery,
   type SettingsGroup,
 } from './accounts'
 import { AppShell } from './components/AppShell'
@@ -376,6 +377,7 @@ const settingsRoute = createRoute({
     if (group === 'security') await queryClient.ensureQueryData(twoStepsQuery)
     else if (group === 'users') await queryClient.ensureQueryData(accountsQuery)
     else if (group === 'backups' || group === 'system') await queryClient.ensureQueryData(settingsQuery)
+    else if (group === 'updates') await queryClient.ensureQueryData(updateQuery)
   },
   component: SettingsPage,
 })

@@ -90,7 +90,7 @@ impl Stored {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Backup {
-    id: i64,
+    pub(crate) id: i64,
     name: String,
     state: BackupState,
     /// How long the file is. Nothing until it is done.

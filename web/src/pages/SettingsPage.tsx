@@ -27,6 +27,7 @@ import { Button, Confirm, CopyChip, Field, PageBar, Problem } from '../component
 import { when } from '../format'
 import { makePasskey, passkeysHere } from '../passkeys'
 import { sessionQuery } from '../session'
+import { Updates } from './UpdatesSettings'
 
 const route = getRouteApi('/shell/settings')
 
@@ -61,6 +62,7 @@ export function SettingsPage() {
               <Notices />
             </>
           )}
+          {group === 'updates' && <Updates />}
         </main>
       </div>
     </>

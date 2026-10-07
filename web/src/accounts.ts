@@ -2,6 +2,7 @@ import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query'
 
 import {
   getSettings,
+  getUpdate,
   getTwoSteps,
   listAccounts,
   listActivity,
@@ -56,6 +57,13 @@ export const settingsQuery = queryOptions({
   staleTime: 5_000,
 })
 
+/** Which version of Homewarp runs, and whether a newer one is out. Only the owner's page asks. */
+export const updateQuery = queryOptions({
+  queryKey: ['update'],
+  queryFn: getUpdate,
+  staleTime: 2_000,
+})
+
 /** The accounts that have been let into a server. Under the server's own key, to go when it goes. */
 export function serverUsersQuery(id: number) {
   return queryOptions({
@@ -75,7 +83,7 @@ export const PERMISSIONS: { name: Permission; label: string; means: string }[] =
   { name: 'settings', label: 'Settings', means: 'Change what it is made of' },
 ]
 
-export type SettingsGroup = 'account' | 'security' | 'users' | 'backups' | 'system'
+export type SettingsGroup = 'account' | 'security' | 'users' | 'backups' | 'system' | 'updates'
 
 /**
  * What the Settings page is divided into, in the order it is listed in: an
@@ -88,4 +96,5 @@ export const SETTINGS_GROUPS: { name: SettingsGroup; label: string; owners?: tru
   { name: 'users', label: 'Users', owners: true },
   { name: 'backups', label: 'Backups', owners: true },
   { name: 'system', label: 'System', owners: true },
+  { name: 'updates', label: 'Updates', owners: true },
 ]

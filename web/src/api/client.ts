@@ -20,6 +20,7 @@ export type Players = components['schemas']['Players']
 export type Gate = components['schemas']['GateView']
 export type Network = components['schemas']['Network']
 export type Traffic = components['schemas']['Activity']
+export type Update = components['schemas']['UpdateView']
 export type PortProtocol = components['schemas']['PortProtocol']
 export type ExtraPort = components['schemas']['ExtraPort']
 export type FileEntry = components['schemas']['FileEntry']
@@ -635,6 +636,30 @@ export async function keepGuard(id: number): Promise<VpsGuard> {
 /** Takes the guard off a VPS, kept or on trial. */
 export async function unhardenVps(id: number): Promise<VpsGuard> {
   const { data, error } = await signedIn(() => api.DELETE('/api/v1/gates/{id}/guard', { params: { path: { id } } }))
+  return data ?? fail(error)
+}
+
+/** Which version runs, whether a newer one is out, and whether Homewarp can put it in place. Only the owner may ask. */
+export async function getUpdate(): Promise<Update> {
+  const { data, error } = await signedIn(() => api.GET('/api/v1/update'))
+  return data ?? fail(error)
+}
+
+/** Says which releases this Homewarp takes. */
+export async function changeUpdate(channel: Update['channel']): Promise<Update> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/update', { body: { channel } }))
+  return data ?? fail(error)
+}
+
+/** Has Homewarp look for a newer release now. */
+export async function checkUpdate(): Promise<Update> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/update/check'))
+  return data ?? fail(error)
+}
+
+/** Begins the update to the newest release, backing every server up first if that is asked for. */
+export async function installUpdate(servers: boolean): Promise<Update> {
+  const { data, error } = await signedIn(() => api.POST('/api/v1/update/install', { body: { servers } }))
   return data ?? fail(error)
 }
 

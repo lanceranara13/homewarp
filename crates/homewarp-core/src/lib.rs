@@ -29,6 +29,7 @@ mod tls;
 mod totp;
 mod tunnel;
 mod ui;
+mod updates;
 mod webauthn;
 
 pub use accounts::two_steps_off;

@@ -107,6 +107,10 @@ only.
   away: a crash, a server asleep or woken, a VPS that stopped answering.
 - A copy of every backup in a bucket elsewhere (Amazon S3, Cloudflare R2,
   Backblaze B2, MinIO), so a lost disk is not a lost world.
+- Updates from the panel: it looks for a newer release, checks it against the
+  key releases are signed with, and puts it in place of itself. Every server
+  can be backed up first, and a version that does not start is put back.
+  Betas for those who ask for them.
 
 ## Screenshots
 
@@ -143,7 +147,8 @@ curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo sh
 It fetches Homewarp for the machine's processor, checks its signature and
 checksum, and starts it. When it is done it prints the panel's address, which
 is port 3600 of the machine, and a setup code. Everything it makes is in
-`/opt/homewarp`. Running the same line again later is the update.
+`/opt/homewarp`. Updates are under Settings in the panel from then on;
+running the same line again does the same by hand.
 
 The full account, with what can be changed and how to remove it, is in
 [docs/installing.md](docs/installing.md).
@@ -250,7 +255,6 @@ design is [DESIGN.md](DESIGN.md).
 
 ## What is not built
 
-- Updating by itself: for now an update is the install line run again.
 - Many Minecraft servers behind one port by hostname. The DNS records the
   panel shows give each server a name without it.
 - An importer that reads another panel's database

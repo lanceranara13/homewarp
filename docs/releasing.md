@@ -21,6 +21,11 @@ script will refuse what the new key signed, which is what they should do.
 RELEASES=https://lanceranara13.github.io/homewarp bash scripts/dev.sh release
 ```
 
+A beta is made the same way, with `CHANNEL=beta` before it and a beta's number
+in `Cargo.toml` (`1.2.0-beta.1`). Only a Homewarp whose owner asked for betas
+is offered it, and the one line in the README goes on installing the newest
+that was released.
+
 `RELEASES` is where the folder will be reached. It is written into the install
 scripts, and an installed Homewarp tells it to the VPS it gives a command to,
 so it has to be the real address before the release is made.
@@ -30,16 +35,31 @@ for ARM64 as single files that need nothing installed, runs the ARM64 ones in
 an emulator to see that they start, and puts together `/home/lance/homewarp/release`:
 
 ```
-install.sh                 Homewarp at home, in one line
+install.sh                 Homewarp at home, in one line: the newest that was released
 install-gate.sh            the Gate on a VPS, in one line
-1.0.0/
+RELEASES                   the newest release of each channel, a line to a channel
+RELEASES.sig               that list, signed with the key
+1.1.0/
   homewarp-x86_64          Core, with the web interface inside
   homewarp-arm64
   homewarp-gate-x86_64     the Gate
   homewarp-gate-arm64
   SHA256SUMS               the checksums of those four
   SHA256SUMS.sig           that list, signed with the key
+  install.sh               the two scripts once more, as they are for this version
+  install-gate.sh
 ```
+
+`RELEASES` is what an installed Homewarp reads to find out whether there is a
+newer one (Settings, then Updates, in the panel). It holds a line for `stable`
+and a line for `beta`, and a release rewrites the line of its own channel and
+keeps the other. Where the folder on the homelab has no list, because it was
+made anew, the one that is served already is fetched and kept if it is signed
+with the same key.
+
+Core is built with the public half of the key inside it. That is what it holds
+the list against, and the checksums of a release it is about to put in place of
+itself: a release is believed for its signature, wherever it was fetched from.
 
 The version is the one in `Cargo.toml`, which is set and committed before the
 release is made (`web/openapi.json` says it too). A second release of the same
@@ -90,8 +110,12 @@ turn to see each refused.
 
 ## What is not here yet
 
-- **Nothing updates by itself.** Running the install line again is the update.
+- **Nothing updates without being asked.** A Homewarp looks for a newer
+  release by itself, and says so in the panel and in a notice; putting it in
+  place is a button its owner presses.
+- **The Gate is not updated from the panel.** Nothing at home can run a thing
+  on a VPS. The Updates page gives the line to run there.
 - **No image in a registry.** The installer builds the image on the machine,
   from the program and Alpine's packages for `nft` and `ip`.
-- **Nothing asks whether there is a newer release.** An installed Homewarp
-  knows where its releases are, and does not look there.
+- **1.0.0 does not look.** It was released before there was a list to look
+  at, so it is updated by the install line, once.

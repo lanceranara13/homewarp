@@ -164,6 +164,13 @@ fn sentence(happened: &Happened, server: Option<&str>) -> String {
             "A VPS has stopped answering Homewarp: {detail}. Players may not be reaching the servers behind it."
         ),
         "gate.back" => format!("The VPS {detail} answers again."),
+        "update.available" => {
+            format!("Homewarp {detail} is out. It can be put in place under Settings, Updates.")
+        }
+        "update.done" => format!("Homewarp was updated to {detail}."),
+        "update.failed" => format!(
+            "The update to Homewarp {detail} did not start, and the version before it was put back."
+        ),
         "notice.test" => "Homewarp can tell this address what happens.".to_owned(),
         // Every other line, for an owner who asked for every line: who, what,
         // to which server, and what was written beside it.

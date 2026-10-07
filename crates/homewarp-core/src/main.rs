@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         .releases_at(set("HOMEWARP_RELEASES"));
     state.keep_tunnel();
     state.keep_schedules();
+    state.keep_updates();
     if let Some(listen) = tls {
         state.keep_certificate();
         let state = state.clone();

@@ -55,9 +55,26 @@ For example:
 curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo HOMEWARP_PORT=8080 sh
 ```
 
-**To update**, run the same line again. The newest release takes the place of
-the one that is running, and `data/` is left as it is. Servers that are running
-stay running.
+**To update**, open Settings, then Updates. Homewarp looks for a newer release
+every few hours and when it is asked, and puts one in place of itself at a
+press of a button: it fetches the release, holds it against the key releases
+are signed with, copies its own database, and starts again as the new version.
+Servers that are running stay running, and the panel is away for under a
+minute. If the new version does not come up and stay up, the one before it is
+put back, with the database as it was. Every server can be backed up first, as
+its Backups tab does, by ticking a box.
+
+The same page says which releases are taken: only what has been released, or
+betas as well. A beta is a release that is being tried before it is called one.
+
+Running the install line again does the same by hand, and is how a Homewarp
+older than 1.1 is updated: it has no Updates page yet. The newest release takes
+the place of the one that is running, and `data/` is left as it is.
+
+**To update the Gate on a VPS**, run the line the Updates page gives, on the
+VPS, as root. It ends in `sh -s -- update`: the Gate that is there is replaced
+and started again, and its keys, what it forwards and its guard are as they
+were. Homewarp can run nothing on a VPS, so this is not done from the panel.
 
 **To remove it**: `cd /opt/homewarp && sudo docker compose down`, then delete
 the servers' containers (`docker ps -a --filter label=homewarp.server`) and the

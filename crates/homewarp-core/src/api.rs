@@ -38,6 +38,7 @@ use crate::{
     totp, tunnel,
     tunnel::Tunnel,
     ui,
+    updates::{self, Updates},
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -68,6 +69,8 @@ pub struct AppState {
     pub(crate) panel: Arc<Panel>,
     /// The challenges that are out for passkeys to sign.
     pub(crate) challenges: Arc<Challenges>,
+    /// What is known of newer releases, and an update that is being made.
+    pub(crate) updates: Arc<Updates>,
 }
 
 impl AppState {
@@ -100,6 +103,7 @@ impl AppState {
             authority: Arc::default(),
             panel: Arc::default(),
             challenges: Arc::default(),
+            updates: Arc::default(),
         })
     }
 
@@ -150,6 +154,13 @@ impl AppState {
         tokio::spawn(panel::keep_certificate(self.clone()));
     }
 
+    /// Starts looking for newer releases, now and then, and says how an
+    /// update went that was made before this process started. Left to the
+    /// caller, as the certificate is: it talks to the internet.
+    pub fn keep_updates(&self) {
+        tokio::spawn(updates::keep_looking(self.clone()));
+    }
+
     /// The setup code, if this process started without an account. Whoever can
     /// read it can read this machine's logs, which is the proof setup asks for.
     pub fn setup_code(&self) -> Option<&str> {
@@ -190,6 +201,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(guard::routes())
         .merge(catalogue::routes())
         .merge(mods::routes())
+        .merge(updates::routes())
 }
 
 /// The whole application: the API, and the web interface for every other path.

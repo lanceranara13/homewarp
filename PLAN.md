@@ -12,7 +12,10 @@
 > with the owner's key and served from `https://lanceranara13.github.io/homewarp` (the
 > licence is AGPL-3.0-or-later since the same day). Of Phase 7, "Later", five things
 > are built and tried (who is on a Minecraft server, sleep and wake, notices, mods from
-> Modrinth, a store elsewhere for backups) and four are not, each with its reason.
+> Modrinth, a store elsewhere for backups) and three are not, each with its reason.
+> Phase 8, the same day: several VPSes at once, each server reached through one of
+> them; traffic drawn as it happens; and updates from the panel, with betas for those
+> who ask. Tried in the lab and beside the owner's own Homewarp; not yet released.
 
 ## 1. What it is
 
@@ -303,7 +306,8 @@ machine itself unless it was told otherwise, and an accept in Homewarp's table c
 undo that. A server's traffic is passed on, not received, and Docker's rules let it
 by. It is the *Host firewalls* lesson above, met a second time at the other end.
 
-**Addressing.** Tunnel `10.213.77.0/30`, game bridge `10.213.80.0/24`, both checked for
+**Addressing.** Tunnel `10.213.77.0/30` (and the next seven such blocks for further
+VPSes, since Phase 8), game bridge `10.213.80.0/24`, both checked for
 collisions at setup (the homelab already runs several VPN containers in `10.x`) and
 configurable. WireGuard MTU 1380 with MSS clamping; IPv4 only in v1.
 
@@ -374,7 +378,8 @@ As built (2026-10-06):
   second later. If that answer is lost, Core tries the new keys before giving up on the
   old; if the Gate was restarted in between and has forgotten, it says so and Core
   starts over. Afterwards nothing the token carried is in use but home's public key.
-- **One Gate.** Connecting another while one is connected is refused.
+- **One Gate**, when this was written. Since Phase 8 a home has up to eight, each
+  enrolled this way, one at a time.
 
 ### 5.6 Server runtime (egg-compatible)
 
@@ -1822,9 +1827,109 @@ Each phase ends with something that works on the homelab.
     written down instead (`docs/moving.md`): the egg is imported as it is, and the
     old panel's own backup is uploaded and unpacked. Of that, only the unpacking has
     been done with a real archive.
-  - *More than one Gate, and more than one home.* Everything from the tunnel's
-    addresses to the one table of rules assumes one of each. It is a design of its
-    own, and not a thing to add at the end of another.
+  - *More than one home.* Everything assumes one. (More than one Gate was left
+    here too, and is built since: Phase 8.)
+
+**Phase 8 — Several VPSes, traffic as it happens, and updates** — *done 2026-10-07, on the owner's word that day; but for a second real VPS, which there is not, and a release made with the owner's key, which is the owner's to make*
+
+- **More than one VPS.** What Phase 7 left as "a design of its own". It turned out
+  to be a small one, because the Gate needs none of it: a Gate has one home, and
+  goes on as it was.
+  - *A tunnel to each, at home.* Each VPS has an interface of its own
+    (`homewarp0` to `homewarp7`), four addresses of its own out of `10.213.77.0/27`
+    (the first tunnel has the four it always had), and a mark and a routing table of
+    its own (`0x4857` and `4857`, and the next numbers after them). Players come from
+    anywhere on every tunnel, so the tunnels cannot share an interface: a reply is
+    sent back by the mark of the connection it answers, and so leaves by the tunnel
+    it came in by. Home's one table of rules says of all the tunnels together what
+    it said of the one.
+  - *A server is reached through one VPS.* Its owner chooses which, on the server's
+    form, where there is more than one. Core says which it would pick and why: of
+    those that answer, the one with the least against it, counted in milliseconds
+    of the way from home and back, with a busy VPS (the Gate now says its load), one
+    that carries much already, and above all one that hides players' addresses each
+    counting against. A new server takes that one unless another is asked for; a
+    server keeps the one it has; when a VPS is disconnected its servers go to the
+    best of those left, and a server that had none takes the first that is
+    connected. A Gate is told only the ports of the servers that are reached
+    through it. The panel's own port is forwarded by all of them, and a
+    certificate's question is answered on all of them, so the panel's name may lead
+    to any.
+  - *Two Homewarps on one machine.* Core writes down which tunnels are its own
+    (`data/tunnels`) and, when it starts, takes down only those. Until now a second
+    Core on the machine (the throwaway copy of §10) took the first one's tunnel
+    down as it started, for the ten seconds the first needed to put it back: found
+    on the homelab, where the owner's own Homewarp has a VPS now.
+  - *The database.* `gate`, which could hold one row, is `gates`, with the tunnel's
+    number and a name; a server has `gate_id`; what a Gate counted is kept under
+    the Gate that counted it. A Homewarp with a VPS comes through the change with
+    its VPS as the first, on the tunnel it had.
+- **Traffic as it happens.**
+  - *Through each tunnel.* Core looks every two seconds at what the kernel has
+    counted in and out of each tunnel's interface, and keeps five minutes of it.
+    Nothing is asked of a VPS for it. The Network page draws all the tunnels
+    together and each on its VPS's card.
+  - *To and from each server.* Docker says with the rest of a server's usage what
+    its interfaces have carried; the server's page shows the two rates beside the
+    processor and the memory, and draws the two minutes it has watched.
+- **The Network page** is a card to a VPS where it was a diagram of the one
+  (DESIGN.md, Key screens), and Settings is divided into groups that are listed
+  down its left side.
+- **Updates.**
+  - *Looking.* Where releases are served there is a list of them, `RELEASES`, a line
+    to a channel, signed with the key releases are signed with. Core is built with
+    the public half of that key, fetches the list every six hours and when asked,
+    and believes it for its signature. A newer release is written down once, which
+    is how a notice of it is sent.
+  - *Stable and beta.* A beta is numbered as one (`1.2.0-beta.1`) and listed on its
+    own line. A Homewarp takes betas only if its owner says so, and then takes what
+    has been released too, whichever is newer.
+  - *Putting it in place.* A Homewarp that the installer set up, which it knows by
+    how its own container was made, fetches the release's program, holds it against
+    the signed list of checksums, copies its database (`VACUUM INTO`), and starts a
+    helper apart from itself: Docker's own command-line image, given the folder the
+    installer made and the Docker socket. The helper puts the program where the
+    installer put the old one, tells Compose the new version, and has it start
+    everything again. Then it waits half a minute and looks whether the new Core is
+    up and has not had to be started twice. If it is not, the old program, the old
+    file and the database as it was are put back.
+  - *Backing up first.* Every server can be backed up before, as its Backups tab
+    does; the update goes on only once every backup is made. The database is copied
+    either way, since undoing needs it.
+  - *The Gate* is not updated from the panel: commands go from home to the Gate's
+    own small API and nowhere else on a VPS (§5.1). The Updates page gives the line
+    to run there, which is the install line with `update` where the token would be.
+- *What was tried, and where.*
+  - *The lab*, which has a second VPS since this phase: 195 checks, none failing.
+    With two VPSes connected, a server is reached at its own VPS and not at the
+    other, by a player who is seen as themselves; each tunnel has its interface, its
+    addresses and its way back; a server goes to the VPS that is left when its own
+    is disconnected. Core finds the release it was made from and nothing newer;
+    sees a newer one and a beta once the list names them; believes no list that was
+    changed after it was signed; and a Gate is replaced by the line and keeps its
+    keys.
+  - *The homelab*, beside the owner's own Homewarp and without touching it: a second
+    Homewarp set up by the installer, from a release signed with a key made for the
+    trial and served on the machine's own loopback. From the panel it was updated
+    from one beta to the next, with its one server backed up first and running all
+    the while: about a minute, and the page came back by itself as the new version.
+    Then it was given a release that is signed as any other and whose program does
+    not start: half a minute after it was started the helper had put the version
+    before it back, and the panel said so, with what the helper had written down.
+    Everything of the trial was removed afterwards.
+  - *The pages*, in a browser against the lab with two VPSes connected: the Network
+    page with its cards and its charts, the choice of VPS on a server's form, a
+    server's own traffic, the Updates page.
+- *Not done.*
+  - *A second real VPS.* The owner has one, and it is the Gate of their own
+    Homewarp now. Two tunnels have run in the lab only.
+  - *A release.* The numbers above are trial numbers. The next release is the
+    owner's to number, build and sign (docs/releasing.md), and the first that an
+    installed Homewarp can find by itself is the one after 1.0.0: 1.0.0 does not
+    look, and is updated by the install line once.
+  - *Reaching one server through several VPSes at once.* A server has one. Several
+    would let players in different places each use the nearest, and is a join table
+    and a list of boxes away.
 
 ## 12. Risks
 
