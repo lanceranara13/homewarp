@@ -7205,7 +7205,9 @@
         "required": [
           "cpu_percent",
           "memory_bytes",
-          "memory_limit_bytes"
+          "memory_limit_bytes",
+          "received_bytes_per_second",
+          "sent_bytes_per_second"
         ],
         "properties": {
           "cpu_percent": {
@@ -7222,6 +7224,17 @@
             "type": "integer",
             "format": "int64",
             "description": "The most it may use before it is stopped.",
+            "minimum": 0
+          },
+          "received_bytes_per_second": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What arrives for it over the network in a second, and what it sends:\nplayers for the most part, and whatever else it talks to.",
+            "minimum": 0
+          },
+          "sent_bytes_per_second": {
+            "type": "integer",
+            "format": "int64",
             "minimum": 0
           }
         }

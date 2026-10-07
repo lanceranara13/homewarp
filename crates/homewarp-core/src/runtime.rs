@@ -125,6 +125,10 @@ pub(crate) struct Usage {
     memory_bytes: u64,
     /// The most it may use before it is stopped.
     memory_limit_bytes: u64,
+    /// What arrives for it over the network in a second, and what it sends:
+    /// players for the most part, and whatever else it talks to.
+    received_bytes_per_second: u64,
+    sent_bytes_per_second: u64,
 }
 
 /// What a page that follows a server is sent, over its socket.
@@ -1079,6 +1083,8 @@ impl Runtime {
                         cpu_percent: now.cpu_percent,
                         memory_bytes: now.memory_bytes,
                         memory_limit_bytes: now.memory_limit_bytes,
+                        received_bytes_per_second: now.received_bytes_per_second,
+                        sent_bytes_per_second: now.sent_bytes_per_second,
                     }),
                     line = console.next_line() => {
                         let Some(line) = line? else { break };

@@ -3,6 +3,7 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     pin::pin,
+    time::Instant,
 };
 
 use bollard::{
@@ -138,12 +139,33 @@ pub struct Usage {
     pub memory_bytes: u64,
     /// The most it may use before the kernel stops it.
     pub memory_limit_bytes: u64,
+    /// What arrives for it over the network in a second, and what it sends.
+    pub received_bytes_per_second: u64,
+    pub sent_bytes_per_second: u64,
+}
+
+/// The running totals of the report before, which the next one is measured against.
+#[derive(Debug, Clone, Copy)]
+struct Before {
+    used: u64,
+    passed: u64,
+    received: u64,
+    sent: u64,
+    at: Instant,
 }
 
 /// Works out a server's usage from what Docker reports. Processor time is
 /// reported as a running total, so a sample means something only beside the
 /// one before it, which is kept in `before`.
-fn measure(sample: &ContainerStatsResponse, before: &mut Option<(u64, u64)>) -> Option<Usage> {
+///
+/// What has gone over the network is a running total too, of every interface
+/// the server has, and `at` is when the sample came: a second after the one
+/// before it, more or less.
+fn measure(
+    sample: &ContainerStatsResponse,
+    before: &mut Option<Before>,
+    at: Instant,
+) -> Option<Usage> {
     let cpu = sample.cpu_stats.as_ref()?;
     let used = cpu.cpu_usage.as_ref()?.total_usage?;
     let passed = cpu.system_cpu_usage?;
@@ -158,15 +180,32 @@ fn measure(sample: &ContainerStatsResponse, before: &mut Option<(u64, u64)>) -> 
         .copied()
         .unwrap_or(0);
     let memory_bytes = memory.usage?.saturating_sub(cache);
-    let (used_before, passed_before) = before.replace((used, passed))?;
-    if passed <= passed_before {
+    let (mut received, mut sent) = (0u64, 0u64);
+    for interface in sample.networks.iter().flat_map(HashMap::values) {
+        received += interface.rx_bytes.unwrap_or(0);
+        sent += interface.tx_bytes.unwrap_or(0);
+    }
+    let now = Before {
+        used,
+        passed,
+        received,
+        sent,
+        at,
+    };
+    let before = before.replace(now)?;
+    if passed <= before.passed {
         return None;
     }
-    let share = used.saturating_sub(used_before) as f64 / (passed - passed_before) as f64;
+    let share = used.saturating_sub(before.used) as f64 / (passed - before.passed) as f64;
+    // A total that has gone down is a container that was made anew: nothing to say yet.
+    let seconds = at.duration_since(before.at).as_secs_f64().max(0.1);
+    let rate = |now: u64, before: u64| (now.saturating_sub(before) as f64 / seconds) as u64;
     Some(Usage {
         cpu_percent: (share * f64::from(cores) * 100.0) as f32,
         memory_bytes,
         memory_limit_bytes: memory.limit.unwrap_or(0),
+        received_bytes_per_second: rate(received, before.received),
+        sent_bytes_per_second: rate(sent, before.sent),
     })
 }
 
@@ -543,7 +582,9 @@ impl Engine {
         self.docker
             .stats(&server.container(), Some(options))
             .filter_map(move |sample| {
-                let usage = sample.ok().and_then(|sample| measure(&sample, &mut before));
+                let usage = sample
+                    .ok()
+                    .and_then(|sample| measure(&sample, &mut before, Instant::now()));
                 std::future::ready(usage)
             })
     }
@@ -663,10 +704,14 @@ fn small_log() -> HostConfigLogConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::{Duration, Instant},
+    };
 
     use bollard::models::{
-        ContainerCpuStats, ContainerCpuUsage, ContainerMemoryStats, ContainerStatsResponse,
+        ContainerCpuStats, ContainerCpuUsage, ContainerMemoryStats, ContainerNetworkStats,
+        ContainerStatsResponse,
     };
 
     use super::{Port, Protocol, Server, measure};
@@ -696,14 +741,59 @@ mod tests {
     #[test]
     fn measures_usage_between_one_report_and_the_next() {
         let mut before = None;
+        let began = Instant::now();
+        let after = |seconds| began + Duration::from_secs(seconds);
         // The first has nothing before it to be measured against.
-        assert_eq!(measure(&report(100, 1000, 500, 100), &mut before), None);
+        assert_eq!(
+            measure(&report(100, 1000, 500, 100), &mut before, began),
+            None
+        );
         // A quarter of what both cores had to give is half a core.
-        let usage = measure(&report(600, 3000, 700, 200), &mut before).unwrap();
+        let usage = measure(&report(600, 3000, 700, 200), &mut before, after(1)).unwrap();
         assert_eq!(usage.cpu_percent, 50.0);
         assert_eq!((usage.memory_bytes, usage.memory_limit_bytes), (500, 1000));
         // A report in which no time has passed says nothing.
-        assert_eq!(measure(&report(600, 3000, 700, 200), &mut before), None);
+        assert_eq!(
+            measure(&report(600, 3000, 700, 200), &mut before, after(2)),
+            None
+        );
+    }
+
+    #[test]
+    fn measures_what_goes_over_the_network_in_a_second() {
+        let over = |received, sent, passed| {
+            let interface = ContainerNetworkStats {
+                rx_bytes: Some(received),
+                tx_bytes: Some(sent),
+                ..Default::default()
+            };
+            ContainerStatsResponse {
+                networks: Some([("eth0".to_owned(), interface)].into()),
+                ..report(passed / 10, passed, 500, 100)
+            }
+        };
+        let mut before = None;
+        let began = Instant::now();
+        let after = |seconds| began + Duration::from_secs(seconds);
+        assert_eq!(measure(&over(1000, 500, 1000), &mut before, began), None);
+        // Two seconds on, 4000 more have come and 1000 more have gone.
+        let usage = measure(&over(5000, 1500, 2000), &mut before, after(2)).unwrap();
+        assert_eq!(
+            (
+                usage.received_bytes_per_second,
+                usage.sent_bytes_per_second
+            ),
+            (2000, 500)
+        );
+        // Totals that start again from nothing are no traffic backwards.
+        let usage = measure(&over(10, 10, 3000), &mut before, after(3)).unwrap();
+        assert_eq!(
+            (
+                usage.received_bytes_per_second,
+                usage.sent_bytes_per_second
+            ),
+            (0, 0)
+        );
     }
 
     fn server(memory_mb: u32) -> Server {

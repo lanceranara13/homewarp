@@ -10,7 +10,12 @@ export function bytes(count: number): string {
   return `${unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
 }
 
-const MOMENT = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+/** A number of bytes a second, as a person reads it: 3.4 MB/s. */
+export function rate(perSecond: number): string {
+  return `${bytes(perSecond)}/s`
+}
+
+const MOMENT =new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
 /** A moment given in Unix seconds, written the way the reader's own country writes dates. */
 export function when(unix: number): string {

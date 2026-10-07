@@ -17,6 +17,7 @@ import {
   type ServerState,
   type Usage,
 } from '../api/client'
+import { TrafficChart, type Sample } from '../components/TrafficChart'
 import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill, buttonClass } from '../components/ui'
 import { addressOf, useGate } from '../gate'
 import { EVERY, serverQuery, serversQuery } from '../servers'
@@ -31,8 +32,11 @@ const KEPT_LINES = 1000
 /** The states in which a server has a process, and so uses some of the machine. */
 const USES: ServerState[] = ['starting', 'running', 'stopping']
 
-/** What the socket has told a page about its server. */
-type Followed = { state: ServerState; lines: string[]; usage: Usage | null; players: Players | null }
+/** How many seconds of a server's traffic a page holds on to, and draws. */
+const KEPT_TRAFFIC = 120
+
+/** What the socket has told a page about its server, and what went over the network while it watched. */
+type Followed = { state: ServerState; lines: string[]; usage: Usage | null; players: Players | null; traffic: Sample[] }
 
 /** What the socket has said, for the tab that shows it. Null while there is no socket. */
 const Live = createContext<Followed | null>(null)
@@ -225,7 +229,7 @@ export function ConsoleTab() {
           open={state === 'starting' || state === 'running'}
           may={server.permissions.includes('console')}
         />
-        <UsageTiles usage={followed?.usage ?? null} />
+        <UsageTiles usage={followed?.usage ?? null} traffic={followed?.traffic ?? []} />
       </div>
       <p className="text-small text-ink-subtle">
         {/* Templates are the owner's: to anyone else this is a name, and leads nowhere. */}
@@ -325,7 +329,14 @@ export function ServerSettingsTab() {
 function told(before: Followed | null, event: ServerEvent): Followed | null {
   switch (event.kind) {
     case 'snapshot':
-      return { state: event.state, lines: event.lines, usage: event.usage ?? null, players: event.players ?? null }
+      return {
+        state: event.state,
+        lines: event.lines,
+        usage: event.usage ?? null,
+        players: event.players ?? null,
+        // Sent again to a page that fell behind, it is the same server still: what was drawn stays.
+        traffic: before?.traffic ?? [],
+      }
     case 'line':
       return before && { ...before, lines: [...before.lines.slice(1 - KEPT_LINES), event.text] }
     case 'state':
@@ -336,10 +347,20 @@ function told(before: Followed | null, event: ServerEvent): Followed | null {
           state: event.state,
           usage: USES.includes(event.state) ? before.usage : null,
           players: USES.includes(event.state) ? before.players : null,
+          traffic: USES.includes(event.state) ? before.traffic : [],
         }
       )
     case 'usage':
-      return before && { ...before, usage: event.usage }
+      return (
+        before && {
+          ...before,
+          usage: event.usage,
+          traffic: [
+            ...before.traffic.slice(1 - KEPT_TRAFFIC),
+            { at: Date.now(), received: event.usage.received_bytes_per_second, sent: event.usage.sent_bytes_per_second },
+          ],
+        }
+      )
     case 'players':
       return before && { ...before, players: event.players ?? null }
   }
@@ -530,7 +551,7 @@ function CommandLine({ id, open }: { id: number; open: boolean }) {
 }
 
 /** What the server is using of the machine, about once a second while it runs. */
-function UsageTiles({ usage }: { usage: Usage | null }) {
+function UsageTiles({ usage, traffic }: { usage: Usage | null; traffic: Sample[] }) {
   const megabytes = (bytes: number) => bytes / (1024 * 1024)
   const size = (bytes: number) =>
     megabytes(bytes) < 1024 ? `${Math.round(megabytes(bytes))} MB` : `${(megabytes(bytes) / 1024).toFixed(1)} GB`
@@ -553,6 +574,11 @@ function UsageTiles({ usage }: { usage: Usage | null }) {
           </>
         )}
       </Tile>
+      {/* What players send it and what it sends them, a second at a time, for as long as the page has watched. */}
+      <div className="col-span-2 rounded-lg border border-hairline bg-surface-1 p-4 wide:col-span-1">
+        <p className="mb-2 text-caption text-ink-subtle">Network</p>
+        <TrafficChart samples={traffic} slots={KEPT_TRAFFIC} labels={['In', 'Out']} compact />
+      </div>
     </div>
   )
 }
