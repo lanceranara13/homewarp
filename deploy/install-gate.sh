@@ -20,29 +20,44 @@ RELEASES="${HOMEWARP_RELEASES:-@RELEASES@}"
 VERSION="@VERSION@"
 PROGRAM=/usr/local/bin/homewarp-gate
 
+# Colour, where there is a terminal to show it on and nothing has asked for
+# none. The violet is the name's, and the panel's accent; the rest are the
+# panel's colours for what went well and what did not. The same as the one
+# at home (install.sh) uses.
+plain='' bold='' accent='' dim='' good='' bad=''
+c1='' c2='' c3='' c4='' c5='' c6='' c7='' c8=''
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+  plain=$(printf '\033[0m') bold=$(printf '\033[1m')
+  case "${COLORTERM:-}" in
+    # A shade to a letter, from the deep violet to the pale.
+    truecolor | 24bit)
+      c1=$(printf '\033[38;2;110;86;248m') c2=$(printf '\033[38;2;122;100;249m')
+      c3=$(printf '\033[38;2;135;114;250m') c4=$(printf '\033[38;2;147;128;251m')
+      c5=$(printf '\033[38;2;159;142;252m') c6=$(printf '\033[38;2;171;156;253m')
+      c7=$(printf '\033[38;2;184;170;254m') c8=$(printf '\033[38;2;196;184;255m')
+      accent=$(printf '\033[38;2;143;124;255m') dim=$(printf '\033[38;2;138;145;158m')
+      good=$(printf '\033[38;2;61;214;140m') bad=$(printf '\033[38;2;255;99;105m')
+      ;;
+    # One violet for all of the name: it holds until it is taken off.
+    *)
+      c1=$(printf '\033[38;5;141m') accent=$c1 dim=$(printf '\033[38;5;245m')
+      good=$(printf '\033[38;5;78m') bad=$(printf '\033[38;5;203m')
+      ;;
+  esac
+fi
+
 say() { printf '%s\n' "$*"; }
 stop() {
-  printf 'Homewarp: %s\n' "$*" >&2
+  if [ -t 2 ]; then
+    printf '%sHomewarp:%s %s\n' "$bad" "$plain" "$*" >&2
+  else
+    printf 'Homewarp: %s\n' "$*" >&2
+  fi
   exit 1
 }
-# The name, in its own colour where there is a terminal to show it on and
-# nothing has asked for none.
+# The name, in its own colour, with the mark of the panel's icon before what
+# this is.
 banner() {
-  c1='' c2='' c3='' c4='' c5='' c6='' c7='' c8='' plain=''
-  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
-    plain=$(printf '\033[0m')
-    case "${COLORTERM:-}" in
-      # A shade to a letter, from the deep violet to the pale.
-      truecolor | 24bit)
-        c1=$(printf '\033[38;2;110;86;248m') c2=$(printf '\033[38;2;122;100;249m')
-        c3=$(printf '\033[38;2;135;114;250m') c4=$(printf '\033[38;2;147;128;251m')
-        c5=$(printf '\033[38;2;159;142;252m') c6=$(printf '\033[38;2;171;156;253m')
-        c7=$(printf '\033[38;2;184;170;254m') c8=$(printf '\033[38;2;196;184;255m')
-        ;;
-      # One violet for all of it: it holds until it is taken off.
-      *) c1=$(printf '\033[38;5;141m') ;;
-    esac
-  fi
   row() {
     printf '  %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' "$c1" "$1" "$c2" "$2" "$c3" "$3" "$c4" "$4" \
       "$c5" "$5" "$c6" "$6" "$c7" "$7" "$c8" "$8" "$plain"
@@ -54,7 +69,8 @@ banner() {
   row '██╔══██║' '██║   ██║' '██║╚██╔╝██║' '██╔══╝  ' '██║███╗██║' '██╔══██║' '██╔══██╗' '██╔═══╝ '
   row '██║  ██║' '╚██████╔╝' '██║ ╚═╝ ██║' '███████╗' '╚███╔███╔╝' '██║  ██║' '██║  ██║' '██║     '
   row '╚═╝  ╚═╝' ' ╚═════╝ ' '╚═╝     ╚═╝' '╚══════╝' ' ╚══╝╚══╝ ' '╚═╝  ╚═╝' '╚═╝  ╚═╝' '╚═╝     '
-  printf '  %sGate%s\n\n' "$c1" "$plain"
+  printf '\n  %s◆%s %sGate%s %sthe VPS end of Homewarp: players arrive here.%s\n\n' \
+    "$accent" "$plain" "$bold" "$plain" "$dim" "$plain"
 }
 banner
 
@@ -109,7 +125,7 @@ fi
 cp "$work/$file" "$PROGRAM.new"
 chmod 755 "$PROGRAM.new"
 mv "$PROGRAM.new" "$PROGRAM"
-say "Homewarp Gate $("$PROGRAM" version | cut -d' ' -f2) is on this machine."
+printf '%sHomewarp Gate %s is on this machine.%s\n' "$good" "$("$PROGRAM" version | cut -d' ' -f2)" "$plain"
 # What was fetched is cleared away here: the program takes this one's place,
 # and nothing of this script is left to do it afterwards.
 rm -rf "$work"

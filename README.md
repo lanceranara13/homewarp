@@ -144,10 +144,11 @@ At home:
 curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo sh
 ```
 
-It fetches Homewarp for the machine's processor, checks its signature and
-checksum, and starts it. When it is done it prints the panel's address, which
-is port 3600 of the machine, and a setup code. Everything it makes is in
-`/opt/homewarp`. Updates are under Settings in the panel from then on;
+It asks where to keep Homewarp's files and which ports to use (Enter keeps
+`/opt/homewarp`, and 3600, 2022 and 8443), fetches Homewarp for the machine's
+processor, checks its signature and checksum, and starts it. When it is done it
+prints the panel's address and a setup code. Updates are under Settings in the
+panel from then on;
 running the same line again does the same by hand.
 
 The full account, with what can be changed and how to remove it, is in

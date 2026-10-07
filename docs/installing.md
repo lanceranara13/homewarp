@@ -19,12 +19,33 @@ containers with is its owner's choice.
 curl -fsSL https://lanceranara13.github.io/homewarp/install.sh | sudo sh
 ```
 
-That fetches Homewarp for the machine's processor, checks it (see *What is
-checked*), and starts it. When it is done it prints the panel's address, which
-is port 3600 of the machine, and a setup code: the first account is made in
-the panel with that code.
+On a terminal it first asks how it is to be set up, then fetches Homewarp for
+the machine's processor, checks it (see *What is checked*), and starts it. When
+it is done it prints the panel's address, which is port 3600 of the machine
+unless you chose another, and a setup code: the first account is made in the
+panel with that code.
 
-What it makes is all in one place, `/opt/homewarp`:
+The questions, with the answer Enter keeps:
+
+| Question | Otherwise |
+|---|---|
+| Where Homewarp keeps its files | `/opt/homewarp` |
+| The panel's port | `3600` |
+| The SFTP port | `2022` |
+| The panel's TLS port | `8443` |
+| What its containers are called | `homewarp` |
+
+Each answer is checked as it is given: a folder has to be written in full and
+be one this account can write in, and a port has to be a number that no other
+of the three has and that nothing on the machine is listening on. When all are
+answered, it shows what it is going to do and waits for a yes before it does
+anything.
+
+Where there is no terminal to ask on (the line run over `ssh` with no
+terminal, a script, a CI job), or with `--yes`, it asks nothing and goes on with
+the answers it has: `curl … | sudo sh -s -- --yes`.
+
+What it makes is all in one place, `/opt/homewarp` unless you chose another:
 
 | | |
 |---|---|
@@ -39,7 +60,8 @@ arrives to the first. That is how the panel (3600), SFTP (2022) and the panel
 over TLS (8443) are reached on a machine whose firewall shuts what it was not
 told about.
 
-Said before the line, these change what it does:
+Said before the line, these answer a question ahead of time, so that it is not
+asked, and they are what a machine with no terminal goes on with:
 
 | | Otherwise |
 |---|---|
@@ -48,6 +70,12 @@ Said before the line, these change what it does:
 | `HOMEWARP_SFTP_PORT` | `2022` |
 | `HOMEWARP_TLS_PORT` | `8443` |
 | `HOMEWARP_NAME` | `homewarp`: what the containers are called |
+| `HOMEWARP_YES` | `1` asks nothing, as `--yes` does |
+
+Where Homewarp is installed already, what it has now is what is otherwise: the
+folder is the one the running Homewarp was started from, and the ports and name
+are those in its `compose.yml`. So running the line again to update never moves
+it, or puts it back on port 3600, unless it is told to.
 
 For example:
 
