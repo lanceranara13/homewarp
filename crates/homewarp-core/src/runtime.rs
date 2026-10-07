@@ -31,6 +31,7 @@ use utoipa::ToSchema;
 use crate::{
     audit,
     minecraft::{self, Joined, Players},
+    mods,
     servers::{self, ExtraPort, PortProtocol},
     settings,
 };
@@ -878,15 +879,18 @@ impl Runtime {
         }
     }
 
-    /// Starts asking a server that has begun to run who is on it. Not one
-    /// whose port is for UDP alone, which is not Minecraft's.
+    /// Starts asking a server that has begun to run who is on it, if it is one
+    /// of Minecraft's by what its template sets up. A server of another game
+    /// is sent nothing: what would be the question to Minecraft is a few bytes
+    /// of nonsense to it, and its port is its own. Nor is one whose port is
+    /// for UDP alone, which is not how this is asked.
     async fn ask_after(
         &self,
         server: &Definition,
         spec: &Spec,
         count: &mpsc::Sender<Option<Players>>,
     ) -> Option<Asking> {
-        if server.protocol == PortProtocol::Udp {
+        if server.protocol == PortProtocol::Udp || !mods::fits(&server.template) {
             return None;
         }
         // On the servers' own bridge, where it listens whatever is published.

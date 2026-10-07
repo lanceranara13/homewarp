@@ -13,6 +13,6 @@ if [ "${1:-}" = answer ]; then
   exit 0
 fi
 trap 'exit 0' INT TERM
-socat TCP4-LISTEN:"$PORT",fork,reuseaddr SYSTEM:'/lab/mc.sh answer' &
+socat TCP4-LISTEN:"$PORT",fork,reuseaddr,backlog=64 SYSTEM:'/lab/mc.sh answer' &
 echo ready
 wait

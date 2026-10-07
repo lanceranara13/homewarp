@@ -1647,10 +1647,17 @@ Each phase ends with something that works on the homelab.
       protocol and no more (`minecraft.rs`): the handshake, the list's question and its
       answer. A running server is asked every fifteen seconds, on the servers' own
       bridge, and what it says of its players goes to the page with everything else the
-      page is told, over the socket it has already: no request is added. A server that
-      has not answered four times from when it began to run is one of another game, and
-      is asked no more. Nothing in an egg says which game it is, so nothing is guessed
-      from one.
+      page is told, over the socket it has already: no request is added.
+    - *Only a server of Minecraft's is asked.* An egg does not say what game it is, but
+      it says which files it sets up, and `server.properties` or `velocity.toml` is one
+      of Minecraft's. A server of another game is sent nothing. At first every server
+      with a TCP port was asked, four times, and left alone once it had not answered:
+      to another game the question is a few bytes of nonsense on its own port. The lab
+      showed what that costs. Its stand-in game, a listener with room for five
+      connections waiting, lost up to six of twenty players who arrived in the same
+      moment as the question, and only then. A server of Minecraft's that does not
+      answer four times running (Bedrock, which shares the file's name and speaks over
+      UDP) is asked no more.
     - *Sleep.* A server may be given a number of minutes (Settings, Advanced). Empty
       for that long, it is stopped the way its template stops it, and is then *asleep*:
       a state of its own, written down, so that a Homewarp that starts again finds it so.
