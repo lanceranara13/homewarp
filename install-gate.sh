@@ -17,7 +17,7 @@ set -eu
 # nothing at all, and nothing in it can read the rest of it as its own input.
 main() {
 RELEASES="${HOMEWARP_RELEASES:-https://lanceranara13.github.io/homewarp}"
-VERSION="1.1.0"
+VERSION="1.1.1"
 PROGRAM=/usr/local/bin/homewarp-gate
 
 say() { printf '%s\n' "$*"; }
