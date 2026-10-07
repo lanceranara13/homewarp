@@ -3,7 +3,7 @@
   "info": {
     "title": "Homewarp",
     "description": "The Homewarp panel's API.",
-    "version": "1.1.1"
+    "version": "1.1.2-beta.1"
   },
   "paths": {
     "/api/v1/account/passkeys": {
