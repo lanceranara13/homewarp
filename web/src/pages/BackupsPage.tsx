@@ -1,9 +1,9 @@
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Link, getRouteApi } from '@tanstack/react-router'
-import { Archive, Download, History, Trash2 } from 'lucide-react'
+import { Archive, CloudUpload, Download, History, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
-import { backupUrl, keepBackups, makeBackup, removeBackup, restoreBackup, type Backup } from '../api/client'
+import { backupUrl, copyBackup, keepBackups, makeBackup, removeBackup, restoreBackup, type Backup } from '../api/client'
 import { Button, Confirm, Field, Pill, Problem, Select, buttonClass } from '../components/ui'
 import { bytes, when } from '../format'
 import { backupsQuery, serverQuery } from '../servers'
@@ -26,7 +26,8 @@ export function BackupsTab() {
   const { data } = useSuspenseQuery({
     ...backupsQuery(id),
     // Making one is answered at once and done later: the list is asked again until it is.
-    refetchInterval: (query) => (query.state.data?.backups.some((backup) => backup.state === 'running') ? WHILE_MAKING : false),
+    refetchInterval: (query) =>
+      query.state.data?.backups.some((backup) => backup.state === 'running' || backup.stored === 'copying') ? WHILE_MAKING : false,
   })
   const [restoring, setRestoring] = useState<Backup | null>(null)
   const [doomed, setDoomed] = useState<Backup | null>(null)
@@ -44,6 +45,7 @@ export function BackupsTab() {
       setSaid(true)
     },
   })
+  const copying = useMutation({ mutationFn: (backup: number) => copyBackup(id, backup), onSettled: again })
   const removing = useMutation({
     mutationFn: (backup: number) => removeBackup(id, backup),
     onSuccess: async () => {
@@ -91,8 +93,11 @@ export function BackupsTab() {
         A backup is every file this server has, as they are when it is made. The server can go on running meanwhile; a game
         that keeps its world in many files is best told to save first. When one more is done, the oldest beyond those kept
         are deleted.
+        {data.store && ' Each is also copied to the store the owner has set, and its copy goes when it goes.'}
       </p>
-      {(making.error ?? keeping.error) && <Problem>{(making.error ?? keeping.error)?.message}</Problem>}
+      {(making.error ?? keeping.error ?? copying.error) && (
+        <Problem>{(making.error ?? keeping.error ?? copying.error)?.message}</Problem>
+      )}
       {said && (
         <p role="status" className="text-small text-ink-muted">
           The backup is being put back. The{' '}
@@ -118,12 +123,24 @@ export function BackupsTab() {
                 <p className="text-small text-ink-subtle">
                   {when(backup.created_at)}
                   {backup.state === 'done' && ` · ${bytes(backup.size_bytes)}`}
+                  {backup.stored === 'copied' && ' · copied to the store'}
                 </p>
                 {backup.problem && <p className="text-small text-danger">{backup.problem}</p>}
+                {backup.stored === 'failed' && (
+                  <p className="text-small text-danger">Not copied to the store. {backup.stored_problem}</p>
+                )}
               </div>
               {backup.state === 'running' && <Pill tone="installing">Being made</Pill>}
+              {backup.stored === 'copying' && <Pill tone="installing">Being copied</Pill>}
               {backup.state === 'failed' && <Pill tone="crashed">Failed</Pill>}
               <span className="flex gap-1">
+                {/* One made before there was a store, or whose copy did not arrive. */}
+                {data.store && backup.state === 'done' && backup.stored !== 'copied' && backup.stored !== 'copying' && (
+                  <Button variant="ghost" title="Copy to the store" disabled={copying.isPending} onClick={() => copying.mutate(backup.id)}>
+                    <CloudUpload aria-hidden size={16} />
+                    <span className="sr-only wide:not-sr-only">Copy to the store</span>
+                  </Button>
+                )}
                 {backup.state === 'done' && (
                   <>
                     <a href={backupUrl(id, backup.id)} download title="Download" className={buttonClass('ghost')}>
@@ -136,7 +153,7 @@ export function BackupsTab() {
                     </Button>
                   </>
                 )}
-                {backup.state !== 'running' && (
+                {backup.state !== 'running' && backup.stored !== 'copying' && (
                   <Button variant="ghost" title="Delete" onClick={() => setDoomed(backup)}>
                     <Trash2 aria-hidden size={16} />
                     <span className="sr-only wide:not-sr-only">Delete</span>

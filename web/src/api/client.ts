@@ -38,6 +38,7 @@ export type Task = components['schemas']['Task']
 export type TaskAction = components['schemas']['Action']
 export type Settings = components['schemas']['Settings']
 export type NoticesChange = components['schemas']['NoticesChange']
+export type StoreChange = components['schemas']['StoreChange']
 type SettingsChange = components['schemas']['SettingsChange']
 export type Panel = components['schemas']['PanelView']
 export type VpsGuard = components['schemas']['VpsGuard']
@@ -428,6 +429,14 @@ export async function restoreBackup(id: number, backup: number): Promise<void> {
   if (!response.ok) fail(error)
 }
 
+/** Has a finished backup copied to the store elsewhere. Answered at once; the list says how it went. */
+export async function copyBackup(id: number, backup: number): Promise<void> {
+  const { error, response } = await signedIn(() =>
+    api.POST('/api/v1/servers/{id}/backups/{backup_id}/copy', { params: { path: { id, backup_id: backup } } }),
+  )
+  if (!response.ok) fail(error)
+}
+
 export async function removeBackup(id: number, backup: number): Promise<void> {
   const { error, response } = await signedIn(() =>
     api.DELETE('/api/v1/servers/{id}/backups/{backup_id}', { params: { path: { id, backup_id: backup } } }),
@@ -495,6 +504,18 @@ export async function removeNotices(): Promise<Settings> {
 /** Sends a notice that says only that notices arrive. It fails with the site's reason if the site does not take it. */
 export async function testNotices(): Promise<Settings> {
   const { data, error } = await signedIn(() => api.POST('/api/v1/settings/notices/test'))
+  return data ?? fail(error)
+}
+
+/** Has backups copied to a store elsewhere. It is tried first, and kept only if it took what was written to it. */
+export async function setStore(body: StoreChange): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.PUT('/api/v1/settings/store', { body }))
+  return data ?? fail(error)
+}
+
+/** Has backups copied nowhere. What is in the store stays there. */
+export async function removeStore(): Promise<Settings> {
+  const { data, error } = await signedIn(() => api.DELETE('/api/v1/settings/store'))
   return data ?? fail(error)
 }
 

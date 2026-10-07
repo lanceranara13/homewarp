@@ -1741,6 +1741,37 @@ Each phase ends with something that works on the homelab.
       asked with `curl`); a release for another loader refused; and Velocity, started
       again, said "Loaded plugin luckperms 5.5.71". In a browser: search, releases,
       install, the list, and removal.
+  - *A store elsewhere for backups* (the plan's "S3 backups"; Settings, and each
+    server's Backups tab). A backup beside its server is lost with the disk they are
+    both on.
+    - *What it does:* the owner gives a bucket that is spoken to as Amazon's S3 is (an
+      address, a bucket, a folder in it, a key). Every backup that is made is then
+      copied there too, read as it is sent and not held in memory; a copy goes when its
+      backup goes, by hand or by the count that is kept; one that did not arrive says
+      why on the Backups tab, is written down (and so told, where notices are on), and
+      can be copied again.
+    - *Tried before it is kept.* Saving the settings writes a few bytes to the bucket
+      and takes them away, and a store that did not take them is not kept: one that is
+      thought to hold copies and holds none is worse than none. The key's secret is
+      kept and not given back.
+    - *Three requests, signed by hand:* put, delete, and the try. Signature Version 4
+      with `ring`, held against the three examples Amazon publishes for it, signature
+      for signature. No library of Amazon's, and nothing else of S3.
+    - *The store is the owner's own,* at an address the owner typed, and may be at home
+      or on plain HTTP. It is not held to what a fetch from a stranger's address is.
+    - *Up to 5 GB a backup,* which is what a store takes in one piece. A larger one
+      says so; sending in parts is not built.
+    - *After a lost disk* there is no Homewarp to ask: the copy is the backup's own
+      file, by the server's name and the day, fetched with any S3 tool, put among a
+      new server's files and unpacked there.
+    - *Tried against MinIO,* a throwaway one on the homelab: a wrong secret, a bucket
+      that is not there and a dead address each refused in words; a 300 MB backup
+      copied, and fetched back by `curl` signing for itself with the same SHA-256;
+      the store stopped (the copy failed, with its reason, and was written down) and
+      started (copied again by hand); one kept and a third made (the first two gone
+      from the bucket); the last deleted (the bucket empty). Then a copy fetched,
+      uploaded under Files and unpacked: the same world, byte for byte. Amazon's own
+      was not tried: there is no account of the owner's here to try it with.
 - *Not done, and why:*
   - *Answering for a server that is stopped, and from the Gate while home is away.*
     The stand-in could say "offline" as well as "asleep", at the price of a container

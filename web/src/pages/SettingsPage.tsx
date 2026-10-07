@@ -15,8 +15,10 @@ import {
   removeAccount,
   removeNotices,
   removePasskey,
+  removeStore,
   setNotices,
   setPassword,
+  setStore,
   testNotices,
   type Account,
 } from '../api/client'
@@ -40,6 +42,7 @@ export function SettingsPage() {
         {session.user?.owner && <Resolvers />}
         {session.user?.owner && <NewConnections />}
         {session.user?.owner && <Notices />}
+        {session.user?.owner && <BackupStore />}
       </main>
     </>
   )
@@ -476,6 +479,115 @@ function Notices() {
             {notices ? 'Tell this one instead' : 'Save'}
           </Button>
         </div>
+      </form>
+    </Section>
+  )
+}
+
+/**
+ * A store elsewhere for backups: a bucket that is spoken to as Amazon's S3 is.
+ * A backup beside the server it is of is lost with the disk they are both on.
+ */
+function BackupStore() {
+  const queryClient = useQueryClient()
+  const { data: settings } = useSuspenseQuery(settingsQuery)
+  const kept = (fresh: typeof settings) => queryClient.setQueryData(settingsQuery.queryKey, fresh)
+  const setting = useMutation({ mutationFn: setStore, onSuccess: kept })
+  const removing = useMutation({ mutationFn: removeStore, onSuccess: kept })
+  const store = settings.store
+
+  return (
+    <Section
+      title="A store elsewhere for backups"
+      lead="A backup kept beside its server is lost with the disk they are both on. Give Homewarp a bucket somewhere else and every backup that is made is copied there too: Amazon S3, or anything that is spoken to the same way, such as Cloudflare R2, Backblaze B2 or a MinIO of your own. A copy goes when its backup goes. Each is the backup's own file, a tar packed with Zstandard, and can be fetched with any S3 tool."
+    >
+      {store && (
+        <div className="flex max-w-140 flex-col gap-2">
+          <p>
+            Copied to the bucket <code className="font-mono text-mono text-ink">{store.bucket}</code> at{' '}
+            <code className="font-mono text-mono text-ink wrap-anywhere">{store.endpoint}</code>
+            {store.prefix && (
+              <>
+                , under <code className="font-mono text-mono text-ink">{store.prefix}/</code>
+              </>
+            )}
+            , with the key <code className="font-mono text-mono text-ink">{store.key_id}</code>.
+          </p>
+          {removing.error && <Problem>{removing.error.message}</Problem>}
+          <div>
+            <Button variant="ghost" busy={removing.isPending} onClick={() => removing.mutate()}>
+              Stop copying
+            </Button>
+          </div>
+        </div>
+      )}
+      <form
+        // Emptied once what was typed has been kept: the secret is not shown again.
+        key={store ? `${store.endpoint}/${store.bucket}/${store.key_id}` : ''}
+        className="flex max-w-140 flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const form = new FormData(event.currentTarget)
+          const typed = (name: string) => String(form.get(name) ?? '')
+          setting.mutate({
+            endpoint: typed('endpoint'),
+            region: typed('region'),
+            bucket: typed('bucket'),
+            prefix: typed('prefix'),
+            key_id: typed('key_id'),
+            secret: typed('secret'),
+          })
+        }}
+      >
+        <Field
+          label={store ? 'Another store: its address' : 'Address'}
+          name="endpoint"
+          mono
+          required
+          inputMode="url"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="https://s3.eu-central-1.amazonaws.com"
+          hint="Where the store is, without the bucket. One at home may be http://192.168.1.20:9000."
+        />
+        <Field label="Bucket" name="bucket" mono required autoComplete="off" spellCheck={false} placeholder="my-backups" />
+        <Field
+          label="Folder in the bucket"
+          name="prefix"
+          mono
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="homewarp"
+          hint="Left empty, backups go at the top of the bucket."
+        />
+        <Field
+          label="Region"
+          name="region"
+          mono
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="us-east-1"
+          hint="Left empty it is us-east-1, which most stores other than Amazon's take whatever they are."
+        />
+        <Field label="Key id" name="key_id" mono required autoComplete="off" spellCheck={false} />
+        <Field
+          label="Key secret"
+          name="secret"
+          type="password"
+          mono
+          required
+          autoComplete="off"
+          hint="A key that may write to this one bucket and to nothing else is the one to give. It is kept and not shown again."
+        />
+        {setting.error && <Problem>{setting.error.message}</Problem>}
+        <div>
+          <Button type="submit" busy={setting.isPending}>
+            Try it, and keep it
+          </Button>
+        </div>
+        <p className="text-small text-ink-subtle">
+          Homewarp writes a few bytes to the bucket and takes them away again. Only a store that took them is kept.
+        </p>
       </form>
     </Section>
   )

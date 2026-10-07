@@ -17,6 +17,7 @@ use crate::{
     api::{AppState, Owner, Problem, ProblemBody},
     audit, fetch,
     notify::{self, Delivery, Webhook},
+    store::{self, Store},
 };
 
 /// As many as a resolver's own list holds.
@@ -31,6 +32,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_settings, change_settings))
         .routes(routes!(set_notices, remove_notices))
         .routes(routes!(test_notices))
+        .routes(routes!(set_store, remove_store))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -44,6 +46,38 @@ struct Settings {
     new_connections: u32,
     /// Where this Homewarp tells what happens to it. Nothing if nowhere.
     notices: Option<Notices>,
+    /// Where backups are copied to beside where they are kept. Nothing if nowhere.
+    store: Option<StoreView>,
+}
+
+/// The store elsewhere, as the page is told of it: without its key's secret,
+/// which is kept and not given back.
+#[derive(Serialize, ToSchema)]
+struct StoreView {
+    endpoint: String,
+    region: String,
+    bucket: String,
+    /// The folder in the bucket. Empty for none.
+    prefix: String,
+    key_id: String,
+}
+
+/// A store for backups: a bucket that is spoken to as Amazon's S3 is.
+#[derive(Deserialize, ToSchema)]
+struct StoreChange {
+    /// Where it is: `https://s3.example.com`, or `http://192.168.1.20:9000`
+    /// for one at home.
+    endpoint: String,
+    /// Its region. `us-east-1` if none is given, which most stores take.
+    #[serde(default)]
+    region: String,
+    bucket: String,
+    /// A folder in the bucket to keep to. Left out, none.
+    #[serde(default)]
+    prefix: String,
+    /// The key that may write to the bucket, and its secret.
+    key_id: String,
+    secret: String,
 }
 
 /// Where notices go, as the page is told: the address is a secret of the
@@ -116,6 +150,13 @@ async fn all(state: &AppState) -> Result<Settings, Problem> {
             address: notify::shortened(&webhook.url),
             everything: webhook.everything,
             last,
+        }),
+        store: store::kept(&state.db).await.map(|store| StoreView {
+            endpoint: store.endpoint,
+            region: store.region,
+            bucket: store.bucket,
+            prefix: store.prefix,
+            key_id: store.key_id,
         }),
     })
 }
@@ -327,5 +368,66 @@ async fn test_notices(
     notify::test(&state.db, &who.username)
         .await
         .map_err(|why| Problem::Conflict(why.into()))?;
+    Ok(Json(all(&state).await?))
+}
+
+/// Has every backup that is made from now on copied to a store elsewhere: a
+/// bucket that is spoken to as Amazon's S3 is. The store is tried first, with
+/// a few bytes written and taken away again, and is kept only if it took
+/// them: a store that is thought to hold copies and holds none is worse than
+/// none. The key's secret is kept and not given back.
+#[utoipa::path(
+    put,
+    path = "/api/v1/settings/store",
+    request_body = StoreChange,
+    responses(
+        (status = OK, body = Settings),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account is not the owner's."),
+        (status = CONFLICT, body = ProblemBody, description = "The store could not be reached, or would not be written to."),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemBody, description = "Something given is not what a store's settings look like."),
+    )
+)]
+async fn set_store(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+    Json(asked): Json<StoreChange>,
+) -> Result<Json<Settings>, Problem> {
+    let store = Store {
+        endpoint: asked.endpoint,
+        region: asked.region,
+        bucket: asked.bucket,
+        key_id: asked.key_id,
+        secret: asked.secret,
+        prefix: asked.prefix,
+    }
+    .checked()
+    .map_err(|why| Problem::Invalid(why.into()))?;
+    store
+        .tried()
+        .await
+        .map_err(|why| Problem::Conflict(why.into()))?;
+    store::keep(&state.db, &store).await?;
+    let detail = format!("store: the bucket {} at {}", store.bucket, store.endpoint);
+    audit::record(&state.db, &who, None, "settings.change", &detail).await;
+    Ok(Json(all(&state).await?))
+}
+
+/// Has backups copied nowhere from now on. What is in the store stays there.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/settings/store",
+    responses(
+        (status = OK, body = Settings),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account is not the owner's."),
+    )
+)]
+async fn remove_store(
+    State(state): State<AppState>,
+    Owner(who): Owner,
+) -> Result<Json<Settings>, Problem> {
+    store::forget(&state.db).await?;
+    audit::record(&state.db, &who, None, "settings.change", "store: none").await;
     Ok(Json(all(&state).await?))
 }

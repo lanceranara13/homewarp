@@ -48,6 +48,8 @@ const WORDS: Record<string, string> = {
   'files.unpack': 'Unpacked an archive',
   'backup.create': 'Made a backup',
   'backup.restore': 'Put a backup back',
+  'backup.copy': 'Copied a backup to the store',
+  'backup.copy_failed': 'A backup was not copied to the store',
   'backup.remove': 'Deleted a backup',
   'backup.download': 'Downloaded a backup',
   'backup.keep': 'Changed how many backups are kept',

@@ -1752,6 +1752,79 @@
         }
       }
     },
+    "/api/v1/servers/{id}/backups/{backup_id}/copy": {
+      "post": {
+        "summary": "Copies a finished backup to the store elsewhere: one that was made before\nthere was a store, or whose copy did not arrive. The answer comes at once,\nand asking for the backups again shows how it went.",
+        "operationId": "copy_backup",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "backup_id",
+            "in": "path",
+            "description": "The backup's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The backup is being copied."
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account has not been let do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server, or no such backup.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "There is no store, the backup was not finished, or it is being copied already.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/servers/{id}/backups/{backup_id}/download": {
       "get": {
         "summary": "A backup's file as it is: a tar packed with Zstandard, for the browser to save.",
@@ -4001,6 +4074,108 @@
         }
       }
     },
+    "/api/v1/settings/store": {
+      "put": {
+        "summary": "Has every backup that is made from now on copied to a store elsewhere: a\nbucket that is spoken to as Amazon's S3 is. The store is tried first, with\na few bytes written and taken away again, and is kept only if it took\nthem: a store that is thought to hold copies and holds none is worse than\nnone. The key's secret is kept and not given back.",
+        "operationId": "set_store",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The store could not be reached, or would not be written to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Something given is not what a store's settings look like.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Has backups copied nowhere from now on. What is in the store stays there.",
+        "operationId": "remove_store",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is not the owner's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/setup": {
       "post": {
         "summary": "Creates the first account and signs it in. Works once.",
@@ -4741,6 +4916,24 @@
           },
           "state": {
             "$ref": "#/components/schemas/BackupState"
+          },
+          "stored": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Stored",
+                "description": "Where its copy in the store elsewhere stands. Nothing where no copy\nwas asked for: there was no store when it was made."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stored_problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was not copied, if it was not."
           }
         }
       },
@@ -4757,6 +4950,7 @@
         "description": "A server's backups, and how many of them are kept.",
         "required": [
           "kept",
+          "store",
           "backups"
         ],
         "properties": {
@@ -4771,6 +4965,10 @@
             "type": "integer",
             "format": "int64",
             "description": "When one more is done, the oldest beyond this many go."
+          },
+          "store": {
+            "type": "boolean",
+            "description": "Whether there is a store elsewhere that backups are copied to."
           }
         }
       },
@@ -6521,6 +6719,17 @@
               "type": "string"
             },
             "description": "Where servers look names up: one to three IPv4 addresses on the\ninternet. A change counts from each server's next start."
+          },
+          "store": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StoreView",
+                "description": "Where backups are copied to beside where they are kept. Nothing if nowhere."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -6603,6 +6812,78 @@
         "enum": [
           "command",
           "signal"
+        ]
+      },
+      "StoreChange": {
+        "type": "object",
+        "description": "A store for backups: a bucket that is spoken to as Amazon's S3 is.",
+        "required": [
+          "endpoint",
+          "bucket",
+          "key_id",
+          "secret"
+        ],
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Where it is: `https://s3.example.com`, or `http://192.168.1.20:9000`\nfor one at home."
+          },
+          "key_id": {
+            "type": "string",
+            "description": "The key that may write to the bucket, and its secret."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "A folder in the bucket to keep to. Left out, none."
+          },
+          "region": {
+            "type": "string",
+            "description": "Its region. `us-east-1` if none is given, which most stores take."
+          },
+          "secret": {
+            "type": "string"
+          }
+        }
+      },
+      "StoreView": {
+        "type": "object",
+        "description": "The store elsewhere, as the page is told of it: without its key's secret,\nwhich is kept and not given back.",
+        "required": [
+          "endpoint",
+          "region",
+          "bucket",
+          "prefix",
+          "key_id"
+        ],
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The folder in the bucket. Empty for none."
+          },
+          "region": {
+            "type": "string"
+          }
+        }
+      },
+      "Stored": {
+        "type": "string",
+        "description": "Where a backup's copy in the store elsewhere stands.",
+        "enum": [
+          "copying",
+          "copied",
+          "failed"
         ]
       },
       "Task": {

@@ -130,7 +130,7 @@ fn documentation(address: Ipv6Addr) -> bool {
 }
 
 /// Whom this machine trusts to say whose a name is, for what it connects to.
-fn trusting() -> Result<Arc<ClientConfig>, Unfetched> {
+pub(crate) fn trusting() -> Result<Arc<ClientConfig>, Unfetched> {
     static TRUSTING: OnceLock<Result<Arc<ClientConfig>, Unfetched>> = OnceLock::new();
     TRUSTING
         .get_or_init(|| {
@@ -197,22 +197,25 @@ async fn reach(host: &str) -> Result<TlsStream<TcpStream>, Unfetched> {
 /// What a site said to one request: its status, where it sends on to if it
 /// does, and what it sent. That last is nothing where it was more than was
 /// asked for, or was cut short.
-struct Said {
-    status: StatusCode,
-    onward: Option<String>,
-    sent: Option<Bytes>,
+pub(crate) struct Said {
+    pub(crate) status: StatusCode,
+    pub(crate) onward: Option<String>,
+    pub(crate) sent: Option<Bytes>,
 }
 
 /// One request over a connection that is there, and what came back, up to
 /// `at_most` bytes of it.
-async fn exchange<S>(
+pub(crate) async fn exchange<S, B>(
     stream: S,
     host: &str,
-    request: Request<Full<Bytes>>,
+    request: Request<B>,
     at_most: usize,
 ) -> Result<Said, Unfetched>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     let said =
         |error: &dyn std::fmt::Display| format!("{host} did not answer as a site does: {error}.");
@@ -252,7 +255,7 @@ async fn ask(place: &Place, at_most: usize) -> Result<Answered, Unfetched> {
         .header(HOST, host)
         .header(USER_AGENT, AGENT)
         .header(ACCEPT, "*/*")
-        .body(Full::default())
+        .body(Full::<Bytes>::default())
         .map_err(|error| format!("{host} cannot be asked for that: {error}."))?;
     let said = exchange(stream, host, request, at_most).await?;
     let status = said.status;

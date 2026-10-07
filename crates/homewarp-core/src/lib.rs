@@ -23,6 +23,7 @@ mod schedules;
 mod servers;
 mod settings;
 mod sftp;
+mod store;
 mod templates;
 mod tls;
 mod totp;

@@ -156,6 +156,9 @@ fn sentence(happened: &Happened, server: Option<&str>) -> String {
         // What a schedule came to ends its own sentence.
         "schedule.ran" => format!("{server}, schedule {detail}"),
         "panel.certificate" => format!("The panel has a new certificate for {detail}."),
+        "backup.copy_failed" => {
+            format!("{server}: a backup was not copied to the store elsewhere. {detail}")
+        }
         // The tunnel may still carry players while the Gate's own program is down.
         "gate.lost" => format!(
             "The VPS has stopped answering Homewarp: {detail}. Players may not be reaching the servers."

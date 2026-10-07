@@ -1399,7 +1399,10 @@ async fn a_backup_is_made_kept_and_put_back() {
     let done = |all: &Value| all["backups"][0]["state"] == "done";
 
     let none = panel.get(backups, cookie).await;
-    assert_eq!(none.body, json!({ "kept": 3, "backups": [] }));
+    assert_eq!(
+        none.body,
+        json!({ "kept": 3, "store": false, "backups": [] })
+    );
     let long = json!({ "name": "x".repeat(61) });
     assert_eq!(
         panel.post(backups, long, cookie).await.status,
@@ -1644,13 +1647,13 @@ async fn where_servers_look_names_up_is_the_owners_to_set() {
     let first = panel.get(settings, cookie).await;
     assert_eq!(
         first.body,
-        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30, "notices": null })
+        json!({ "resolvers": ["1.1.1.1", "1.0.0.1"], "new_connections": 30, "notices": null, "store": null })
     );
     // Kept each once, as addresses are written.
     let quad9 = json!({ "resolvers": ["9.9.9.9", " 9.9.9.9 ", "149.112.112.112"] });
     let changed = panel.put(settings, quad9, cookie).await;
     assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
-    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30, "notices": null });
+    let kept = json!({ "resolvers": ["9.9.9.9", "149.112.112.112"], "new_connections": 30, "notices": null, "store": null });
     assert_eq!(changed.body, kept);
 
     for (wrong, said) in [
@@ -1779,6 +1782,82 @@ async fn where_notices_go_is_the_owners_to_say_and_is_not_given_back() {
         panel.put(notices, json!({ "url": secret }), None).await,
         panel.delete(notices, None).await,
         panel.post(test, json!({}), None).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
+async fn a_store_for_backups_is_kept_only_once_it_has_been_tried() {
+    let panel = panel().await;
+    let cookie = panel.set_up().await;
+    let cookie = Some(cookie.as_str());
+    let settings = "/api/v1/settings";
+    let store = "/api/v1/settings/store";
+    let typed = |change: Value| {
+        let mut store = json!({
+            "endpoint": "https://store.example.invalid", "bucket": "my-backups",
+            "key_id": "AKIAEXAMPLE", "secret": "s3cretK3y", "prefix": "homewarp"
+        });
+        for (key, value) in change.as_object().unwrap() {
+            store[key] = value.clone();
+        }
+        store
+    };
+
+    // What does not look like a store's settings is refused before anything is asked of one.
+    for (change, why) in [
+        (
+            json!({ "endpoint": "store.example.invalid" }),
+            "store's address",
+        ),
+        (
+            json!({ "endpoint": "https://user:pw@store.example.invalid" }),
+            "store's address",
+        ),
+        (
+            json!({ "endpoint": "https://store.example.invalid/bucket" }),
+            "store's address",
+        ),
+        (json!({ "bucket": "My Bucket" }), "bucket's name"),
+        (json!({ "prefix": "../elsewhere" }), "folder in the bucket"),
+        (json!({ "region": "us east 1" }), "region"),
+        (json!({ "secret": "" }), "key's id and its secret"),
+    ] {
+        let answer = panel.put(store, typed(change.clone()), cookie).await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{change}");
+        let said = answer.body["error"].as_str().unwrap();
+        assert!(said.contains(why), "{change}: {said}");
+    }
+
+    // A store that is not there is not kept: nothing would arrive in it.
+    let unreachable = panel.put(store, typed(json!({})), cookie).await;
+    assert_eq!(
+        unreachable.status,
+        StatusCode::CONFLICT,
+        "{}",
+        unreachable.body
+    );
+    let said = unreachable.body["error"].as_str().unwrap();
+    assert!(said.contains("store.example.invalid"), "{said}");
+    let kept = panel.get(settings, cookie).await;
+    assert_eq!(kept.body["store"], json!(null));
+    assert!(!kept.body.to_string().contains("s3cretK3y"));
+
+    // With none, a backup has nowhere to be copied to.
+    panel.a_server().await;
+    let nowhere = panel
+        .post("/api/v1/servers/1/backups/1/copy", json!({}), cookie)
+        .await;
+    assert_eq!(nowhere.status, StatusCode::NOT_FOUND, "{}", nowhere.body);
+
+    // Taking away what is not there is no error, and none of it is anybody's but the owner's.
+    let removed = panel.delete(store, cookie).await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+    assert_eq!(removed.body["store"], json!(null));
+    for answer in [
+        panel.put(store, typed(json!({})), None).await,
+        panel.delete(store, None).await,
     ] {
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
     }

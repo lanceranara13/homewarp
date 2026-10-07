@@ -30,6 +30,7 @@ use crate::{
     audit, auth, files,
     runtime::files_at,
     servers::MISSING,
+    store,
 };
 
 const LONGEST_NAME: usize = 60;
@@ -44,6 +45,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(keep_backups))
         .routes(routes!(download_backup))
         .routes(routes!(restore_backup))
+        .routes(routes!(copy_backup))
         .routes(routes!(remove_backup))
 }
 
@@ -66,6 +68,26 @@ impl BackupState {
     }
 }
 
+/// Where a backup's copy in the store elsewhere stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum Stored {
+    /// It is on its way there.
+    Copying,
+    Copied,
+    Failed,
+}
+
+impl Stored {
+    fn read(text: &str) -> Self {
+        match text {
+            "copying" => Self::Copying,
+            "copied" => Self::Copied,
+            _ => Self::Failed,
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Backup {
     id: i64,
@@ -78,6 +100,11 @@ pub(crate) struct Backup {
     /// When it was begun, in Unix seconds.
     created_at: i64,
     finished_at: Option<i64>,
+    /// Where its copy in the store elsewhere stands. Nothing where no copy
+    /// was asked for: there was no store when it was made.
+    stored: Option<Stored>,
+    /// Why it was not copied, if it was not.
+    stored_problem: Option<String>,
 }
 
 /// A server's backups, and how many of them are kept.
@@ -85,6 +112,8 @@ pub(crate) struct Backup {
 struct Backups {
     /// When one more is done, the oldest beyond this many go.
     kept: i64,
+    /// Whether there is a store elsewhere that backups are copied to.
+    store: bool,
     /// The newest first.
     backups: Vec<Backup>,
 }
@@ -197,7 +226,96 @@ pub(crate) async fn begin(state: &AppState, server_id: i64, name: &str) -> Resul
         problem: None,
         created_at,
         finished_at: None,
+        stored: None,
+        stored_problem: None,
     })
+}
+
+/// A server's name as part of a name in a bucket: small letters and digits,
+/// with a hyphen for whatever else there was.
+fn slug(name: &str) -> String {
+    let mut slug = String::new();
+    for letter in name.chars() {
+        match letter {
+            letter if letter.is_ascii_alphanumeric() => slug.push(letter.to_ascii_lowercase()),
+            _ if !slug.ends_with('-') => slug.push('-'),
+            _ => {}
+        }
+    }
+    slug.trim_matches('-').to_owned()
+}
+
+/// Copies a finished backup to the store elsewhere, if there is one, and
+/// writes down how that went. Where it does not go, the owner is told: a
+/// copy that is thought to be there and is not is worse than none.
+async fn copy(state: &AppState, server_id: i64, uuid: &str, id: i64) {
+    let Some(store) = store::kept(&state.db).await else {
+        return;
+    };
+    let found: Result<Option<(String, String, i64)>, _> = sqlx::query_as(
+        "SELECT servers.name, backups.name, backups.created_at
+         FROM backups JOIN servers ON servers.id = backups.server_id
+         WHERE backups.id = ? AND backups.state = 'done'",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(Some((server, name, created_at))) = found else {
+        return;
+    };
+    // By the server's name, for whoever looks in the bucket, and by enough of
+    // its id to tell two servers of one name apart.
+    let key = store.key(&format!(
+        "{}-{}/{}-{id}.tar.zst",
+        slug(&server),
+        uuid.get(..8).unwrap_or(uuid),
+        files::stamp(created_at)
+    ));
+    let begun = sqlx::query(
+        "UPDATE backups SET stored = 'copying', stored_key = ?, stored_problem = NULL WHERE id = ?",
+    )
+    .bind(&key)
+    .bind(id)
+    .execute(&state.db)
+    .await;
+    if let Err(error) = begun {
+        tracing::error!("that backup {id} is being copied could not be written down: {error}");
+        return;
+    }
+    let copied = store.put(&key, &file_of(&state.data, uuid, id)).await;
+    let written = match &copied {
+        Ok(()) => sqlx::query("UPDATE backups SET stored = 'copied' WHERE id = ?").bind(id),
+        Err(problem) => {
+            sqlx::query("UPDATE backups SET stored = 'failed', stored_problem = ? WHERE id = ?")
+                .bind(problem.clone())
+                .bind(id)
+        }
+    };
+    if let Err(error) = written.execute(&state.db).await {
+        tracing::error!("how copying backup {id} went could not be written down: {error}");
+    }
+    if let Err(problem) = copied {
+        let detail = format!("{name}: {problem}");
+        audit::record_by_homewarp(&state.db, Some(server_id), "backup.copy_failed", &detail).await;
+    }
+}
+
+/// Takes a backup's copy out of the store elsewhere, where it has one. Not
+/// waited for, and said in the log if it does not go: the backup itself is
+/// gone either way.
+fn uncopy(state: &AppState, key: Option<String>) {
+    let Some(key) = key else {
+        return;
+    };
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        let Some(store) = store::kept(&db).await else {
+            return;
+        };
+        if let Err(problem) = store.remove(&key).await {
+            tracing::warn!("a backup's copy was left in the store ({key}): {problem}");
+        }
+    });
 }
 
 /// Makes the backup a row was begun for, writes down how it went, and lets
@@ -231,11 +349,13 @@ async fn make(state: AppState, server_id: i64, uuid: String, id: i64) {
         tracing::error!("how backup {id} went could not be written down: {error}");
         return;
     }
-    if written.is_ok()
-        && let Err(error) = thin(&state, server_id, &uuid, id).await
-    {
+    if written.is_err() {
+        return;
+    }
+    if let Err(error) = thin(&state, server_id, &uuid, id).await {
         tracing::error!("the old backups of server {server_id} could not be cleared: {error}");
     }
+    copy(&state, server_id, &uuid, id).await;
 }
 
 /// Lets go of what a backup that has just been done makes old: the finished
@@ -247,15 +367,17 @@ async fn thin(
     uuid: &str,
     newest: i64,
 ) -> Result<(), sqlx::Error> {
-    let old: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM backups WHERE server_id = ?1 AND state = 'done'
+    let old: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, stored_key FROM backups WHERE server_id = ?1 AND state = 'done'
          ORDER BY id DESC LIMIT -1 OFFSET (SELECT backups_kept FROM servers WHERE id = ?1)",
     )
     .bind(server_id)
     .fetch_all(&state.db)
     .await?;
-    for id in old {
+    for (id, stored_key) in old {
         let _ = tokio::fs::remove_file(file_of(&state.data, uuid, id)).await;
+        // Its copy elsewhere goes with it: what is kept there is what is kept here.
+        uncopy(state, stored_key);
         sqlx::query("DELETE FROM backups WHERE id = ?")
             .bind(id)
             .execute(&state.db)
@@ -291,6 +413,14 @@ pub(crate) async fn settle(db: &SqlitePool, data: &Path) -> Result<(), sqlx::Err
         .execute(db)
         .await?;
     }
+    // Nor is one that was on its way to the store still on its way there.
+    sqlx::query(
+        "UPDATE backups SET stored = 'failed',
+                stored_problem = 'Homewarp stopped while this backup was being copied.'
+         WHERE stored = 'copying'",
+    )
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -317,9 +447,20 @@ async fn list_backups(
         .bind(id)
         .fetch_optional(&state.db)
         .await?;
-    type Row = (i64, String, String, i64, Option<String>, i64, Option<i64>);
+    type Row = (
+        i64,
+        String,
+        String,
+        i64,
+        Option<String>,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, name, state, size_bytes, problem, created_at, finished_at
+        "SELECT id, name, state, size_bytes, problem, created_at, finished_at, stored,
+                stored_problem
          FROM backups WHERE server_id = ? ORDER BY id DESC",
     )
     .bind(id)
@@ -328,7 +469,17 @@ async fn list_backups(
     let backups = rows
         .into_iter()
         .map(
-            |(id, name, state, size_bytes, problem, created_at, finished_at)| Backup {
+            |(
+                id,
+                name,
+                state,
+                size_bytes,
+                problem,
+                created_at,
+                finished_at,
+                stored,
+                stored_problem,
+            )| Backup {
                 id,
                 name,
                 state: BackupState::read(&state),
@@ -336,11 +487,14 @@ async fn list_backups(
                 problem,
                 created_at,
                 finished_at,
+                stored: stored.as_deref().map(Stored::read),
+                stored_problem,
             },
         )
         .collect();
     Ok(Json(Backups {
         kept: kept.ok_or(MISSING)?,
+        store: store::kept(&state.db).await.is_some(),
         backups,
     }))
 }
@@ -526,6 +680,56 @@ async fn restore_backup(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// Copies a finished backup to the store elsewhere: one that was made before
+/// there was a store, or whose copy did not arrive. The answer comes at once,
+/// and asking for the backups again shows how it went.
+#[utoipa::path(
+    post,
+    path = "/api/v1/servers/{id}/backups/{backup_id}/copy",
+    params(
+        ("id" = i64, Path, description = "The server's id."),
+        ("backup_id" = i64, Path, description = "The backup's id."),
+    ),
+    responses(
+        (status = ACCEPTED, description = "The backup is being copied."),
+        (status = UNAUTHORIZED, body = ProblemBody, description = "Nobody is signed in."),
+        (status = FORBIDDEN, body = ProblemBody, description = "The account has not been let do this."),
+        (status = NOT_FOUND, body = ProblemBody, description = "There is no such server, or no such backup."),
+        (status = CONFLICT, body = ProblemBody, description = "There is no store, the backup was not finished, or it is being copied already."),
+    )
+)]
+async fn copy_backup(
+    State(state): State<AppState>,
+    SignedIn(who): SignedIn,
+    InPath((id, backup_id)): InPath<(i64, i64)>,
+) -> Result<StatusCode, Problem> {
+    accounts::may(&state.db, &who, id, Some(Permission::Backups)).await?;
+    let uuid = uuid_of(&state.db, id).await?;
+    let (name, _) = done(&state.db, id, backup_id).await?;
+    if store::kept(&state.db).await.is_none() {
+        return Err(Problem::Conflict(
+            "There is no store to copy it to. The owner sets one under Settings.".into(),
+        ));
+    }
+    // Marked here and not when the work gets to it, so that a second click
+    // finds the first one counted.
+    let begun = sqlx::query(
+        "UPDATE backups SET stored = 'copying', stored_problem = NULL
+         WHERE id = ? AND (stored IS NULL OR stored != 'copying')",
+    )
+    .bind(backup_id)
+    .execute(&state.db)
+    .await?;
+    if begun.rows_affected() == 0 {
+        return Err(Problem::Conflict(
+            "That backup is being copied already.".into(),
+        ));
+    }
+    audit::record(&state.db, &who, Some(id), "backup.copy", &name).await;
+    tokio::spawn(async move { copy(&state, id, &uuid, backup_id).await });
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// Deletes a backup. It cannot be brought back.
 #[utoipa::path(
     delete,
@@ -549,19 +753,26 @@ async fn remove_backup(
 ) -> Result<StatusCode, Problem> {
     accounts::may(&state.db, &who, id, Some(Permission::Backups)).await?;
     let uuid = uuid_of(&state.db, id).await?;
-    let found: Option<(String, String)> =
-        sqlx::query_as("SELECT name, state FROM backups WHERE id = ? AND server_id = ?")
-            .bind(backup_id)
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
-    let (name, now) = found.ok_or(NO_BACKUP)?;
+    let found: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, state, stored, stored_key FROM backups WHERE id = ? AND server_id = ?",
+    )
+    .bind(backup_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (name, now, stored, stored_key) = found.ok_or(NO_BACKUP)?;
     if now == "running" {
         return Err(Problem::Conflict(
             "That backup is still being made. It can be deleted once it is done.".into(),
         ));
     }
+    if stored.as_deref() == Some("copying") {
+        return Err(Problem::Conflict(
+            "That backup is being copied to the store. It can be deleted once that is done.".into(),
+        ));
+    }
     let _ = tokio::fs::remove_file(file_of(&state.data, &uuid, backup_id)).await;
+    uncopy(&state, stored_key);
     sqlx::query("DELETE FROM backups WHERE id = ?")
         .bind(backup_id)
         .execute(&state.db)
