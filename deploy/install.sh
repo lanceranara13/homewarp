@@ -42,6 +42,27 @@ stop() {
   printf 'Homewarp: %s\n' "$*" >&2
   exit 1
 }
+# The name, in its own colour where there is a terminal to show it on and
+# nothing has asked for none.
+banner() {
+  tint='' plain=''
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+    tint=$(printf '\033[38;5;141m') plain=$(printf '\033[0m')
+    case "${COLORTERM:-}" in truecolor | 24bit) tint=$(printf '\033[38;2;143;124;255m') ;; esac
+  fi
+  printf '%s' "$tint"
+  cat <<'BANNER'
+
+    /\      _   _
+   /  \    | | | | ___  _ __ ___   _____      ____ _ _ __ _ __
+  / /\ \   | |_| |/ _ \| '_ ` _ \ / _ \ \ /\ / / _` | '__| '_ \
+  \ \/ /   |  _  | (_) | | | | | |  __/\ V  V / (_| | |  | |_) |
+   \  /    |_| |_|\___/|_| |_| |_|\___| \_/\_/ \__,_|_|  | .__/
+    \/                                                   |_|
+BANNER
+  printf '%s\n' "$plain"
+}
+banner
 
 case "$(uname -m)" in
   x86_64 | amd64) target=x86_64 ;;
