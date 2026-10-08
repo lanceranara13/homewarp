@@ -19,7 +19,7 @@
 [See it](#see-it) ·
 [Get started](#get-started) ·
 [Everyday tasks](#everyday-tasks) ·
-[FAQ](#questions)
+[FAQ](#faq)
 
 ![The Servers page, with eighteen servers for many different games](docs/screenshots/servers.png)
 
