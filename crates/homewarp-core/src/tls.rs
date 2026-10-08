@@ -11,8 +11,13 @@ use std::{
     fmt, io,
     net::IpAddr,
     path::Path,
-    sync::{Arc, Mutex, PoisonError, RwLock},
-    time::Duration,
+    pin::Pin,
+    sync::{
+        Arc, Mutex, PoisonError, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{self, Poll},
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -34,9 +39,9 @@ use rustls::{
     sign::CertifiedKey,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, UnixListener},
-    sync::Semaphore,
+    sync::{Notify, Semaphore},
     time::timeout,
 };
 use tokio_rustls::TlsAcceptor;
@@ -62,6 +67,11 @@ const SHAKING: usize = 256;
 /// many of them anyone on the internet may leave open.
 const OPEN: u32 = 1024;
 const OPEN_FROM_ONE: u32 = 64;
+/// How long a connection has to have said and been told nothing before it
+/// may be closed to make room: when every place is taken, the one that has
+/// been silent longest gives its place to the one that has just come. A
+/// browser whose connection went that way opens another with its next request.
+const QUIET: Duration = Duration::from_secs(10);
 
 /// Put on a request that came in over TLS, for whatever answers it.
 #[derive(Clone, Copy)]
@@ -111,45 +121,169 @@ impl ResolvesServerCert for Shown {
     }
 }
 
-/// The connections that are open, counted by where each came from.
-#[derive(Default)]
-struct Open(Mutex<HashMap<IpAddr, u32>>);
+/// The connections that are open: where each came from, and when anything
+/// last passed over it.
+struct Open {
+    held: Mutex<HashMap<u64, Held>>,
+    /// Told the connections apart.
+    next: AtomicU64,
+    /// When this began to count. Times are kept as milliseconds since.
+    began: Instant,
+}
+
+/// One open connection, as the count keeps it.
+struct Held {
+    from: IpAddr,
+    heard: Arc<AtomicU64>,
+    leave: Arc<Notify>,
+}
 
 /// One open connection's place in that count, given back when it ends.
 struct Place<'a> {
     open: &'a Open,
-    from: IpAddr,
+    id: u64,
+    /// When anything last passed over it, written by the connection itself.
+    heard: Arc<AtomicU64>,
+    /// Rung when the place has been given to another: the connection is to end.
+    leave: Arc<Notify>,
+}
+
+impl Default for Open {
+    fn default() -> Self {
+        Self {
+            held: Mutex::default(),
+            next: AtomicU64::new(0),
+            began: Instant::now(),
+        }
+    }
 }
 
 impl Open {
+    /// How long this has counted, in milliseconds.
+    fn now(&self) -> u64 {
+        u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     /// Takes a place for a connection from `from`, if there is one to take.
     fn enter(&self, from: IpAddr) -> Option<Place<'_>> {
-        let mut open = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let all: u32 = open.values().sum();
-        let from_there = open.get(&from).copied().unwrap_or(0);
+        self.enter_at(from, self.now())
+    }
+
+    /// The same, at a time that is given.
+    ///
+    /// One address has its share and no more. When all the places are taken,
+    /// whoever they are taken by, the connection that has been silent longest
+    /// makes way, if it has been silent for [`QUIET`]: so that leaving
+    /// connections open and saying nothing keeps nobody else out.
+    fn enter_at(&self, from: IpAddr, now: u64) -> Option<Place<'_>> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let from_there = held.values().filter(|held| held.from == from).count();
         // Where the Gate stands in for whoever comes through it, its one
         // address is everybody on the internet.
         let most = match tunnel::is_gate(from) {
             true => OPEN,
             false => OPEN_FROM_ONE,
         };
-        if all >= OPEN || from_there >= most {
+        if from_there >= most as usize {
             return None;
         }
-        open.insert(from, from_there + 1);
-        Some(Place { open: self, from })
+        if held.len() >= OPEN as usize {
+            let quiet = u64::try_from(QUIET.as_millis()).unwrap_or(u64::MAX);
+            let (longest, heard) = held
+                .iter()
+                .map(|(id, held)| (*id, held.heard.load(Ordering::Relaxed)))
+                .min_by_key(|(id, heard)| (*heard, *id))?;
+            if now.saturating_sub(heard) < quiet {
+                return None;
+            }
+            if let Some(gone) = held.remove(&longest) {
+                gone.leave.notify_one();
+            }
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (heard, leave) = (Arc::new(AtomicU64::new(now)), Arc::new(Notify::new()));
+        held.insert(
+            id,
+            Held {
+                from,
+                heard: Arc::clone(&heard),
+                leave: Arc::clone(&leave),
+            },
+        );
+        Some(Place {
+            open: self,
+            id,
+            heard,
+            leave,
+        })
     }
 }
 
 impl Drop for Place<'_> {
     fn drop(&mut self) {
-        let mut open = self.open.0.lock().unwrap_or_else(PoisonError::into_inner);
-        match open.get_mut(&self.from) {
-            Some(count) if *count > 1 => *count -= 1,
-            _ => {
-                open.remove(&self.from);
-            }
+        let mut held = self
+            .open
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        held.remove(&self.id);
+    }
+}
+
+/// A connection that writes down when anything passes over it, either way.
+struct Heard<S> {
+    stream: S,
+    heard: Arc<AtomicU64>,
+    began: Instant,
+}
+
+impl<S> Heard<S> {
+    fn now(&self) {
+        let now = u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.heard.store(now, Ordering::Relaxed);
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Heard<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut task::Context<'_>,
+        into: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = into.filled().len();
+        let read = Pin::new(&mut self.stream).poll_read(context, into);
+        if into.filled().len() > before {
+            self.now();
         }
+        read
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Heard<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut task::Context<'_>,
+        from: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let written = Pin::new(&mut self.stream).poll_write(context, from);
+        if matches!(written, Poll::Ready(Ok(some)) if some > 0) {
+            self.now();
+        }
+        written
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
     }
 }
 
@@ -311,34 +445,49 @@ async fn connection(
 ) {
     // Held until the connection ends. One more than there is room for is
     // turned away before it has cost a handshake.
-    let Some(_place) = open.enter(from.0) else {
+    let Some(place) = open.enter(from.0) else {
         return;
     };
-    let stream = {
-        let Ok(_shaking) = shaking.try_acquire() else {
-            return;
+    let served = async {
+        let stream = {
+            let Ok(_shaking) = shaking.try_acquire() else {
+                return;
+            };
+            match timeout(HANDSHAKE, acceptor.accept(stream)).await {
+                Ok(Ok(stream)) => stream,
+                // A scanner, or a browser that does not trust the certificate.
+                _ => return,
+            }
         };
-        match timeout(HANDSHAKE, acceptor.accept(stream)).await {
-            Ok(Ok(stream)) => stream,
-            // A scanner, or a browser that does not trust the certificate.
-            _ => return,
-        }
+        // What passes from here on is what the browser and the panel say to
+        // each other, and each time it does is written down for the count.
+        let stream = Heard {
+            stream,
+            heard: Arc::clone(&place.heard),
+            began: open.began,
+        };
+        stream.now();
+        let service = app.map_request(move |mut request: Request<_>| {
+            request.extensions_mut().insert(ConnectInfo(from));
+            request.extensions_mut().insert(Secured);
+            named(&mut request);
+            request
+        });
+        let mut serving = Builder::new(TokioExecutor::new());
+        serving
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(REQUEST);
+        // An error here is a connection that ended, which is how they all end.
+        let _ = serving
+            .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
+            .await;
     };
-    let service = app.map_request(move |mut request: Request<_>| {
-        request.extensions_mut().insert(ConnectInfo(from));
-        request.extensions_mut().insert(Secured);
-        named(&mut request);
-        request
-    });
-    let mut serving = Builder::new(TokioExecutor::new());
-    serving
-        .http1()
-        .timer(TokioTimer::new())
-        .header_read_timeout(REQUEST);
-    // An error here is a connection that ended, which is how they all end.
-    let _ = serving
-        .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
-        .await;
+    // Served until it ends, or until its place is given to another.
+    tokio::select! {
+        () = served => {}
+        () = place.leave.notified() => {}
+    }
 }
 
 #[cfg(test)]
@@ -349,7 +498,7 @@ mod tests {
 
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::{OPEN, OPEN_FROM_ONE, Open, Shown, element, named, time, validity};
+    use super::{Heard, OPEN, OPEN_FROM_ONE, Open, QUIET, Shown, element, named, time, validity};
 
     #[test]
     fn no_more_connections_are_open_than_there_is_room_for() {
@@ -368,7 +517,7 @@ mod tests {
         assert!(open.enter(one).is_none());
         drop(elsewhere);
         drop(places);
-        assert!(open.0.lock().unwrap().is_empty());
+        assert!(open.held.lock().unwrap().is_empty());
 
         // The Gate's own address, where it stands in for everybody, has the
         // whole of the room and no more than that.
@@ -378,6 +527,89 @@ mod tests {
         assert!(open.enter(one).is_none());
         drop(all);
         assert!(open.enter(one).is_some());
+    }
+
+    #[tokio::test]
+    async fn when_every_place_is_taken_the_connection_silent_longest_makes_way() {
+        use std::{sync::atomic::Ordering, time::Duration};
+
+        use tokio::time::timeout;
+
+        let open = Open::default();
+        // Sixteen addresses, each with its share, at one moment: the room is full.
+        let from = |place: u32| {
+            let first = u32::from(Ipv4Addr::new(203, 0, 113, 0));
+            IpAddr::V4(Ipv4Addr::from(first + place / OPEN_FROM_ONE))
+        };
+        let places: Vec<_> = (0..OPEN)
+            .map(|place| open.enter_at(from(place), 1_000).unwrap())
+            .collect();
+        let other = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        let quiet = u64::try_from(QUIET.as_millis()).unwrap();
+        // None of them has been silent for long: nobody makes way yet.
+        assert!(open.enter_at(other, 1_000 + quiet - 1).is_none());
+        // The first of them says something. The rest go on saying nothing.
+        places[0].heard.store(1_000 + quiet, Ordering::Relaxed);
+        let came = open.enter_at(other, 1_000 + quiet).unwrap();
+        {
+            let held = open.held.lock().unwrap();
+            assert_eq!(held.len(), OPEN as usize);
+            assert!(held.contains_key(&came.id));
+            // The one that spoke stays, and the next, which did not, has gone.
+            assert!(held.contains_key(&places[0].id));
+            assert!(!held.contains_key(&places[1].id));
+            assert!(held.contains_key(&places[2].id));
+        }
+        // It is told to end, and no other is.
+        let told =
+            |place: usize| timeout(Duration::from_millis(50), places[place].leave.notified());
+        assert!(told(1).await.is_ok());
+        assert!(told(0).await.is_err());
+        assert!(told(2).await.is_err());
+        // An address that has its share gets no more by it, full room or not.
+        assert!(
+            open.enter_at(from(OPEN_FROM_ONE), 1_000 + 2 * quiet)
+                .is_none()
+        );
+        // What has made way gives nothing back twice when it ends.
+        drop(places);
+        assert_eq!(open.held.lock().unwrap().len(), 1);
+        drop(came);
+        assert!(open.held.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn what_passes_over_a_connection_is_written_down_as_it_passes() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering},
+            },
+            time::{Duration, Instant},
+        };
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (near, mut far) = tokio::io::duplex(64);
+        let heard = Arc::new(AtomicU64::new(0));
+        let began = Instant::now() - Duration::from_secs(60);
+        let mut near = Heard {
+            stream: near,
+            heard: Arc::clone(&heard),
+            began,
+        };
+        // Written to: the moment is kept.
+        near.write_all(b"hello").await.unwrap();
+        let written = heard.swap(0, Ordering::Relaxed);
+        assert!(written >= 60_000, "{written}");
+        // Read from, the same; and nothing is kept of a read that brought nothing.
+        far.write_all(b"hi").await.unwrap();
+        let mut some = [0u8; 2];
+        near.read_exact(&mut some).await.unwrap();
+        assert!(heard.swap(0, Ordering::Relaxed) >= 60_000);
+        drop(far);
+        assert_eq!(near.read(&mut some).await.unwrap(), 0);
+        assert_eq!(heard.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -14,4 +14,4 @@ pub use engine::{
     Apart, Engine, Error, InstallScript, Listener, Network, Port, Protocol, RESOLVERS, Server,
     Usage,
 };
-pub use files::{Entry, How, Kind, ServerDir, Stat, Unpacked, running_as};
+pub use files::{Entry, How, Kind, LARGEST_SETTINGS, ServerDir, Stat, Unpacked, running_as};

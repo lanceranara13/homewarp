@@ -13,7 +13,7 @@ use std::{
 
 use cap_std::{
     ambient_authority,
-    fs::{Dir, Metadata, MetadataExt, OpenOptions},
+    fs::{Dir, Metadata, MetadataExt, OpenOptions, OpenOptionsExt},
 };
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use tar::{EntryType, Header};
@@ -117,6 +117,27 @@ static PARTS: AtomicU64 = AtomicU64::new(0);
 
 const NO_PARENT: &str = "";
 
+/// The most a file of settings may be for Homewarp to read it whole
+/// ([`ServerDir::read_to_string`]). A `server.properties` is a few kilobytes,
+/// and the longest of a proxy's or a plugin's some hundreds.
+pub const LARGEST_SETTINGS: u64 = 4 << 20;
+
+/// How many names are tried for a file on its way in before it is given up on.
+const PART_TRIES: u32 = 16;
+
+/// Asked of every open of something a server may have put there: not to wait.
+/// To an ordinary file it makes no difference. What is not one is then opened
+/// at once, found out for what it is, and refused, where it would otherwise
+/// have been waited on for as long as nobody wrote to it.
+const NO_WAITING: i32 = rustix::fs::OFlags::NONBLOCK.bits() as i32;
+
+/// How a file is opened to be read.
+fn reading() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(NO_WAITING);
+    options
+}
+
 /// How hard a backup is packed: Zstandard's own middle, which a home machine
 /// writes at a few hundred megabytes a second.
 const BACKUP_LEVEL: i32 = 3;
@@ -169,9 +190,13 @@ impl ServerDir {
         })
     }
 
-    /// The file's text, or `None` if there is no such file.
+    /// The text of a file of settings, or `None` if there is no such file.
+    ///
+    /// It is the server's to write, and so held to what such a file is: an
+    /// ordinary file of at most [`LARGEST_SETTINGS`] bytes of text. The error
+    /// is `FileTooLarge`, `InvalidData` or `InvalidInput` for what is not.
     pub fn read_to_string(&self, path: &str) -> io::Result<Option<String>> {
-        match self.dir.read_to_string(path) {
+        match self.text(path, LARGEST_SETTINGS) {
             Ok(text) => Ok(Some(text)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -180,11 +205,23 @@ impl ServerDir {
 
     /// Writes a file, making the directories it sits in if the server has not
     /// made them yet. Those are given to the server's user as the file is.
+    ///
+    /// What is there by that name is never opened: the text is written
+    /// beside it and put in its place. And it is put in the place of an
+    /// ordinary file only; the error is `InvalidInput` for a name that is a
+    /// link, a pipe or anything else a server may have left there.
     pub fn write(&self, path: &str, contents: &str) -> io::Result<()> {
-        self.make_dirs(Path::new(path).parent().unwrap_or(Path::new(NO_PARENT)))?;
-        let mut file = self.dir.create(path)?;
-        file.write_all(contents.as_bytes())?;
-        self.own(&file)
+        if let Ok(there) = self.dir.symlink_metadata(inside(path)?) {
+            ordinary(&there)?;
+        }
+        let (mut file, part) = self.begin(path)?;
+        match file.write_all(contents.as_bytes()) {
+            Ok(()) => self.finish(&part, path),
+            Err(error) => {
+                self.abandon(&part);
+                Err(error)
+            }
+        }
     }
 
     /// What is in a folder: folders first, then by name.
@@ -250,7 +287,9 @@ impl ServerDir {
             .append(how.append)
             .create(how.create)
             .truncate(how.truncate)
-            .create_new(how.new);
+            .create_new(how.new)
+            // What it was a moment ago it may no longer be.
+            .custom_flags(NO_WAITING);
         let file = self.dir.open_with(path, &options)?;
         ordinary(&file.metadata()?)?;
         if !there {
@@ -275,7 +314,7 @@ impl ServerDir {
     pub fn file(&self, path: &str) -> io::Result<(std::fs::File, u64)> {
         let path = inside(path)?;
         ordinary(&self.dir.metadata(path)?)?;
-        let file = self.dir.open(path)?;
+        let file = self.dir.open_with(path, &reading())?;
         let size = ordinary(&file.metadata()?)?;
         Ok((file.into_std(), size))
     }
@@ -311,12 +350,25 @@ impl ServerDir {
         }
         let parent = path.parent().unwrap_or(Path::new(NO_PARENT));
         self.make_dirs(parent)?;
-        let part = parent.join(format!(
-            ".homewarp-{}-{}.part",
-            std::process::id(),
-            PARTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let file = self.dir.create(&part)?.into_std();
+        // Made, and never opened: a name that something already has is not
+        // this file's, whatever a server put there, and the next one is tried.
+        let mut making = OpenOptions::new();
+        making.write(true).create_new(true);
+        let mut tries = 0;
+        let (file, part) = loop {
+            let part = parent.join(format!(
+                ".homewarp-{}-{}.part",
+                std::process::id(),
+                PARTS.fetch_add(1, Ordering::Relaxed)
+            ));
+            tries += 1;
+            match self.dir.open_with(&part, &making) {
+                Ok(file) => break (file.into_std(), part),
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists && tries < PART_TRIES => {}
+                Err(error) => return Err(error),
+            }
+        };
         // A start script that is edited has to stay one that can be run. Set
         // before the file is given away: after, it is no longer Homewarp's to set.
         if let Ok(replaced) = self.dir.metadata(path)
@@ -586,7 +638,7 @@ impl ServerDir {
                 tar.append_link(&mut header, named, target)
             }
             Kind::File => {
-                let Ok(file) = self.dir.open(path) else {
+                let Ok(file) = self.dir.open_with(path, &reading()) else {
                     return Ok(());
                 };
                 let Ok(size) = file.metadata().and_then(|now| ordinary(&now)) else {
@@ -847,6 +899,56 @@ mod tests {
         dir.remove("elsewhere").unwrap();
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "host secret");
         assert!(scratch.path().join("server").exists());
+    }
+
+    #[test]
+    fn a_file_of_settings_is_an_ordinary_file_of_a_size_and_nothing_else_is_opened() {
+        use rustix::fs::{CWD, FileType, Mode, mknodat};
+
+        let (scratch, dir) = scratch();
+        let root = scratch.path().join("server");
+
+        // Longer than settings are: not read, however much of it there is.
+        let long = std::fs::File::create(root.join("long.properties")).unwrap();
+        long.set_len(super::LARGEST_SETTINGS + 1).unwrap();
+        let refused = dir.read_to_string("long.properties").unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::FileTooLarge);
+
+        // A pipe by the name of a file: said to be no file, at once, by
+        // reading and by writing alike. Neither waits for its other end.
+        let pipe = root.join("pipe.properties");
+        mknodat(CWD, &pipe, FileType::Fifo, Mode::from_raw_mode(0o644), 0).unwrap();
+        assert!(dir.read_to_string("pipe.properties").is_err());
+        assert!(dir.file("pipe.properties").is_err());
+        let refused = dir.write("pipe.properties", "motd=hi\n").unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            dir.stat("pipe.properties", false).unwrap().kind,
+            Kind::Other
+        );
+
+        // A folder by that name is no file either.
+        std::fs::create_dir(root.join("folder.properties")).unwrap();
+        assert!(dir.read_to_string("folder.properties").is_err());
+        assert!(dir.write("folder.properties", "motd=hi\n").is_err());
+
+        // A file that is written takes the place of the one before it, and
+        // keeps what that one could be done with.
+        dir.write("start.sh", "echo one\n").unwrap();
+        std::fs::set_permissions(
+            root.join("start.sh"),
+            std::fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+        dir.write("start.sh", "echo two\n").unwrap();
+        assert_eq!(
+            dir.read_to_string("start.sh").unwrap().as_deref(),
+            Some("echo two\n")
+        );
+        let mode = std::fs::metadata(root.join("start.sh")).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o750);
+        // Nothing of the writing is left beside it.
+        assert!(!names(&dir, "").iter().any(|name| name.ends_with(".part")));
     }
 
     #[test]

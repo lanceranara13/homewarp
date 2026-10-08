@@ -309,7 +309,16 @@ fn set_up(
                 ..replacement.clone()
             });
         }
-        let before = files.read_to_string(&file.path)?;
+        let before = match files.read_to_string(&file.path) {
+            Ok(before) => before,
+            Err(error) => match not_settings(&error) {
+                Some(why) => {
+                    say(format!("{} was left as it is: {why}.", file.path));
+                    continue;
+                }
+                None => return Err(error.into()),
+            },
+        };
         // The `file` parser changes lines that are there, and a file that is
         // not there has none. Wings makes it all the same, empty, and a server
         // that writes its settings out only where it finds no file then never
@@ -324,14 +333,46 @@ fn set_up(
         // A file that cannot be set up is said and passed over, as Wings
         // passes over it: the server may still do without.
         match config::patch(file.parser, &before.unwrap_or_default(), &replacements) {
-            Ok(after) => files.write(&file.path, &after)?,
+            Ok(after) => write_settings(files, &file.path, &after, &mut say)?,
             Err(error) => say(format!("{} was left as it is: {error}.", file.path)),
         }
     }
     if server.eula {
-        files.write("eula.txt", "eula=true\n")?;
+        write_settings(files, "eula.txt", "eula=true\n", &mut say)?;
     }
     Ok(())
+}
+
+/// Why what is at a path cannot be a file of settings, if that is why it
+/// could not be read or written. A server's folder is the server's to fill,
+/// and what it put where its settings belong is said and passed over, as
+/// settings that cannot be made sense of are: it does not hold up a start.
+fn not_settings(error: &std::io::Error) -> Option<&'static str> {
+    match error.kind() {
+        ErrorKind::FileTooLarge => Some("it is longer than a file of settings is"),
+        ErrorKind::InvalidData => Some("it is not text"),
+        ErrorKind::InvalidInput | ErrorKind::IsADirectory => Some("it is not an ordinary file"),
+        _ => None,
+    }
+}
+
+/// Writes one of a server's files of settings, or says why it was left.
+fn write_settings(
+    files: &ServerDir,
+    path: &str,
+    text: &str,
+    mut say: impl FnMut(String),
+) -> anyhow::Result<()> {
+    match files.write(path, text) {
+        Ok(()) => Ok(()),
+        Err(error) => match not_settings(&error) {
+            Some(why) => {
+                say(format!("{path} was left as it is: {why}."));
+                Ok(())
+            }
+            None => Err(error.into()),
+        },
+    }
 }
 
 /// What a server's task has seen, for the pages that ask.
@@ -1084,7 +1125,7 @@ impl Runtime {
             } else {
                 watch.set(State::Starting);
                 self.fetch(&spec.image, watch).await?;
-                self.prepare(server, spec, watch)?;
+                self.prepare(server, spec, watch).await?;
                 self.engine.create(spec).await?;
                 let console = self.engine.attach(spec).await?;
                 self.engine.start(spec).await?;
@@ -1291,9 +1332,15 @@ impl Runtime {
     }
 
     /// Writes what the template wants in the server's files before a start.
-    fn prepare(&self, server: &Definition, spec: &Spec, watch: &Watch) -> anyhow::Result<()> {
-        let files = ServerDir::open(&spec.dir, USER, USER)?;
-        set_up(&files, server, |line| watch.say(line))
+    /// Off the async threads: it is work on files, and on files that are
+    /// the server's own, which every other server's task should not wait on.
+    async fn prepare(&self, server: &Definition, spec: &Spec, watch: &Watch) -> anyhow::Result<()> {
+        let (server, dir, watch) = (server.clone(), spec.dir.clone(), watch.clone());
+        tokio::task::spawn_blocking(move || {
+            let files = ServerDir::open(&dir, USER, USER)?;
+            set_up(&files, &server, |line| watch.say(line))
+        })
+        .await?
     }
 
     /// The server as Docker needs to know it.
@@ -1434,6 +1481,39 @@ mod tests {
         let mut other = telling;
         other.template.config_files.clear();
         assert!(standing(State::Offline, &other).is_none());
+    }
+
+    #[test]
+    fn what_a_server_left_where_its_settings_belong_does_not_hold_up_a_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let (uid, gid) = running_as();
+        let files = ServerDir::open(directory.path(), uid, gid).unwrap();
+        let server = Definition {
+            eula: true,
+            ..proxy()
+        };
+        // Longer than any settings are, and a folder where a file belongs.
+        let long = std::fs::File::create(directory.path().join("server.properties")).unwrap();
+        long.set_len(homewarp_runtime::LARGEST_SETTINGS + 1)
+            .unwrap();
+        std::fs::create_dir(directory.path().join("velocity.toml")).unwrap();
+        std::fs::create_dir(directory.path().join("eula.txt")).unwrap();
+        let mut said = Vec::new();
+        set_up(&files, &server, |line| said.push(line)).unwrap();
+        said.sort();
+        assert_eq!(
+            said,
+            [
+                "eula.txt was left as it is: it is not an ordinary file.",
+                "server.properties was left as it is: it is longer than a file of settings is.",
+                "velocity.toml was left as it is: it is not an ordinary file.",
+            ]
+        );
+        // And left it is: nothing of it was read in, and nothing written over it.
+        let length = std::fs::metadata(directory.path().join("server.properties"))
+            .unwrap()
+            .len();
+        assert_eq!(length, homewarp_runtime::LARGEST_SETTINGS + 1);
     }
 
     #[test]

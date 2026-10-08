@@ -593,6 +593,43 @@ still shut out with the account for five minutes; a webhook still shows a link s
 typed as a link. The tunnel's enrolment, eggs, backups and the store, the certificate
 and the way servers are started and put to sleep were not read in that pass.
 
+### Audited again (2026-10-08)
+
+The parts the first pass left were read: the tunnel and enrolling a VPS, eggs, the inside
+of a server's folder as Homewarp opens it, backups and the store, the panel over TLS, the
+running of servers and what stands in for a sleeping one. Source only this time, by the
+same one reviewer. The two lines that matter most held: a VPS that has been taken over
+gets into home only where §6 says it may, and nothing in a server's folder leads a read
+or a write of Homewarp's outside it. Four things were found, all of one kind, something
+less trusted than Homewarp able to make it wait or fail where a limit was meant, and
+were changed:
+
+- *What a server left where its settings belong was opened as it was.* Before a start,
+  the files a template names were read whole and written through, whatever they were
+  and however long, on a thread every server shares. They are now read only if they
+  are ordinary files of at most 4 MB of text, written beside and put in place and never
+  opened for writing, and what is neither is said in the console and passed over; the
+  work is done off the shared threads. Every open of a server's file asks not to wait.
+- *A Gate was taken at its word for how much it had counted.* Which ports it may report
+  was limited before; how many bytes was not, and a great enough number made the sum
+  for the Network page fail, and the page with it. One hearing now adds at most a
+  terabyte and one hour keeps at most a petabyte, in the row and in the sum alike.
+- *A connection to the Gate's port 80 outlived the answers it was opened for.* The Gate
+  now serves them itself, in a few lines: sixty-four at once, ten seconds and one
+  request each, and all of them ended with the last answer.
+- *A silent connection kept its place at the panel's TLS door.* A place was given back
+  only when a connection ended, and a silent one never does. When every place is taken
+  now, the connection that has been silent longest, for ten seconds at the least, makes
+  way for the one that has just come.
+
+Left as it is, and worth knowing: an account with Backups can download a backup, which
+is every file of the server, without Files; an account with Settings sets a server's
+memory and every variable of its template, whether the egg marks one as the user's to
+change or not; the limits on new connections in the Gate's table stop limiting while
+their lists of addresses are full; the Gate's own door answers on the VPS's public
+interface to a neighbour on the same segment, and is kept by its token alone; an archive
+is held to the bytes it unpacks to and not to the number of its files.
+
 ## 7. Performance
 
 - Forwarding is in-kernel on both ends; the Rust processes are control plane only and

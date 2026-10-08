@@ -1452,6 +1452,7 @@ dependencies = [
  "homewarp-proto",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -91,6 +91,13 @@ const FROM: &str = "from ";
 /// looks are kept: five minutes of them, which is what the Network page draws.
 const SAMPLE_EVERY: Duration = Duration::from_secs(2);
 const SAMPLES: usize = 150;
+/// The most that what a Gate says went through a port is taken to add at one
+/// hearing, and the most that is kept of a port for an hour. Both are far more
+/// than a line carries, and small enough that a day of them, for every port
+/// there can be, adds up to a number: a Gate is not taken at its word for how
+/// much it counted, any more than for which ports.
+const MOST_AT_ONCE: u64 = 1 << 40;
+const MOST_IN_AN_HOUR: i64 = 1 << 50;
 /// The most characters in what a VPS is called.
 const LONGEST_NAME: usize = 40;
 
@@ -682,7 +689,8 @@ impl Tunnel {
                         None => 0,
                         Some(before) if now.bytes >= before => now.bytes - before,
                         Some(_) => now.bytes,
-                    };
+                    }
+                    .min(MOST_AT_ONCE);
                     let protocol = match now.protocol {
                         Protocol::Tcp => "tcp",
                         Protocol::Udp => "udp",
@@ -695,13 +703,14 @@ impl Tunnel {
             sqlx::query(
                 "INSERT INTO traffic (gate_id, port, protocol, hour, bytes) VALUES (?, ?, ?, ?, ?)
                  ON CONFLICT (gate_id, port, protocol, hour)
-                 DO UPDATE SET bytes = bytes + excluded.bytes",
+                 DO UPDATE SET bytes = MIN(bytes + excluded.bytes, ?)",
             )
             .bind(gate)
             .bind(port)
             .bind(protocol)
             .bind(hour)
-            .bind(i64::try_from(bytes).unwrap_or(i64::MAX))
+            .bind(i64::try_from(bytes).unwrap_or(MOST_IN_AN_HOUR))
+            .bind(MOST_IN_AN_HOUR)
             .execute(&self.db)
             .await?;
         }
@@ -1346,10 +1355,14 @@ struct ForwardedPort {
 }
 
 /// What went through each port of each Gate in the last day, as the hours of it add up.
+/// No hour counts for more than is kept of one, whatever a row says: a sum
+/// that ran past what a number holds would be an error, and the page's with it.
 async fn through(db: &SqlitePool) -> anyhow::Result<HashMap<(i64, u16), i64>> {
     let counted: Vec<(i64, u16, i64)> = sqlx::query_as(
-        "SELECT gate_id, port, SUM(bytes) FROM traffic WHERE hour > ? GROUP BY gate_id, port",
+        "SELECT gate_id, port, SUM(MIN(bytes, ?)) FROM traffic WHERE hour > ?
+         GROUP BY gate_id, port",
     )
+    .bind(MOST_IN_AN_HOUR)
     .bind(auth::now() / 3600 - 24)
     .fetch_all(db)
     .await?;
@@ -1529,8 +1542,7 @@ async fn view(state: &AppState) -> Result<Network, Problem> {
                 traffic_bytes: through
                     .iter()
                     .filter(|((of, _), _)| *of == gate.id)
-                    .map(|(_, bytes)| *bytes)
-                    .sum(),
+                    .fold(0i64, |all, (_, bytes)| all.saturating_add(*bytes)),
                 name: gate.name,
                 address: gate.address,
             }
@@ -1929,6 +1941,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows, [(7, 25565, 400)]);
+    }
+
+    #[tokio::test]
+    async fn what_a_gate_says_it_counted_adds_up_to_a_number_however_much_it_says() {
+        let files = tempfile::tempdir().unwrap();
+        let db = db::open(&files.path().join("homewarp.db")).await.unwrap();
+        sqlx::query(
+            "INSERT INTO gates (id, tunnel, name, address, wg_port, api_port, private_key,
+                 gate_public_key, preshared_key, token, mode, created_at)
+             VALUES (7, 0, 'a', 'a', 1, 1, 'k', 'k', 'k', 't', 'transparent', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let tunnel = Tunnel::new(db.clone(), None, files.path());
+        let both = [Protocol::Tcp, Protocol::Udp];
+        lock(&tunnel.live).entry(7).or_default().told = Some(Desired {
+            generation: 1,
+            forwards: both
+                .iter()
+                .map(|protocol| Forward {
+                    port: 25565,
+                    protocol: *protocol,
+                })
+                .collect(),
+            ..Desired::default()
+        });
+        let said = |bytes| -> Vec<Through> {
+            both.iter()
+                .map(|protocol| Through {
+                    port: 25565,
+                    protocol: *protocol,
+                    bytes,
+                })
+                .collect()
+        };
+        // Where counting starts from, and then the most there is, again and again.
+        tunnel.count(7, &said(0)).await.unwrap();
+        for _ in 0..3 {
+            tunnel.count(7, &said(u64::MAX)).await.unwrap();
+            tunnel.count(7, &said(0)).await.unwrap();
+        }
+        let rows: Vec<(i64,)> = sqlx::query_as("SELECT bytes FROM traffic")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(bytes,)| *bytes == 3 << 40), "{rows:?}");
+        // An hour that an older Homewarp wrote down in full, and hours enough
+        // of the most that is kept to pass what a number holds if added as they are.
+        let hour = crate::auth::now() / 3600;
+        for ago in 1..20 {
+            sqlx::query(
+                "INSERT INTO traffic (gate_id, port, protocol, hour, bytes)
+                 VALUES (7, 25565, 'tcp', ?, ?)",
+            )
+            .bind(hour - ago)
+            .bind(i64::MAX)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let through = super::through(&db).await.unwrap();
+        assert_eq!(
+            through.get(&(7, 25565)).copied(),
+            Some(19 * super::MOST_IN_AN_HOUR + 2 * (3 << 40))
+        );
     }
 
     #[test]

@@ -66,6 +66,13 @@ pub(crate) const RUN: &str = "/run/homewarp-gate";
 const CHALLENGES: &str = "/run/homewarp-gate/challenges";
 /// A certificate for one name asks one question at a time, or two.
 const MOST_CHALLENGES: usize = 8;
+/// How many may be asking port 80 for an answer at once, how long one of
+/// them is listened to, and how much of what it asks is read. An authority
+/// asks from a handful of places, in a few hundred bytes, and is done in a
+/// moment; the port is open to everybody else as well.
+const ASKING_AT_ONCE: usize = 64;
+const ASKED_WITHIN: Duration = Duration::from_secs(10);
+const LONGEST_ASKING: usize = 4096;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
@@ -728,22 +735,78 @@ fn serve_answers(gate: &Gate) -> AnsweredBy {
     let Ok(listener) = listener else {
         return AnsweredBy::WebServer;
     };
-    let answers = Router::new().route("/.well-known/acme-challenge/{token}", get(answered));
-    *answering = Some(tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, answers).await {
-            tracing::error!("{error:#}");
-        }
-    }));
+    *answering = Some(tokio::spawn(answers(listener, PathBuf::from(CHALLENGES))));
     AnsweredBy::Gate
 }
 
-/// What anyone on the internet may ask on port 80 while there are answers:
-/// one of them, by its token, and nothing else.
-async fn answered(Named(token): Named<String>) -> Result<String, StatusCode> {
-    if !is_token(&token) {
-        return Err(StatusCode::NOT_FOUND);
+/// Serves the answers in `dir` to whoever asks on `listener`, until it is
+/// stopped. Each connection is asked one thing, answered and closed, within
+/// [`ASKED_WITHIN`]; no more than [`ASKING_AT_ONCE`] are listened to, and one
+/// more is closed unheard. They are this task's own, and end when it does:
+/// with the last answer gone, nothing of port 80 is left open here.
+async fn answers(listener: tokio::net::TcpListener, dir: PathBuf) {
+    let dir = Arc::new(dir);
+    let mut asking = tokio::task::JoinSet::new();
+    loop {
+        // Out of files, say, for a moment. It is not a reason to stop answering.
+        let Ok((stream, _)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        while asking.try_join_next().is_some() {}
+        if asking.len() >= ASKING_AT_ONCE {
+            continue;
+        }
+        let dir = Arc::clone(&dir);
+        asking.spawn(async move {
+            let _ = tokio::time::timeout(ASKED_WITHIN, answered(stream, &dir)).await;
+        });
     }
-    fs::read_to_string(Path::new(CHALLENGES).join(token)).map_err(|_| StatusCode::NOT_FOUND)
+}
+
+/// What anyone on the internet may ask on port 80 while there are answers:
+/// one of them, by its token, and nothing else. This speaks just enough HTTP
+/// for that: one request, read to the end of its head, and one answer.
+async fn answered(mut stream: tokio::net::TcpStream, dir: &Path) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut asked = Vec::new();
+    let mut some = [0u8; 1024];
+    while !asked.windows(4).any(|end| end == b"\r\n\r\n") {
+        let read = stream.read(&mut some).await?;
+        if read == 0 || asked.len() + read > LONGEST_ASKING {
+            return Ok(());
+        }
+        asked.extend_from_slice(&some[..read]);
+    }
+    let answer = match answer_to(dir, &String::from_utf8_lossy(&asked)) {
+        Some(answer) => format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+            answer.len()
+        ),
+        None => {
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+        }
+    };
+    stream.write_all(answer.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+/// The answer in `dir` that a request asks for: one that is a `GET` of
+/// `/.well-known/acme-challenge/<token>`. None for any other.
+fn answer_to(dir: &Path, asked: &str) -> Option<String> {
+    let mut words = asked.lines().next()?.split(' ');
+    let (method, path, version) = (words.next()?, words.next()?, words.next()?);
+    if method != "GET" || !version.starts_with("HTTP/1.") || words.next().is_some() {
+        return None;
+    }
+    let token = path.strip_prefix("/.well-known/acme-challenge/")?;
+    if !is_token(token) {
+        return None;
+    }
+    fs::read_to_string(dir.join(token))
+        .ok()
+        .filter(|answer| is_answer(answer))
 }
 
 #[cfg(test)]
@@ -780,6 +843,87 @@ mod tests {
         assert_eq!(busy("1.00 1.00 1.00 1/1 1", 0), Some(100));
         assert_eq!(busy("", 1), None);
         assert_eq!(busy("nonsense here", 1), None);
+    }
+
+    /// Sends `asking` to the answers served at `at` and returns all that came back.
+    async fn asked(at: std::net::SocketAddr, asking: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(at).await.unwrap();
+        // A connection that was closed unheard may end in an error and not an end,
+        // for what is written to it as for what is read from it.
+        let _ = stream.write_all(asking.as_bytes()).await;
+        let mut said = String::new();
+        let _ = stream.read_to_string(&mut said).await;
+        said
+    }
+
+    #[tokio::test]
+    async fn port_80_gives_an_answer_to_each_who_asks_and_keeps_nobody() {
+        use tokio::io::AsyncReadExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a-token"), "a-token.the-mark").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let serving = tokio::spawn(super::answers(listener, dir.path().to_owned()));
+
+        let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: example.invalid\r\n\r\n");
+        let said = asked(at, &get("/.well-known/acme-challenge/a-token")).await;
+        assert!(said.starts_with("HTTP/1.1 200 OK\r\n"), "{said}");
+        assert!(said.ends_with("\r\n\r\na-token.the-mark"), "{said}");
+        // Nothing else is there to be had, by any name.
+        for path in [
+            "/.well-known/acme-challenge/another",
+            "/.well-known/acme-challenge/../a-token",
+            "/.well-known/acme-challenge/",
+            "/a-token",
+            "/",
+        ] {
+            let said = asked(at, &get(path)).await;
+            assert!(said.starts_with("HTTP/1.1 404 "), "{path}: {said}");
+        }
+        let said = asked(
+            at,
+            "POST /.well-known/acme-challenge/a-token HTTP/1.1\r\n\r\n",
+        )
+        .await;
+        assert!(said.starts_with("HTTP/1.1 404 "), "{said}");
+        // More than a question is: closed, with nothing said.
+        let long = get(&format!("/{}", "a".repeat(2 * super::LONGEST_ASKING)));
+        assert_eq!(asked(at, &long).await, "");
+
+        // As many as are listened to at once, none of them asking anything.
+        let mut silent = Vec::new();
+        for _ in 0..super::ASKING_AT_ONCE {
+            silent.push(tokio::net::TcpStream::connect(at).await.unwrap());
+        }
+        // One more is not heard, while they are.
+        let said = asked(at, &get("/.well-known/acme-challenge/a-token")).await;
+        assert_eq!(said, "");
+        // One of them goes, and there is room again.
+        silent.pop();
+        let mut said = String::new();
+        for _ in 0..50 {
+            said = asked(at, &get("/.well-known/acme-challenge/a-token")).await;
+            if !said.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(said.starts_with("HTTP/1.1 200 OK\r\n"), "{said}");
+
+        // When the answers are no longer served, nobody is left connected.
+        serving.abort();
+        let _ = serving.await;
+        for mut stream in silent {
+            let mut rest = Vec::new();
+            let ended = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.read_to_end(&mut rest),
+            );
+            assert!(ended.await.is_ok(), "a connection outlived what served it");
+        }
     }
 
     #[test]
