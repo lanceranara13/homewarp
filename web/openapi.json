@@ -3060,6 +3060,190 @@
         }
       }
     },
+    "/api/v1/servers/{id}/icon": {
+      "get": {
+        "summary": "A server's icon, as a PNG.",
+        "operationId": "get_icon",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "v",
+            "in": "query",
+            "description": "What the address a server is listed with ends in. Left out, the icon\nis sent as it is now.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The icon.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server, or it has no icon.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Gives a server an icon, in place of the one it has. The body is a PNG, of\n256 KB and 512 pixels a side at the most. Unlike the rest of what a server\nis made of, it can be changed while the server runs.",
+        "operationId": "set_icon",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The picture's bytes.",
+          "content": {
+            "image/png": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerIcon"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "That is not a PNG, or it is too large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Takes a server's icon away. It is shown by the first letter of its name again.",
+        "operationId": "remove_icon",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The server's id.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerIcon"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Nobody is signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/servers/{id}/mods": {
       "get": {
         "summary": "Mods or plugins on Modrinth for what this server runs: by what was typed,\nor the most downloaded where nothing was. Core asks Modrinth; the page\ndoes not.",
@@ -7157,6 +7341,13 @@
             "format": "int64",
             "description": "The VPS it is reached through, whose address is the one players type.\nNone while no VPS is connected: it is then reached at home only."
           },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where its icon is fetched from, if it has been given one. A server\nwith none is shown by the first letter of its name."
+          },
           "id": {
             "type": "integer",
             "format": "int64"
@@ -7238,6 +7429,19 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "ServerIcon": {
+        "type": "object",
+        "description": "Where a server's icon is fetched from now.",
+        "properties": {
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nothing, for a server that has none: it is shown by the first letter\nof its name."
           }
         }
       },
@@ -7344,6 +7548,13 @@
             ],
             "format": "int64",
             "description": "The VPS it is reached through. None while it is reached at home only."
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where its icon is fetched from, if it has been given one. A server\nwith none is shown by the first letter of its name."
           },
           "id": {
             "type": "integer",

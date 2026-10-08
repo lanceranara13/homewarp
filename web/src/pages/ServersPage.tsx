@@ -2,7 +2,7 @@ import { useSuspenseQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { LayoutGrid, Plus } from 'lucide-react'
 
-import { CopyChip, PageBar, StatusPill, buttonClass } from '../components/ui'
+import { CopyChip, PageBar, ServerIcon, StatusPill, buttonClass } from '../components/ui'
 import { addressOf, useNetwork } from '../gate'
 import { EVERY, serversQuery } from '../servers'
 import { useOwner } from '../session'
@@ -43,14 +43,18 @@ export function ServersPage() {
                 className="relative flex min-w-0 flex-col gap-3 rounded-lg border border-hairline bg-surface-1 p-4 transition-colors duration-120 ease-out hover:bg-surface-2"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h2 className="truncate text-body font-medium text-ink">
-                      {/* The whole card opens the server. The address below stays a target of its own. */}
-                      <Link to="/servers/$serverId" params={{ serverId: String(server.id) }} className="after:absolute after:inset-0">
-                        {server.name}
-                      </Link>
-                    </h2>
-                    <p className="truncate text-small">{server.template}</p>
+                  <div className="flex min-w-0 items-center gap-3">
+                    {/* Wanted, not needed: the card is painted with the letter's room kept, and the picture comes when it comes. */}
+                    <ServerIcon name={server.name} icon={server.icon} />
+                    <div className="min-w-0">
+                      <h2 className="truncate text-body font-medium text-ink">
+                        {/* The whole card opens the server. The address below stays a target of its own. */}
+                        <Link to="/servers/$serverId" params={{ serverId: String(server.id) }} className="after:absolute after:inset-0">
+                          {server.name}
+                        </Link>
+                      </h2>
+                      <p className="truncate text-small">{server.template}</p>
+                    </div>
                   </div>
                   <StatusPill state={server.state} />
                 </div>

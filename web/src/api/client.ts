@@ -13,6 +13,7 @@ export type Server = components['schemas']['Server']
 export type ServerState = components['schemas']['State']
 export type NewServer = components['schemas']['NewServer']
 export type ServerSettings = components['schemas']['ServerSettings']
+type ServerIcon = components['schemas']['ServerIcon']
 export type Power = components['schemas']['Power']
 export type ServerEvent = components['schemas']['Event']
 export type Usage = components['schemas']['Usage']
@@ -272,6 +273,25 @@ export function followServer(id: number): WebSocket {
 
 export async function removeServer(id: number): Promise<void> {
   const { error, response } = await signedIn(() => api.DELETE('/api/v1/servers/{id}', { params: { path: { id } } }))
+  if (!response.ok) fail(error)
+}
+
+/**
+ * Gives a server an icon: a PNG, as `asIcon` makes one of a picture. The answer
+ * is where it is fetched from now. Sent with `fetch` itself: what is sent is
+ * the picture, and not JSON.
+ */
+export async function setServerIcon(id: number, png: Blob): Promise<string | null> {
+  const response = await reach(() => fetch(`/api/v1/servers/${id}/icon`, { method: 'PUT', body: png }))
+  if (response.status === 401) throw new SignedOut()
+  const said: unknown = await response.json().catch(() => null)
+  if (!response.ok) fail(said)
+  return (said as ServerIcon | null)?.icon ?? null
+}
+
+/** Takes a server's icon away. It is shown by the first letter of its name again. */
+export async function removeServerIcon(id: number): Promise<void> {
+  const { error, response } = await signedIn(() => api.DELETE('/api/v1/servers/{id}/icon', { params: { path: { id } } }))
   if (!response.ok) fail(error)
 }
 

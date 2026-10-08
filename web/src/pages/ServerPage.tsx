@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Link, Outlet, getRouteApi, notFound, useNavigate } from '@tanstack/react-router'
-import { Play, Square, Trash2 } from 'lucide-react'
+import { ImagePlus, Play, Square, Trash2 } from 'lucide-react'
 import { createContext, use, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import {
@@ -9,6 +9,8 @@ import {
   followServer,
   powerServer,
   removeServer,
+  removeServerIcon,
+  setServerIcon,
   type Permission,
   type Players,
   type Power,
@@ -18,8 +20,9 @@ import {
   type Usage,
 } from '../api/client'
 import { TrafficChart, type Sample } from '../components/TrafficChart'
-import { Button, Confirm, CopyChip, Field, PageBar, Problem, StatusPill, buttonClass } from '../components/ui'
+import { Button, Confirm, CopyChip, Field, PageBar, Problem, ServerIcon, StatusPill, buttonClass } from '../components/ui'
 import { addressOf, gateOf, useNetwork } from '../gate'
+import { asIcon } from '../icon'
 import { EVERY, serverQuery, serversQuery } from '../servers'
 import { useOwner } from '../session'
 import { templateQuery } from '../templates'
@@ -65,7 +68,11 @@ export function ServerLayout() {
 
   return (
     <>
-      <PageBar title={server.name} crumb={<Link to="/">Servers</Link>}>
+      <PageBar
+        title={server.name}
+        crumb={<Link to="/">Servers</Link>}
+        mark={<ServerIcon name={server.name} icon={server.icon} className="size-6 rounded-sm text-caption" />}
+      >
         {owner && <RemoveServer id={server.id} name={server.name} />}
       </PageBar>
       <div className="mx-auto flex w-full max-w-300 flex-1 flex-col gap-4 p-4 md:p-6">
@@ -304,6 +311,7 @@ export function ServerSettingsTab() {
 
   return (
     <>
+      <IconSetting id={id} name={server.name} icon={server.icon ?? null} />
       <p className="max-w-140 text-small text-ink-subtle">
         A server is changed while it is stopped, and runs as it was changed from its next start. Its files are not
         touched.
@@ -322,6 +330,72 @@ export function ServerSettingsTab() {
         }
       />
     </>
+  )
+}
+
+/**
+ * Where a server is given its icon. It is no part of the form under it: an
+ * icon changes nothing of how the server runs, so it is changed at once,
+ * whether the server is running or not.
+ */
+function IconSetting({ id, name, icon }: { id: number; name: string; icon: string | null }) {
+  const queryClient = useQueryClient()
+  const picker = useRef<HTMLInputElement>(null)
+  const shown = (now: string | null) => {
+    queryClient.setQueryData(serverQuery(id).queryKey, (server) => server && { ...server, icon: now })
+    void queryClient.invalidateQueries({ queryKey: serversQuery.queryKey, exact: true })
+  }
+  const giving = useMutation({
+    // Made small here, so that what is sent is a few kilobytes whatever was chosen.
+    mutationFn: async (picture: File) => setServerIcon(id, await asIcon(picture)),
+    onSuccess: shown,
+  })
+  const removing = useMutation({ mutationFn: () => removeServerIcon(id), onSuccess: () => shown(null) })
+  const problem = giving.error ?? removing.error
+
+  return (
+    <section className="flex max-w-140 flex-col gap-2">
+      <h2 className="text-caption text-ink-subtle">Icon</h2>
+      <div className="flex flex-wrap items-center gap-3">
+        <ServerIcon name={name} icon={icon} className="size-16 rounded-lg text-title" />
+        <input
+          ref={picker}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(event) => {
+            const picture = event.currentTarget.files?.[0]
+            // Emptied, so that choosing the same picture again is still a choice the browser tells of.
+            event.currentTarget.value = ''
+            if (!picture) return
+            removing.reset()
+            giving.mutate(picture)
+          }}
+        />
+        <Button busy={giving.isPending} disabled={removing.isPending} onClick={() => picker.current?.click()}>
+          {!giving.isPending && <ImagePlus aria-hidden size={16} />}
+          {icon ? 'Change the picture' : 'Choose a picture'}
+        </Button>
+        {icon && (
+          <Button
+            variant="ghost"
+            busy={removing.isPending}
+            disabled={giving.isPending}
+            onClick={() => {
+              giving.reset()
+              removing.mutate()
+            }}
+          >
+            Remove
+          </Button>
+        )}
+      </div>
+      <p className="text-small text-ink-subtle">
+        Shown beside the server's name in this panel. Any picture will do: the square in its middle is kept, made
+        small. Without one, the server is shown by the first letter of its name.
+      </p>
+      {problem && <Problem>{problem.message}</Problem>}
+    </section>
   )
 }
 

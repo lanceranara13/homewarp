@@ -15,6 +15,7 @@ export const WORDS: Record<string, string> = {
   'template.remove': 'Removed a template',
   'server.create': 'Made the server',
   'server.change': 'Changed its settings',
+  'server.icon': 'Changed its icon',
   'server.remove': 'Removed the server',
   'server.start': 'Started it',
   'server.stop': 'Stopped it',

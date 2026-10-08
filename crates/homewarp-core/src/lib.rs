@@ -12,6 +12,7 @@ mod door;
 mod fetch;
 mod files;
 mod guard;
+mod icons;
 mod limits;
 mod minecraft;
 mod mods;

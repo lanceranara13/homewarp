@@ -127,6 +127,8 @@ are examples.*
   locked-down container: not root, no capabilities, read-only root, memory and
   process limits, and kept from your home network.
 - A live console to read and type into, with processor and memory use.
+- An icon for each server, from any picture you choose, to tell them apart at
+  a glance.
 - Started again after a crash, a little later each time, and left alone after
   four in a row.
 - Files in the browser and over SFTP: edit, upload, download, pack and unpack.

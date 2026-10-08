@@ -408,6 +408,13 @@ Used for server addresses, IPs, ports, tokens and install commands.
 Whole card opens the server; the address chip and power buttons are separate targets.
 Stats and sparklines stream in after first paint; the card never waits for them.
 
+The icon is a picture the server was given in its settings: 40px with an 8px radius
+on the card, 24px before the name in the server's top bar. A server given none shows
+the first letter of its name on `surface-3`, as an account's avatar does: no colour,
+so that it does not pass for a state. Whatever picture is chosen, the square in its
+middle is kept as a 128px PNG by Homewarp itself; an icon is never loaded from
+another host, and the card never waits for one.
+
 ### Stat tile
 
 Caption label, `stat` value, optional 32px sparkline (uPlot), optional limit bar.

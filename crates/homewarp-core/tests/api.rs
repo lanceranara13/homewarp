@@ -9,7 +9,7 @@ use axum::{
     http::{
         HeaderMap, Request, StatusCode,
         header::{
-            CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE,
+            CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -780,6 +780,185 @@ async fn servers_are_for_someone_signed_in() {
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
         assert_eq!(answer.body["error"], "There is no such server.");
     }
+}
+
+/// A PNG as far as Homewarp reads one: what every one begins with, and how
+/// wide and how high it says it is.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    bytes.extend(width.to_be_bytes());
+    bytes.extend(height.to_be_bytes());
+    bytes.extend([8, 6, 0, 0, 0]);
+    bytes
+}
+
+#[tokio::test]
+async fn a_server_is_given_an_icon_by_whoever_may_change_it() {
+    let panel = panel().await;
+    let owner = panel.set_up().await;
+    let owner = Some(owner.as_str());
+    let icon = "/api/v1/servers/1/icon";
+    let first = png(128, 128);
+
+    // For nobody who is not signed in, and for no server that is not there.
+    for answer in [
+        panel.get(icon, None).await,
+        panel.upload(icon, &first, None).await,
+        panel.delete(icon, None).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+    for answer in [
+        panel.get(icon, owner).await,
+        panel.upload(icon, &first, owner).await,
+        panel.delete(icon, owner).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.body);
+    }
+
+    // A server that has been given none says so, and is listed without one.
+    panel.a_server().await;
+    let none = panel.get(icon, owner).await;
+    assert_eq!(none.status, StatusCode::NOT_FOUND);
+    assert_eq!(none.body["error"], "This server has no icon.");
+    let listed = panel.get("/api/v1/servers", owner).await;
+    assert_eq!(listed.body[0]["icon"], Value::Null);
+    let one = panel.get("/api/v1/servers/1", owner).await;
+    assert_eq!(one.status, StatusCode::OK, "{}", one.body);
+    assert_eq!(one.body["icon"], Value::Null);
+
+    // What is not a PNG is not kept, nor one that is too large.
+    let mut heavy = png(128, 128);
+    heavy.resize((256 << 10) + 1, 0);
+    for (bytes, why) in [
+        (
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+            "An icon is a PNG picture.",
+        ),
+        (b"\xff\xd8\xff\xe0".to_vec(), "An icon is a PNG picture."),
+        (Vec::new(), "An icon is a PNG picture."),
+        (png(513, 64), "An icon is 1 to 512 pixels a side."),
+        (png(64, 0), "An icon is 1 to 512 pixels a side."),
+        (heavy, "An icon is 256 KB at the most."),
+    ] {
+        let refused = panel.upload(icon, &bytes, owner).await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["error"], why);
+    }
+    assert_eq!(panel.get(icon, owner).await.status, StatusCode::NOT_FOUND);
+
+    // Given one, the server says where it is fetched from.
+    let given = panel.upload(icon, &first, owner).await;
+    assert_eq!(given.status, StatusCode::OK, "{}", given.body);
+    let at = given.body["icon"].as_str().unwrap().to_owned();
+    assert!(at.starts_with("/api/v1/servers/1/icon?v="), "{at}");
+    let listed = panel.get("/api/v1/servers", owner).await;
+    assert_eq!(listed.body[0]["icon"], at.as_str());
+    let one = panel.get("/api/v1/servers/1", owner).await;
+    assert_eq!(one.body["icon"], at.as_str());
+
+    // It comes back as it went, as a picture and as nothing a browser might
+    // take it for instead: kept for good at the address that names it, and
+    // asked for again at any other.
+    let (status, headers, bytes) = panel.download(&at, owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, first);
+    assert_eq!(headers[CONTENT_TYPE], "image/png");
+    assert_eq!(headers[X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert_eq!(
+        headers[CACHE_CONTROL],
+        "private, max-age=31536000, immutable"
+    );
+    for other in [icon.to_owned(), format!("{icon}?v=another")] {
+        let (status, headers, bytes) = panel.download(&other, owner).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, first);
+        assert_eq!(headers[CACHE_CONTROL], "private, no-cache");
+    }
+
+    // Another picture takes its place, at another address.
+    let second = png(64, 64);
+    let changed = panel.upload(icon, &second, owner).await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    let now = changed.body["icon"].as_str().unwrap().to_owned();
+    assert_ne!(now, at);
+    assert_eq!(panel.download(&now, owner).await.2, second);
+
+    // An account let in to look sees the icon, and may not change it.
+    let (id, cookie) = sam(&panel, owner, json!([])).await;
+    let sam = Some(cookie.as_str());
+    assert_eq!(panel.download(&now, sam).await.2, second);
+    for answer in [
+        panel.upload(icon, &first, sam).await,
+        panel.delete(icon, sam).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+        assert_eq!(
+            answer.body["error"],
+            "Your account has not been let do that with this server."
+        );
+    }
+    // Let change the server's settings, it may: and the same picture is at
+    // the same address as before.
+    let grant = format!("/api/v1/servers/1/users/{id}");
+    let settings = json!({ "permissions": ["settings"] });
+    assert_eq!(
+        panel.put(&grant, settings, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let again = panel.upload(icon, &first, sam).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(again.body["icon"], at.as_str());
+    // Taken out of the server, it has no server to see the icon of.
+    assert_eq!(
+        panel.delete(&grant, owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    for answer in [
+        panel.get(icon, sam).await,
+        panel.upload(icon, &first, sam).await,
+        panel.delete(icon, sam).await,
+    ] {
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.body);
+        assert_eq!(answer.body["error"], "There is no such server.");
+    }
+
+    // Taken away, it is gone, and taking it away twice is no fault.
+    for _ in 0..2 {
+        let removed = panel.delete(icon, owner).await;
+        assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+        assert_eq!(removed.body["icon"], Value::Null);
+    }
+    assert_eq!(panel.get(icon, owner).await.status, StatusCode::NOT_FOUND);
+    let listed = panel.get("/api/v1/servers", owner).await;
+    assert_eq!(listed.body[0]["icon"], Value::Null);
+
+    // Each change is written down: three pictures given, and one taken away.
+    let log = panel.get("/api/v1/activity?server=1", owner).await;
+    let written: Vec<&str> = log
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|line| line["action"] == "server.icon")
+        .map(|line| line["detail"].as_str().unwrap())
+        .collect();
+    assert_eq!(written, ["removed", "", "", ""]);
+
+    // An icon goes with its server.
+    assert_eq!(
+        panel.upload(icon, &first, owner).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        panel.delete("/api/v1/servers/1", owner).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_icons")
+        .fetch_one(&panel.db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
 }
 
 #[tokio::test]

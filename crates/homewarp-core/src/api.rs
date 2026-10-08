@@ -22,7 +22,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{
     accounts, audit, auth, backups, catalogue,
     door::Client,
-    files, guard,
+    files, guard, icons,
     limits::Limiter,
     mods,
     panel::{self, Authority, Panel},
@@ -197,6 +197,7 @@ fn api() -> OpenApiRouter<AppState> {
         .routes(routes!(logout))
         .merge(templates::routes())
         .merge(servers::routes())
+        .merge(icons::routes())
         .merge(files::routes())
         .merge(tunnel::routes())
         .merge(accounts::routes())

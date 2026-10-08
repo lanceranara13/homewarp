@@ -224,11 +224,39 @@ export function StatusPill({ state }: { state: ServerState }) {
   return <Pill tone={tone}>{word}</Pill>
 }
 
+type ServerIconProps = {
+  name: string
+  /** Where the picture is fetched from. Nothing, for a server that was given none. */
+  icon?: string | null
+  /** How large it is, how round its corners are, and how large the letter is. */
+  className?: string
+}
+
+/**
+ * A server's icon: the picture it was given or, where it was given none or the
+ * picture will not load, the first letter of its name, as an account is shown
+ * by the first of its own. Its name stands beside it wherever it is shown, so
+ * it says nothing to a screen reader.
+ */
+export function ServerIcon({ name, icon, className = 'size-10 rounded-md text-section' }: ServerIconProps) {
+  // Which picture would not load. Another one, given since, is tried afresh.
+  const [failed, setFailed] = useState<string | null>(null)
+  if (icon && icon !== failed) {
+    return <img src={icon} alt="" decoding="async" onError={() => setFailed(icon)} className={`shrink-0 object-cover ${className}`} />
+  }
+  return (
+    <span aria-hidden className={`flex shrink-0 items-center justify-center bg-surface-3 text-ink-muted uppercase select-none ${className}`}>
+      {Array.from(name.trim())[0]}
+    </span>
+  )
+}
+
 /**
  * The top bar of a page inside the shell: its title, and room for its one
- * primary action. `crumb` is a link to the page this one sits under.
+ * primary action. `crumb` is a link to the page this one sits under, and
+ * `mark` a small picture that stands before the title.
  */
-export function PageBar({ title, crumb, children }: { title: string; crumb?: ReactNode; children?: ReactNode }) {
+export function PageBar({ title, crumb, mark, children }: { title: string; crumb?: ReactNode; mark?: ReactNode; children?: ReactNode }) {
   return (
     <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-hairline px-4 md:px-6">
       <div className="flex min-w-0 items-center gap-2 text-section">
@@ -240,6 +268,7 @@ export function PageBar({ title, crumb, children }: { title: string; crumb?: Rea
             </span>
           </>
         )}
+        {mark}
         <h1 className="truncate text-ink">{title}</h1>
       </div>
       {children}

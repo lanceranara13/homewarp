@@ -26,7 +26,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{
     accounts::{self, Permission},
     api::{AppState, FromHere, Owner, Problem, ProblemBody, SignedIn},
-    audit, auth,
+    audit, auth, icons,
     minecraft::Players,
     mods,
     runtime::{self, Definition, Event, Power, Runtime},
@@ -171,6 +171,9 @@ struct ServerSummary {
     gate_id: Option<i64>,
     /// Who is on it, for a running server that says.
     players: Option<Players>,
+    /// Where its icon is fetched from, if it has been given one. A server
+    /// with none is shown by the first letter of its name.
+    icon: Option<String>,
 }
 
 /// A server in full, with the end of its console.
@@ -212,6 +215,9 @@ struct Server {
     players: Option<Players>,
     /// Whether it is one of Minecraft's, which mods or plugins can be found for.
     mods: bool,
+    /// Where its icon is fetched from, if it has been given one. A server
+    /// with none is shown by the first letter of its name.
+    icon: Option<String>,
     /// What the account that asks may do with it, beyond looking at it.
     permissions: Vec<Permission>,
 }
@@ -589,10 +595,14 @@ async fn list_servers(
     SignedIn(who): SignedIn,
 ) -> Result<Json<Vec<ServerSummary>>, Problem> {
     // All of them for the owner, and for anyone else those they have been let into.
-    let rows: Vec<(i64, String, String, i64, i64, Option<i64>)> = sqlx::query_as(
+    type Row = (i64, String, String, i64, i64, Option<i64>, Option<String>);
+    // Which icon each has comes with the rest: the pictures themselves are
+    // fetched by the page, one by one, after it has painted.
+    let rows: Vec<Row> = sqlx::query_as(
         "SELECT servers.id, servers.name, templates.name, servers.port, servers.memory_mb,
-                servers.gate_id
+                servers.gate_id, server_icons.tag
          FROM servers JOIN templates ON templates.id = servers.template_id
+              LEFT JOIN server_icons ON server_icons.server_id = servers.id
          WHERE ?1 OR servers.id IN (SELECT server_id FROM server_users WHERE user_id = ?2)
          ORDER BY servers.name",
     )
@@ -603,7 +613,7 @@ async fn list_servers(
     let servers = rows
         .into_iter()
         .map(
-            |(id, name, template, port, memory_mb, gate_id)| ServerSummary {
+            |(id, name, template, port, memory_mb, gate_id, icon)| ServerSummary {
                 id,
                 name,
                 template,
@@ -612,6 +622,7 @@ async fn list_servers(
                 memory_mb,
                 gate_id,
                 players: players_of(&state, id),
+                icon: icon.map(|tag| icons::address(id, &tag)),
             },
         )
         .collect();
@@ -700,6 +711,7 @@ async fn create_server(
         says_offline: checked.says_offline,
         players: None,
         mods: mods::fits(&template),
+        icon: None,
         permissions: Permission::ALL.to_vec(),
     };
     runtime.add(checked.definition(id, uuid, template, false));
@@ -954,6 +966,7 @@ async fn get_server(
         players: players_of(&state, id),
         // A template that cannot be read is no reason not to show its server.
         mods: templates::read(&definition).is_ok_and(|template| mods::fits(&template)),
+        icon: icons::of(&state.db, id).await?,
         permissions,
     }))
 }

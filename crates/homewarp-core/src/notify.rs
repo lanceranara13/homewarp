@@ -40,6 +40,7 @@ pub(crate) const EVENTS: &[(&str, bool)] = &[
     ("server.command", false),
     ("server.create", false),
     ("server.change", false),
+    ("server.icon", false),
     ("server.install", false),
     ("server.remove", false),
     ("server.let_in", false),
