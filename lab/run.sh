@@ -203,7 +203,13 @@ EOF
   # beside that web server, and not in what it serves: the tests sign a later
   # list of releases with it.
   version=$(../deploy/out/homewarp-gate version | cut -d' ' -f2)
-  sh ../scripts/release.sh ../deploy/out "$release/served" "$version" "http://$RELEASES_IP" "$release/key.pem" | sed 's/^/   /'
+  # A tree that is numbered as a beta is released as one. A beta's two
+  # scripts are not put at the top, where the one line of the README fetches
+  # them; the lab's one release is the newest there is whichever it is, and
+  # the VPS is connected with the line that fetches from there.
+  case "$version" in *-*) channel=beta ;; *) channel=stable ;; esac
+  sh ../scripts/release.sh ../deploy/out "$release/served" "$version" "http://$RELEASES_IP" "$release/key.pem" "$channel" | sed 's/^/   /'
+  cp "$release/served/$version/install.sh" "$release/served/$version/install-gate.sh" "$release/served/"
   dc exec -T releases sh -c 'rm -rf /releases/* /tmp/released'
   dc cp "$release/served/." releases:/releases >/dev/null
   dc cp "$release/key.pem" releases:/tmp/lab-key.pem >/dev/null
@@ -339,7 +345,11 @@ cmd_test() {
   echo "== updates: Core looks where its releases are, and believes the list there for its signature"
   update_is() { core "${2:-GET}" "/update${3:-}" | field "$1"; }  # field, [method], [what follows /update]
   version=$(../deploy/out/homewarp-gate version | cut -d' ' -f2)
+  # A tree that is numbered as a beta was released as one, and is found by a
+  # Homewarp that takes betas: which this one does for the one question.
+  case "$version" in *-*) core PUT /update '{"channel":"beta"}' >/dev/null ;; esac
   check "it finds the release it was made from, and nothing newer" "$(update_is newest POST /check) $(update_is available) $(update_is problem)" "$version False None"
+  core PUT /update '{"channel":"stable"}' >/dev/null
   # The list as a later release would leave it, signed with the release's own
   # key, which the lab kept for this; or not signed anew, when that is said.
   relist() {  # the list's lines, [unsigned]
@@ -746,7 +756,11 @@ EOF
   check "a browser on the internet reaches the panel by its name, and trusts its certificate" "$(browse /api/v1/health | field status)" "ok"
   check "the certificate is for that name and no other" "$(status client --cacert /tmp/roots.pem --resolve "other.lab:$TLS:$GATE_IP" "https://other.lab:$TLS/api/v1/health")" "000"
   # As a browser sends it: over HTTP/2, and saying which page asked.
-  check "signed in there by the panel's own page, the cookie is one for TLS only" "$(browse -D - -o /dev/null -X POST -H "Origin: https://$NAME:$TLS" -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' /api/v1/login | grep -ci '^set-cookie:.*; Secure')" "1"
+  # Two cookies: the session, and the one this browser is known to the account by.
+  cookies=$(browse -D - -o /dev/null -X POST -H "Origin: https://$NAME:$TLS" -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' /api/v1/login | grep -i '^set-cookie:' || true)
+  check "signed in there by the panel's own page, the cookies are for TLS only" "$(printf '%s
+' "$cookies" | grep -c .) cookies, $(printf '%s
+' "$cookies" | grep -ci '; Secure') for TLS only" "2 cookies, 2 for TLS only"
   check "and a page of another site's is refused there" "$(browse -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://elsewhere.example' -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' /api/v1/login)" "403"
   check "and on the home network it is as it was" "$(dc exec -T home curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"username":"lab","password":"only-in-the-lab"}' http://127.0.0.1:3600/api/v1/login | grep -ci '^set-cookie:.*; Secure' || true)" "0"
   check "Core knows the browser by its own address" "$(core GET '/activity' | python3 -c 'import json, sys; print(next(entry["detail"] for entry in json.load(sys.stdin) if entry["action"] == "account.sign_in" and "203.0.113" in entry["detail"]))' | grep -o "$CLIENT_IP")" "$CLIENT_IP"
