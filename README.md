@@ -19,7 +19,7 @@
 [See it](#see-it) ·
 [Get started](#get-started) ·
 [Everyday tasks](#everyday-tasks) ·
-[Questions](#questions)
+[FAQ](#questions)
 
 ![The Servers page, with eighteen servers for many different games](docs/screenshots/servers.png)
 
@@ -334,7 +334,7 @@ The whole model, held against the code as built, is in
 
 If you find a hole, please open an issue.
 
-## Questions
+## FAQ
 
 <details>
 <summary><b>Do I have to rent a VPS?</b></summary>
