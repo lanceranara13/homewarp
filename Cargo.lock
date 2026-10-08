@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "homewarp-core"
-version = "1.1.2-beta.2"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "homewarp-gate"
-version = "1.1.2-beta.2"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "homewarp-net"
-version = "1.1.2-beta.2"
+version = "1.1.2"
 dependencies = [
  "defguard_wireguard_rs",
  "homewarp-proto",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "homewarp-proto"
-version = "1.1.2-beta.2"
+version = "1.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "homewarp-runtime"
-version = "1.1.2-beta.2"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "bollard",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "homewarp-template"
-version = "1.1.2-beta.2"
+version = "1.1.2"
 dependencies = [
  "regex-lite",
  "serde",
