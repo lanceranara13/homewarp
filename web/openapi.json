@@ -2016,7 +2016,7 @@
     },
     "/api/v1/servers/{id}/backups/{backup_id}/download": {
       "get": {
-        "summary": "A backup's file as it is: a tar packed with Zstandard, for the browser to save.",
+        "summary": "A backup's file as it is: a tar packed with Zstandard, for the browser to save.\nIt asks for `Files` as well as `Backups`: it is all of the server's files.",
         "operationId": "download_backup",
         "parameters": [
           {

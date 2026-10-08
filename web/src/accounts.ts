@@ -86,9 +86,9 @@ export const PERMISSIONS: { name: Permission; label: string; means: string }[] =
   { name: 'console', label: 'Console', means: 'Type commands into it' },
   { name: 'power', label: 'Power', means: 'Start, stop and kill it' },
   { name: 'files', label: 'Files', means: 'Read, change, upload and delete its files' },
-  { name: 'backups', label: 'Backups', means: 'Make backups, and put one back' },
+  { name: 'backups', label: 'Backups', means: 'Make backups, and put one back. Downloading one needs Files too' },
   { name: 'schedules', label: 'Schedules', means: 'Set what it does by the clock' },
-  { name: 'settings', label: 'Settings', means: 'Change what it is made of' },
+  { name: 'settings', label: 'Settings', means: 'Change its name, its image and what its template leaves to users' },
 ]
 
 export type SettingsGroup = 'account' | 'security' | 'users' | 'backups' | 'system' | 'updates'

@@ -81,6 +81,17 @@ pub struct ProbeForward {
 /// In NAT mode the source becomes the Gate's instead. Nothing else passes:
 /// only forwarded ports go in, and nothing that home starts comes out.
 ///
+/// New connections are held to so many a second from one address, counted in
+/// a list of addresses that has an end. An address there was no room to count
+/// by itself is counted with every other such: all of those together get what
+/// one address gets, so that a flood from more addresses than the list holds
+/// does not go home unlimited for having filled it.
+///
+/// The tunnel's own addresses are answered inside the tunnel only. A machine
+/// answers for each of its addresses on every interface it has, and so would
+/// answer a neighbour on the VPS's own network that asked the public
+/// interface for the address this Gate's door is on: that is dropped.
+///
 /// `wan` is the interface players arrive on. It is written into the rules, so
 /// it is held to what an interface's name can be.
 ///
@@ -169,6 +180,8 @@ fn gate_rules(
         Mode::Transparent => "",
         Mode::Nat => "\n    oifname \"homewarp0\" masquerade",
     };
+    // The tunnel's own addresses: four of them, of which home's is one.
+    let tunnel = Ipv4Addr::from(u32::from(home) & !3);
 
     let mut rules = String::new();
     // Made if it is not there, so that deleting it cannot fail; then made anew.
@@ -187,6 +200,10 @@ table inet homewarp {{
     iifname "{wan}" dnat ip to tcp dport map @fwd_tcp
     iifname "{wan}" dnat ip to udp dport map @fwd_udp
   }}
+  chain own {{
+    type filter hook input priority filter - 10; policy accept;
+    iifname "{wan}" ip daddr {tunnel}/30 counter drop
+  }}
   chain nat_mode {{
     type nat hook postrouting priority srcnat; policy accept;{masquerade}
   }}
@@ -198,6 +215,7 @@ table inet homewarp {{
   }}
   chain to_home {{
     ct state new add @newconn {{ ip saddr limit rate over {rate}/second burst {burst} packets }} counter drop
+    ct state new ip saddr != @newconn limit rate over {rate}/second burst {burst} packets counter drop
     tcp flags syn tcp option maxseg size set rt mtu{to_home}
   }}
 }}"#,
@@ -215,7 +233,8 @@ const SSH_PER_MINUTE: u32 = 12;
 /// The Gate's table with a guard on the VPS itself added to it (PLAN.md §6):
 /// what arrives at the VPS itself from the internet is dropped, but for the
 /// ports in `open`, and new SSH connections from one address are held to a
-/// few a minute. `rules` is what [`gate_ruleset`] made.
+/// few a minute; addresses there was no room to count by themselves are held
+/// to that together, as in [`gate_ruleset`]. `rules` is what it made.
 ///
 /// Only what arrives on `wan` for the machine itself is looked at. What is
 /// forwarded to servers never comes this way; nor does what arrives by the
@@ -252,7 +271,9 @@ pub fn guarded(rules: &str, wan: &str, open: &Open) -> Result<String, Error> {
     meta l4proto {{ icmp, ipv6-icmp }} accept
     udp dport {{ 68, 546 }} accept
     tcp dport 22 ct state new add @guard_ssh {{ ip saddr limit rate over {SSH_PER_MINUTE}/minute burst {SSH_PER_MINUTE} packets }} counter name "guard_dropped" drop
+    tcp dport 22 ct state new ip saddr != @guard_ssh limit rate over {SSH_PER_MINUTE}/minute burst {SSH_PER_MINUTE} packets counter name "guard_dropped" drop
     tcp dport 22 ct state new add @guard_ssh6 {{ ip6 saddr limit rate over {SSH_PER_MINUTE}/minute burst {SSH_PER_MINUTE} packets }} counter name "guard_dropped" drop
+    tcp dport 22 ct state new ip6 saddr != @guard_ssh6 limit rate over {SSH_PER_MINUTE}/minute burst {SSH_PER_MINUTE} packets counter name "guard_dropped" drop
     tcp dport @guard_tcp accept
     udp dport @guard_udp accept
     counter name "guard_dropped" drop
@@ -889,6 +910,9 @@ mod tests {
             "ct state established,related accept",
             "meta l4proto { icmp, ipv6-icmp } accept",
             "tcp dport 22 ct state new add @guard_ssh { ip saddr limit rate over 12/minute burst 12 packets }",
+            // Where the list of addresses is full, the rest share one allowance.
+            "tcp dport 22 ct state new ip saddr != @guard_ssh limit rate over 12/minute burst 12 packets counter name \"guard_dropped\" drop",
+            "tcp dport 22 ct state new ip6 saddr != @guard_ssh6 limit rate over 12/minute burst 12 packets counter name \"guard_dropped\" drop",
             "tcp dport @guard_tcp accept",
             "udp dport @guard_udp accept",
             "counter name \"guard_dropped\" drop\n  }",
@@ -920,6 +944,22 @@ mod tests {
             after.split(" }").next().unwrap().to_owned()
         };
         assert_eq!(limit(None), "30/second burst 60 packets");
+        // An address the list had no room for is held to the same, with every other such.
+        let rules = gate_ruleset(
+            "eth0",
+            HOME,
+            &desired(Mode::Transparent, &[(25565, Protocol::Tcp)]),
+            None,
+        )
+        .unwrap();
+        let chain = rules.split_once("chain to_home {").unwrap().1;
+        let (counted, shared) = chain
+            .split_once("ct state new add @newconn { ip saddr limit rate over 30/second burst 60 packets } counter drop\n")
+            .unwrap();
+        assert!(!counted.contains("drop"));
+        assert!(shared.trim_start().starts_with(
+            "ct state new ip saddr != @newconn limit rate over 30/second burst 60 packets counter drop\n"
+        ));
         assert_eq!(limit(Some(5)), "5/second burst 10 packets");
         assert_eq!(limit(Some(2000)), "2000/second burst 4000 packets");
         // None at all would be no server at all, and is not what is written.
@@ -951,6 +991,10 @@ mod tests {
         assert!(!rules.contains("masquerade"));
         // The table is replaced whole.
         assert!(rules.starts_with("table inet homewarp\ndelete table inet homewarp\n"));
+        // The tunnel's own addresses are not answered on the public interface.
+        assert!(rules.contains(
+            "chain own {\n    type filter hook input priority filter - 10; policy accept;\n    iifname \"eth0\" ip daddr 10.213.77.0/30 counter drop\n  }"
+        ));
     }
 
     #[test]

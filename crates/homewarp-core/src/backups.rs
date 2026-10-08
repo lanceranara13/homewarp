@@ -574,6 +574,7 @@ async fn keep_backups(
 }
 
 /// A backup's file as it is: a tar packed with Zstandard, for the browser to save.
+/// It asks for `Files` as well as `Backups`: it is all of the server's files.
 #[utoipa::path(
     get,
     path = "/api/v1/servers/{id}/backups/{backup_id}/download",
@@ -595,6 +596,9 @@ async fn download_backup(
     InPath((id, backup_id)): InPath<(i64, i64)>,
 ) -> Result<Response, Problem> {
     accounts::may(&state.db, &who, id, Some(Permission::Backups)).await?;
+    // A backup is every file of the server. Whoever takes one away reads
+    // them all, which is what `Files` is for.
+    accounts::may(&state.db, &who, id, Some(Permission::Files)).await?;
     let uuid = uuid_of(&state.db, id).await?;
     let (name, created_at) = done(&state.db, id, backup_id).await?;
     let path = file_of(&state.data, &uuid, backup_id);

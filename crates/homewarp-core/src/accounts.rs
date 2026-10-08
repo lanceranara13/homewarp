@@ -50,11 +50,14 @@ pub(crate) enum Permission {
     Power,
     /// Read, change, upload and delete its files.
     Files,
-    /// Make backups of it, and put one back.
+    /// Make backups of it, and put one back. Taking one away from here is
+    /// taking every file of the server, and asks for `Files` as well.
     Backups,
     /// Set what it does by the clock.
     Schedules,
-    /// Change what it is made of: its name, its memory, its ports, what its template asks.
+    /// Change what it is made of: its name, its image, when it sleeps, and what
+    /// its template leaves to a user to set. Its memory and processor, its
+    /// ports and the rest of what its template asks are the owner's.
     Settings,
 }
 
@@ -329,6 +332,11 @@ async fn set_password(
         .bind(id)
         .execute(&state.db)
         .await?;
+    // The browsers it was known by knew the password that is no more.
+    sqlx::query("DELETE FROM known_devices WHERE user_id = ?")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
     // The owner's own sessions stay: this one among them.
     if id != who.id {
         sqlx::query("DELETE FROM sessions WHERE user_id = ?")
@@ -373,6 +381,12 @@ async fn change_own_password(
     let hash = auth::hash(asked.password).await?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(hash)
+        .bind(who.id)
+        .execute(&state.db)
+        .await?;
+    // The browsers it was known by knew the password that is no more: one
+    // that signs in with the new one is known again from then.
+    sqlx::query("DELETE FROM known_devices WHERE user_id = ?")
         .bind(who.id)
         .execute(&state.db)
         .await?;

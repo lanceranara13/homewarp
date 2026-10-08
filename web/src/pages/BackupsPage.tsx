@@ -143,10 +143,13 @@ export function BackupsTab() {
                 )}
                 {backup.state === 'done' && (
                   <>
-                    <a href={backupUrl(id, backup.id)} download title="Download" className={buttonClass('ghost')}>
-                      <Download aria-hidden size={16} />
-                      <span className="sr-only wide:not-sr-only">Download</span>
-                    </a>
+                    {/* A backup is every file of the server: taking one away is for whoever may read them. */}
+                    {server?.permissions.includes('files') && (
+                      <a href={backupUrl(id, backup.id)} download title="Download" className={buttonClass('ghost')}>
+                        <Download aria-hidden size={16} />
+                        <span className="sr-only wide:not-sr-only">Download</span>
+                      </a>
+                    )}
                     <Button variant="ghost" title="Put back" onClick={() => setRestoring(backup)}>
                       <History aria-hidden size={16} />
                       <span className="sr-only wide:not-sr-only">Put back</span>

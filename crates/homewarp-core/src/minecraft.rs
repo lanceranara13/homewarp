@@ -8,6 +8,7 @@
 //! been the same since Minecraft 1.7.
 
 use std::{
+    collections::VecDeque,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
@@ -19,7 +20,8 @@ use serde_json::json;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Semaphore, mpsc},
+    sync::mpsc,
+    task::JoinHandle,
     time::timeout,
 };
 use utoipa::ToSchema;
@@ -36,7 +38,9 @@ const ASKED_AS: i32 = 47;
 const LONGEST_OPENING: usize = 1024;
 /// How long a stand-in listens to one connection.
 const HEARD_WITHIN: Duration = Duration::from_secs(10);
-/// How many connections a stand-in listens to at once. One more is not answered.
+/// How many connections a stand-in listens to at once. One more takes the
+/// place of the one that has been listened to longest: a player says who they
+/// are in a moment, and is not kept out by connections that say nothing.
 const AT_ONCE: usize = 64;
 /// How many of the names a server gives are kept.
 const MOST_NAMES: usize = 12;
@@ -270,7 +274,8 @@ pub(crate) fn joined(line: &str) -> Option<Joined> {
 
 /// Answers on `listener` until a player tries to join, and says who that was.
 async fn stand(listener: TcpListener, saying: Arc<StandIn>) -> io::Result<Joined> {
-    let room = Arc::new(Semaphore::new(AT_ONCE));
+    // Those that are being listened to, the one that came first at the front.
+    let mut heard: VecDeque<JoinHandle<()>> = VecDeque::new();
     let (tell, mut told) = mpsc::channel(1);
     loop {
         tokio::select! {
@@ -280,18 +285,20 @@ async fn stand(listener: TcpListener, saying: Arc<StandIn>) -> io::Result<Joined
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 };
-                let Ok(place) = Arc::clone(&room).try_acquire_owned() else {
-                    continue;
-                };
+                heard.retain(|one| !one.is_finished());
+                if heard.len() >= AT_ONCE
+                    && let Some(longest) = heard.pop_front()
+                {
+                    longest.abort();
+                }
                 let (saying, tell) = (Arc::clone(&saying), tell.clone());
-                tokio::spawn(async move {
-                    let _place = place;
+                heard.push_back(tokio::spawn(async move {
                     if let Ok(Ok(Some(name))) = timeout(HEARD_WITHIN, answer(stream, &saying)).await
                         && saying.wakes
                     {
                         let _ = tell.send(Joined { name, from: from.ip() }).await;
                     }
-                });
+                }));
             }
             Some(joined) = told.recv() => return Ok(joined),
         }
@@ -510,6 +517,23 @@ mod tests {
                 from: "127.0.0.1".parse().unwrap()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn connections_that_say_nothing_keep_no_player_from_being_heard() {
+        let (at, standing) = standing().await;
+        // As many as are listened to at once, and then as many again.
+        let mut silent = Vec::new();
+        for _ in 0..2 * super::AT_ONCE {
+            silent.push(TcpStream::connect(at).await.unwrap());
+        }
+        // A player is heard all the same, and wakes the server.
+        assert!(join(at, "Alex").await.is_some());
+        assert_eq!(standing.await.unwrap().unwrap().name, "Alex");
+        // The first to have come made way; those that came last are still held.
+        let mut nothing = [0u8; 1];
+        let first = silent[0].read(&mut nothing).await;
+        assert!(matches!(first, Ok(0) | Err(_)), "{first:?}");
     }
 
     #[tokio::test]

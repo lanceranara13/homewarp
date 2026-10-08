@@ -180,6 +180,9 @@ fn problem(error: io::Error) -> Problem {
             "Homewarp could not read that file as a zip, tar or tar.gz archive.".into(),
         ),
         Said::StorageFull => NO_ROOM,
+        Said::QuotaExceeded => Problem::Conflict(
+            "There is more there than Homewarp takes at once: a folder of over a hundred thousand names, or an archive of over a million files.".into(),
+        ),
         _ => Problem::Internal(
             anyhow::Error::new(error).context("reading or writing a server's files"),
         ),

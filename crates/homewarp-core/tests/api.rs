@@ -1308,6 +1308,14 @@ async fn an_account_does_what_it_has_been_let_do_and_no_more() {
         panel.post("/api/v1/login", old, None).await.status,
         StatusCode::UNAUTHORIZED
     );
+    // The browsers it was known by knew the password that is no more.
+    let known = "SELECT COUNT(*) FROM known_devices JOIN users ON users.id = known_devices.user_id
+                 WHERE users.username = 'sam'";
+    let still: i64 = sqlx::query_scalar(known)
+        .fetch_one(&panel.db)
+        .await
+        .unwrap();
+    assert_eq!(still, 0);
     // The owner gives it another, and it is signed out where it was signed in.
     let reset = json!({ "password": "a fourth long password" });
     assert_eq!(
@@ -1473,6 +1481,21 @@ async fn a_backup_is_made_kept_and_put_back() {
         saved_as.starts_with("attachment; filename=\"Before the update-20"),
         "{saved_as}"
     );
+    // A backup is every file of the server. An account with Backups and
+    // without Files makes them and puts them back, and takes none away.
+    let (id, theirs) = sam(&panel, cookie, json!(["backups"])).await;
+    let theirs = Some(theirs.as_str());
+    assert_eq!(panel.get(backups, theirs).await.status, StatusCode::OK);
+    let (status, _, _) = panel.download(&format!("{one}/download"), theirs).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let both = json!({ "permissions": ["backups", "files"] });
+    let grant = format!("/api/v1/servers/1/users/{id}");
+    assert_eq!(
+        panel.put(&grant, both, cookie).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let (status, _, _) = panel.download(&format!("{one}/download"), theirs).await;
+    assert_eq!(status, StatusCode::OK);
     assert!(saved_as.ends_with(".tar.zst"), "{saved_as}");
 
     // Put back, the files are what they were: what came since is gone.
@@ -2536,6 +2559,79 @@ async fn a_schedule_does_only_what_whoever_set_it_may_do_by_hand() {
 }
 
 #[tokio::test]
+async fn what_a_server_may_use_and_what_its_template_keeps_are_the_owners_to_change() {
+    let panel = panel().await;
+    let owner = panel.set_up().await;
+    let owner = Some(owner.as_str());
+    // A template with one variable that it leaves to a user, and one that it does not.
+    let egg = format!(
+        "{EGG}  -\n    name: Build\n    description: ''\n    env_variable: BUILD\n    default_value: latest\n    user_viewable: false\n    user_editable: false\n    rules:\n      - required\n"
+    );
+    let imported = panel
+        .post("/api/v1/templates", json!({ "egg": egg }), owner)
+        .await;
+    assert_eq!(imported.status, StatusCode::CREATED, "{}", imported.body);
+    sqlx::query(
+        "INSERT INTO servers
+             (uuid, name, template_id, image, memory_mb, cpu_percent, port, variables, eula,
+              installed, created_at)
+         VALUES ('a-server', 'Survival', 1, 'example.invalid/java:21', 1024, 0, 25565, '[]', 0,
+                 1, 0)",
+    )
+    .execute(&panel.db)
+    .await
+    .unwrap();
+    let (_, cookie) = sam(&panel, owner, json!(["settings"])).await;
+    let sam = Some(cookie.as_str());
+    let server = "/api/v1/servers/1";
+    let asked = |memory: u32, cpu: u32, variables: Value| json!({ "name": "Survival", "memory_mb": memory, "cpu_percent": cpu, "port": 25565, "variables": variables });
+
+    // What the template leaves to a user, the account sets; and it may say
+    // of the rest what is there already.
+    for variables in [
+        json!({ "SERVER_JARFILE": "paper.jar" }),
+        json!({ "SERVER_JARFILE": "paper.jar", "BUILD": "latest" }),
+    ] {
+        let set = panel.put(server, asked(1024, 0, variables), sam).await;
+        assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    }
+    // How much of the machine the server may use it does not change.
+    for more in [asked(4096, 0, json!({})), asked(1024, 400, json!({}))] {
+        let answer = panel.put(server, more, sam).await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+        assert_eq!(
+            answer.body["error"],
+            "Only the owner of this Homewarp changes how much memory or processor a server may use."
+        );
+    }
+    // Nor what the template keeps for whoever runs the panel.
+    let kept = "Only the owner of this Homewarp changes what a template does not leave to its users to set.";
+    let answer = panel
+        .put(server, asked(1024, 0, json!({ "BUILD": "1.21" })), sam)
+        .await;
+    assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+    assert_eq!(answer.body["error"], kept);
+
+    // The owner changes all of it.
+    let theirs = panel
+        .put(server, asked(4096, 200, json!({ "BUILD": "1.21" })), owner)
+        .await;
+    assert_eq!(theirs.status, StatusCode::OK, "{}", theirs.body);
+    assert_eq!(theirs.body["memory_mb"], 4096);
+    // And the account then leaves it as the owner set it: not as it was before.
+    let left = asked(
+        4096,
+        200,
+        json!({ "BUILD": "1.21", "SERVER_JARFILE": "other.jar" }),
+    );
+    let answer = panel.put(server, left, sam).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let back = panel.put(server, asked(4096, 200, json!({})), sam).await;
+    assert_eq!(back.status, StatusCode::FORBIDDEN, "{}", back.body);
+    assert_eq!(back.body["error"], kept);
+}
+
+#[tokio::test]
 async fn where_a_server_is_reached_is_the_owners_to_change() {
     let panel = panel().await;
     let owner = panel.set_up().await;
@@ -2558,7 +2654,7 @@ async fn where_a_server_is_reached_is_the_owners_to_change() {
     let (_, cookie) = sam(&panel, owner, json!(["settings"])).await;
     let sam = Some(cookie.as_str());
     let server = "/api/v1/servers/1";
-    let asked = |name: &str, port: u16, ports: Value| json!({ "name": name, "memory_mb": 2048, "port": port, "ports": ports });
+    let asked = |name: &str, port: u16, ports: Value| json!({ "name": name, "memory_mb": 1024, "port": port, "ports": ports });
 
     // The rest of a server it may change, with the ports left as they are.
     let renamed = panel
@@ -2566,12 +2662,12 @@ async fn where_a_server_is_reached_is_the_owners_to_change() {
         .await;
     assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
     assert_eq!(renamed.body["name"], "Mine");
-    assert_eq!(renamed.body["memory_mb"], 2048);
+    assert_eq!(renamed.body["memory_mb"], 1024);
     // Its ports it may not: they are opened on this machine and on a VPS.
     for moved in [
         asked("Mine", 8080, json!([])),
         asked("Mine", 25565, json!([{ "port": 8080, "protocol": "udp" }])),
-        json!({ "name": "Mine", "memory_mb": 2048, "port": 25565, "protocol": "tcp" }),
+        json!({ "name": "Mine", "memory_mb": 1024, "port": 25565, "protocol": "tcp" }),
     ] {
         let answer = panel.put(server, moved, sam).await;
         assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);

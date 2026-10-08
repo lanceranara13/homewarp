@@ -64,19 +64,26 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 }
 
 /// Does one piece of slow work on a password when its turn comes, off the
-/// async threads. Only a few are done at once, however many are asked for.
+/// async threads. Only a few are done at once, however many are asked for,
+/// and whether or not those who asked wait for the answer.
 async fn in_turn<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, Problem> {
     const BUSY: Problem = Problem::Unavailable(
         "Homewarp is checking as many passwords as it does at once. Try again in a moment.",
     );
-    let Ok(Ok(_turn)) = tokio::time::timeout(TURN, HASHING.acquire()).await else {
+    let Ok(Ok(turn)) = tokio::time::timeout(TURN, HASHING.acquire()).await else {
         return Err(BUSY);
     };
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| Problem::Internal(error.into()))
+    // The turn goes with the work and is given back when the work is done.
+    // Whoever asked may have gone by then: the work goes on without them, and
+    // a turn given back when they went would let any number of it go on at once.
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        work()
+    })
+    .await
+    .map_err(|error| Problem::Internal(error.into()))
 }
 
 /// [`hash_password`], in its turn.
@@ -200,6 +207,32 @@ pub fn setup_code_matches(typed: &str, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_is_kept_for_as_long_as_the_work_takes_whether_or_not_it_is_waited_for() {
+        let (end, ended) = std::sync::mpsc::channel::<()>();
+        let (began, begun) = tokio::sync::oneshot::channel();
+        let asked = tokio::spawn(in_turn(move || {
+            let _ = began.send(());
+            let _ = ended.recv();
+        }));
+        begun.await.unwrap();
+        let taken = HASHING.available_permits();
+        assert!(taken < HASHING_AT_ONCE);
+        // Whoever asked goes away. The work goes on, and so its turn is still taken.
+        asked.abort();
+        let _ = asked.await;
+        assert_eq!(HASHING.available_permits(), taken);
+        // The work ends, and the turn is given back.
+        drop(end);
+        for _ in 0..500 {
+            if HASHING.available_permits() == taken + 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the turn was never given back");
+    }
 
     #[test]
     fn a_password_verifies_against_its_own_hash_only() {

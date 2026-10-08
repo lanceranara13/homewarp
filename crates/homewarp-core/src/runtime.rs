@@ -309,7 +309,13 @@ fn set_up(
                 ..replacement.clone()
             });
         }
-        let before = match files.read_to_string(&file.path) {
+        // As the server's files are asked for: some eggs begin a path with `./`.
+        let parts = file.path.split('/');
+        let parts: Vec<&str> = parts
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect();
+        let path = parts.join("/");
+        let before = match files.read_to_string(&path) {
             Ok(before) => before,
             Err(error) => match not_settings(&error) {
                 Some(why) => {
@@ -333,7 +339,7 @@ fn set_up(
         // A file that cannot be set up is said and passed over, as Wings
         // passes over it: the server may still do without.
         match config::patch(file.parser, &before.unwrap_or_default(), &replacements) {
-            Ok(after) => write_settings(files, &file.path, &after, &mut say)?,
+            Ok(after) => write_settings(files, &path, &after, &mut say)?,
             Err(error) => say(format!("{} was left as it is: {error}.", file.path)),
         }
     }

@@ -122,6 +122,13 @@ const NO_PARENT: &str = "";
 /// and the longest of a proxy's or a plugin's some hundreds.
 pub const LARGEST_SETTINGS: u64 = 4 << 20;
 
+/// The most files, folders and links that one archive is unpacked into, and
+/// the most that one folder is listed with. Homewarp counts the bytes it
+/// writes; these are for what costs none and still costs the disk a place for
+/// each, and Homewarp its memory for each name. The error is `QuotaExceeded`.
+pub const MOST_UNPACKED: u64 = 1_000_000;
+pub const MOST_LISTED: usize = 100_000;
+
 /// How many names are tried for a file on its way in before it is given up on.
 const PART_TRIES: u32 = 16;
 
@@ -224,11 +231,20 @@ impl ServerDir {
         }
     }
 
-    /// What is in a folder: folders first, then by name.
+    /// What is in a folder: folders first, then by name. The error is
+    /// `QuotaExceeded` for a folder with more than [`MOST_LISTED`] in it.
     pub fn list(&self, path: &str) -> io::Result<Vec<Entry>> {
+        self.list_within(path, MOST_LISTED)
+    }
+
+    /// As [`ServerDir::list`], for a folder of at most `most` names.
+    fn list_within(&self, path: &str, most: usize) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
         for entry in self.dir.read_dir(at(path)?)? {
             let entry = entry?;
+            if entries.len() >= most {
+                return Err(io::ErrorKind::QuotaExceeded.into());
+            }
             // Gone between being listed and being asked about.
             let Ok(metadata) = entry.metadata() else {
                 continue;
@@ -517,6 +533,8 @@ impl ServerDir {
             files: self,
             folder: PathBuf::new(),
             left: self.free()?.saturating_sub(keep_free),
+            // A backup is what a server's folder held, however much that was.
+            entries: u64::MAX,
             made: HashSet::new(),
             done: Unpacked {
                 files: 0,
@@ -531,9 +549,15 @@ impl ServerDir {
     /// Zstandard, into the folder it is in, over what is there by the same
     /// names. Which it is, is read off its first bytes and not off its name:
     /// `Unsupported` if it is none of them. The error is `StorageFull` once
-    /// more than `at_most` bytes would have been written; what was unpacked
-    /// until then stays.
+    /// more than `at_most` bytes would have been written, and `QuotaExceeded`
+    /// once more than [`MOST_UNPACKED`] files, folders and links would have
+    /// been made; what was unpacked until then stays.
     pub fn unpack(&self, archive: &str, at_most: u64) -> io::Result<Unpacked> {
+        self.unpack_within(archive, at_most, MOST_UNPACKED)
+    }
+
+    /// As [`ServerDir::unpack`], for an archive of at most `entries` entries.
+    fn unpack_within(&self, archive: &str, at_most: u64, entries: u64) -> io::Result<Unpacked> {
         let folder = inside(archive)?
             .parent()
             .unwrap_or(Path::new(NO_PARENT))
@@ -546,6 +570,7 @@ impl ServerDir {
             files: self,
             folder,
             left: at_most,
+            entries,
             made: HashSet::new(),
             done: Unpacked {
                 files: 0,
@@ -685,6 +710,8 @@ struct Unpacking<'a> {
     folder: PathBuf,
     /// How many more bytes may be written.
     left: u64,
+    /// How many more entries may be gone through.
+    entries: u64,
     /// The folders seen to so far, so that each is made and given away once.
     made: HashSet<PathBuf>,
     done: Unpacked,
@@ -770,9 +797,19 @@ impl Unpacking<'_> {
         }
     }
 
+    /// Counts one more entry, or refuses the one that is one too many.
+    fn one_more(&mut self) -> io::Result<()> {
+        self.entries = self
+            .entries
+            .checked_sub(1)
+            .ok_or(io::ErrorKind::QuotaExceeded)?;
+        Ok(())
+    }
+
     fn zip(&mut self, file: impl Read + Seek) -> io::Result<()> {
         let mut archive = zip::ZipArchive::new(file)?;
         for index in 0..archive.len() {
+            self.one_more()?;
             let mut entry = archive.by_index(index)?;
             let place = entry.enclosed_name().and_then(|name| self.place(&name));
             let done = match place {
@@ -794,6 +831,7 @@ impl Unpacking<'_> {
     fn tar(&mut self, from: impl Read) -> io::Result<()> {
         let mut archive = tar::Archive::new(from);
         for entry in archive.entries()? {
+            self.one_more()?;
             let mut entry = entry?;
             let place = self.place(&entry.path()?);
             let kind = entry.header().entry_type();
@@ -949,6 +987,30 @@ mod tests {
         assert_eq!(mode & 0o777, 0o750);
         // Nothing of the writing is left beside it.
         assert!(!names(&dir, "").iter().any(|name| name.ends_with(".part")));
+    }
+
+    #[test]
+    fn an_archive_and_a_folder_of_more_than_is_taken_at_once_are_stopped_there() {
+        let (_scratch, dir) = scratch();
+        for name in ["a", "b", "c", "d"] {
+            dir.write(&format!("many/{name}.txt"), "").unwrap();
+        }
+        // A folder of four is listed whole, and not as one of three at the most.
+        assert_eq!(dir.list("many").unwrap().len(), 4);
+        let stopped = dir.list_within("many", 3).unwrap_err();
+        assert_eq!(stopped.kind(), io::ErrorKind::QuotaExceeded);
+
+        // Packed, it is five entries: the folder, and what is in it.
+        dir.pack("", &["many".to_owned()], "many.tar.gz", 1 << 20)
+            .unwrap();
+        dir.remove("many").unwrap();
+        let stopped = dir.unpack_within("many.tar.gz", 1 << 20, 3).unwrap_err();
+        assert_eq!(stopped.kind(), io::ErrorKind::QuotaExceeded);
+        // What was unpacked until then stays: the folder, and two of the four.
+        assert_eq!(names(&dir, "many").len(), 2);
+        let all = dir.unpack_within("many.tar.gz", 1 << 20, 5).unwrap();
+        assert_eq!(all.files, 4);
+        assert_eq!(names(&dir, "many").len(), 4);
     }
 
     #[test]

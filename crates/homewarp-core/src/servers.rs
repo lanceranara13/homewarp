@@ -734,17 +734,30 @@ async fn change_server(
         "Stop this server before changing it.",
     ));
     accounts::may(&state.db, &who, id, Some(Permission::Settings)).await?;
-    type Row = (String, String, i64, Option<i64>, i64, String, String);
+    type Row = (
+        String,
+        String,
+        i64,
+        Option<i64>,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+    );
     let found: Option<Row> = sqlx::query_as(
         "SELECT servers.uuid, templates.definition, servers.installed, servers.gate_id,
-                servers.port, servers.protocol, servers.ports
+                servers.port, servers.protocol, servers.ports, servers.memory_mb,
+                servers.cpu_percent, servers.variables
          FROM servers JOIN templates ON templates.id = servers.template_id
          WHERE servers.id = ?",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
-    let (uuid, definition, installed, has, port, protocol, ports) = found.ok_or(MISSING)?;
+    let (uuid, definition, installed, has, port, protocol, ports, memory_mb, cpu_percent, set) =
+        found.ok_or(MISSING)?;
     let template = templates::read(&definition)?;
     let checked = check(&template, settings)?.apart(&state)?;
     // Where it is reached is the owner's to say. A port is opened on this
@@ -761,6 +774,36 @@ async fn change_server(
     if !who.owner && !as_it_is {
         return Err(Problem::Forbidden(
             "Only the owner of this Homewarp changes a server's ports, or the VPS it is reached through.",
+        ));
+    }
+    // How much of this machine a server may use is the owner's to say as
+    // well: it is taken from every other server, and from the machine.
+    let within =
+        i64::from(checked.memory_mb) == memory_mb && i64::from(checked.cpu_percent) == cpu_percent;
+    if !who.owner && !within {
+        return Err(Problem::Forbidden(
+            "Only the owner of this Homewarp changes how much memory or processor a server may use.",
+        ));
+    }
+    // And so is what its template does not leave to a user: an egg says of
+    // each of its variables whether a user may change it, and writes the
+    // rules of the others for whoever runs the panel.
+    let set: Vec<(String, String)> =
+        serde_json::from_str(&set).context("reading a server's variables")?;
+    let left_alone = template
+        .variables
+        .iter()
+        .filter(|variable| !variable.user_editable)
+        .all(|variable| {
+            let of = |values: &[(String, String)]| {
+                let found = values.iter().find(|(env, _)| *env == variable.env);
+                found.map_or(variable.default.clone(), |(_, value)| value.clone())
+            };
+            of(&set) == of(&checked.variables)
+        });
+    if !who.owner && !left_alone {
+        return Err(Problem::Forbidden(
+            "Only the owner of this Homewarp changes what a template does not leave to its users to set.",
         ));
     }
     // A running server was started as it was. Changed under itself, it would

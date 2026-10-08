@@ -177,14 +177,11 @@ impl Open {
     /// connections open and saying nothing keeps nobody else out.
     fn enter_at(&self, from: IpAddr, now: u64) -> Option<Place<'_>> {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-        let from_there = held.values().filter(|held| held.from == from).count();
         // Where the Gate stands in for whoever comes through it, its one
-        // address is everybody on the internet.
-        let most = match tunnel::is_gate(from) {
-            true => OPEN,
-            false => OPEN_FROM_ONE,
-        };
-        if from_there >= most as usize {
+        // address is everybody on the internet. It has no share of its own:
+        // the room is all that has an end for it, and the room makes way.
+        let from_there = held.values().filter(|held| held.from == from).count();
+        if !tunnel::is_gate(from) && from_there >= OPEN_FROM_ONE as usize {
             return None;
         }
         if held.len() >= OPEN as usize {
@@ -576,6 +573,20 @@ mod tests {
         assert_eq!(open.held.lock().unwrap().len(), 1);
         drop(came);
         assert!(open.held.lock().unwrap().is_empty());
+
+        // Where a Gate stands in for everybody, its one address fills the
+        // room by itself, and the same holds of it: nobody is kept out by
+        // connections that say nothing.
+        let gate = IpAddr::V4(Ipv4Addr::new(10, 213, 77, 1));
+        let all: Vec<_> = (0..OPEN)
+            .map(|_| open.enter_at(gate, 1_000).unwrap())
+            .collect();
+        assert!(open.enter_at(gate, 1_000 + quiet - 1).is_none());
+        let came = open.enter_at(gate, 1_000 + quiet).unwrap();
+        let held = open.held.lock().unwrap();
+        assert_eq!(held.len(), OPEN as usize);
+        assert!(held.contains_key(&came.id));
+        assert!(!held.contains_key(&all[0].id));
     }
 
     #[tokio::test]

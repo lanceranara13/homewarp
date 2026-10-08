@@ -622,13 +622,46 @@ were changed:
   now, the connection that has been silent longest, for ten seconds at the least, makes
   way for the one that has just come.
 
-Left as it is, and worth knowing: an account with Backups can download a backup, which
-is every file of the server, without Files; an account with Settings sets a server's
-memory and every variable of its template, whether the egg marks one as the user's to
-change or not; the limits on new connections in the Gate's table stop limiting while
-their lists of addresses are full; the Gate's own door answers on the VPS's public
-interface to a neighbour on the same segment, and is kept by its token alone; an archive
-is held to the bytes it unpacks to and not to the number of its files.
+What that pass left as worth knowing was then changed too:
+
+- *Backups let an account take every file away.* Downloading a backup asks for Files as
+  well as Backups now. Making one and putting one back ask for Backups, as before.
+- *Settings was more than it said.* An account with Settings changes a server's name, its
+  image, when it sleeps, and the variables its template marks as a user's to set. How
+  much memory and processor it may use, and the variables a template keeps for whoever
+  runs the panel, are the owner's, as its ports and its VPS already were.
+- *The Gate's limits stopped limiting when their lists were full.* New connections are
+  counted by address in a list of 65,535. An address there is no room for is now counted
+  with every other such, and all of those together get what one address gets. The same
+  for new SSH connections to a guarded VPS.
+- *The Gate's door answered on the public interface.* A machine answers for each of its
+  addresses on all of its interfaces, so a neighbour on the VPS's own network could reach
+  the door, and only its token kept it. What arrives on the public interface for the
+  tunnel's addresses is dropped now.
+- *An archive was held to its bytes and not to the number of its files, and a folder was
+  listed whole.* A million entries is the most one archive is unpacked into, and a
+  hundred thousand names the most one folder is listed with.
+- *Sixty-four connections that said nothing kept a sleeping server asleep.* One more
+  than a stand-in listens to takes the place of the one it has listened to longest.
+
+And the changes of the first pass were read as the rest had been. Two of them did not
+hold as written, and one of this pass's own did not:
+
+- *Four passwords at a time, unless whoever asked went away.* The turn was given back
+  when the request ended, and the hashing went on: asking and leaving, over and over,
+  ran any number at once. The turn goes with the work now and comes back when it is done.
+- *A browser stayed known to an account after its password was changed.* A known
+  browser's wrong tries are counted by themselves, so whoever had the old password kept
+  tries of their own. A change of password forgets the browsers the account was known by.
+- *Where a Gate stands in for players' addresses, its one address was still turned away
+  at a full TLS door.* It has no share of its own now: the room makes way for it as for
+  anybody.
+
+Left as it is, and worth knowing: a schedule made before schedules knew whose they were
+runs as it did, with nobody's leave held against it, until it is changed; an archive of
+very many files still costs a place for each up to the million; a flood of new
+connections from more addresses than the Gate's list holds is held to one address's
+allowance in all, and an honest player who is not in the list yet waits with it.
 
 ## 7. Performance
 
